@@ -1,0 +1,308 @@
+From 23bd7072d2aaa9bfd21a0bceeac5dfedd242ebcb Mon Sep 17 00:00:00 2001
+From: Ren Wang <iamwrm@gmail.com>
+Date: Sat, 18 Jul 2026 23:37:47 +0800
+Subject: [PATCH] Support Codex multi-turn assistant history and streamed tool
+ calls
+
+Codex first turns succeeded, but later turns retried as reasoning-only:
+prior assistant history was sent as easy-input messages instead of
+completed output messages, and complete function calls delivered only in
+response.output_item.done vanished because terminal response.output is
+empty on this backend.
+
+Normalize assistant history to pi's completed output-message shape, drop
+display-only reasoning entries with empty ids, accumulate reasoning summary
+deltas, and synthesize streamed function calls into both ToolCallDelta
+events and the final ConversationResponse. This allows tool loops and
+subsequent conversation turns to complete normally.
+---
+ crates/codegen/xai-grok-sampler/src/client.rs | 92 ++++++++++++++++++-
+ .../xai-grok-sampler/src/stream/responses.rs  | 87 +++++++++++++++++-
+ 2 files changed, 172 insertions(+), 7 deletions(-)
+
+diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
+index c4455d7..876914a 100644
+--- a/crates/codegen/xai-grok-sampler/src/client.rs
++++ b/crates/codegen/xai-grok-sampler/src/client.rs
+@@ -370,8 +370,26 @@ fn apply_chatgpt_codex_request_shape(body: &mut serde_json::Value) {
+             if is_system && let Some(text) = extract_input_message_text(item) {
+                 instructions_parts.push(text);
+             }
+-            !is_system
++            // Streaming summary fallback creates a display-only reasoning
++            // sibling with no upstream id/signature. Codex requires reasoning
++            // input ids to be non-empty and pi likewise replays reasoning only
++            // when it has a signed reasoning item.
++            let is_unsigned_reasoning = item.get("type").and_then(|v| v.as_str())
++                == Some("reasoning")
++                && item
++                    .get("id")
++                    .and_then(|v| v.as_str())
++                    .is_none_or(str::is_empty);
++            !is_system && !is_unsigned_reasoning
+         });
++        // The ChatGPT Codex backend expects prior assistant turns in output
++        // message form, not the Responses API's permissive easy-input form.
++        // The first turn has no assistant history (and therefore works either
++        // way); without this normalization subsequent turns may emit reasoning
++        // but no final answer and get retried as empty.
++        for (index, item) in input.iter_mut().enumerate() {
++            normalize_codex_assistant_history_item(item, index);
++        }
+     }
+     if !instructions_parts.is_empty() {
+         obj.insert(
+@@ -400,6 +418,65 @@ fn apply_chatgpt_codex_request_shape(body: &mut serde_json::Value) {
+     obj.remove("top_p");
+ }
+ 
++/// Convert a prior assistant easy-input message into the completed output
++/// message shape used by pi/the Codex client:
++///
++/// `{type:message, role:assistant, content:[{type:output_text, ...}],
++///   status:completed, id:msg_grok_N}`.
++fn normalize_codex_assistant_history_item(item: &mut serde_json::Value, index: usize) {
++    let Some(message) = item.as_object_mut() else {
++        return;
++    };
++    if message.get("role").and_then(|r| r.as_str()) != Some("assistant") {
++        return;
++    }
++    let Some(content) = message.get("content").cloned() else {
++        return;
++    };
++    let output_parts: Vec<serde_json::Value> = match content {
++        serde_json::Value::String(text) if !text.is_empty() => {
++            vec![codex_output_text_part(text)]
++        }
++        serde_json::Value::Array(parts) => parts
++            .into_iter()
++            .filter_map(|part| {
++                let text = part
++                    .get("text")
++                    .and_then(|v| v.as_str())
++                    .filter(|text| !text.is_empty())?;
++                Some(codex_output_text_part(text.to_string()))
++            })
++            .collect(),
++        _ => Vec::new(),
++    };
++    if output_parts.is_empty() {
++        return;
++    }
++    message.insert(
++        "content".to_string(),
++        serde_json::Value::Array(output_parts),
++    );
++    message.insert(
++        "type".to_string(),
++        serde_json::Value::String("message".to_string()),
++    );
++    message.insert(
++        "status".to_string(),
++        serde_json::Value::String("completed".to_string()),
++    );
++    message
++        .entry("id".to_string())
++        .or_insert_with(|| serde_json::Value::String(format!("msg_grok_{index}")));
++}
++
++fn codex_output_text_part(text: String) -> serde_json::Value {
++    serde_json::json!({
++        "type": "output_text",
++        "text": text,
++        "annotations": [],
++    })
++}
++
+ /// Text of an easy-input message item: string content or the concatenated
+ /// `text` fields of its content parts.
+ fn extract_input_message_text(item: &serde_json::Value) -> Option<String> {
+@@ -2830,6 +2907,8 @@ mod tests {
+             "model": "gpt-5.5",
+             "input": [
+                 {"type": "message", "role": "system", "content": "You are Grok."},
++                {"type": "message", "role": "assistant", "content": "prior answer"},
++                {"type": "reasoning", "id": "", "summary": [{"type": "summary_text", "text": "display only"}]},
+                 {"type": "message", "role": "user", "content": "hi"},
+             ],
+             "store": true,
+@@ -2841,8 +2920,15 @@ mod tests {
+         apply_chatgpt_codex_request_shape(&mut body);
+         assert_eq!(body["instructions"], "You are Grok.");
+         let input = body["input"].as_array().unwrap();
+-        assert_eq!(input.len(), 1);
+-        assert_eq!(input[0]["role"], "user");
++        assert_eq!(input.len(), 2);
++        assert_eq!(input[0]["role"], "assistant");
++        assert_eq!(input[0]["type"], "message");
++        assert_eq!(input[0]["status"], "completed");
++        assert_eq!(input[0]["id"], "msg_grok_0");
++        assert_eq!(input[0]["content"][0]["type"], "output_text");
++        assert_eq!(input[0]["content"][0]["text"], "prior answer");
++        assert_eq!(input[0]["content"][0]["annotations"], serde_json::json!([]));
++        assert_eq!(input[1]["role"], "user");
+         assert_eq!(body["store"], false);
+         assert_eq!(body["reasoning"]["summary"], "auto");
+         assert_eq!(body["reasoning"]["effort"], "high");
+diff --git a/crates/codegen/xai-grok-sampler/src/stream/responses.rs b/crates/codegen/xai-grok-sampler/src/stream/responses.rs
+index 360e3f7..36dc738 100644
+--- a/crates/codegen/xai-grok-sampler/src/stream/responses.rs
++++ b/crates/codegen/xai-grok-sampler/src/stream/responses.rs
+@@ -4,6 +4,7 @@
+ //! [`SamplingEvent`]s. Pure: no I/O, no shell coupling.
+ 
+ use std::collections::BTreeMap;
++use std::sync::Arc;
+ use std::time::{Duration, Instant};
+ 
+ use futures_util::StreamExt;
+@@ -11,7 +12,7 @@ use futures_util::stream::{BoxStream, Stream};
+ 
+ use xai_grok_sampling_types::{
+     ConversationItem, ConversationResponse, ResponseModelMetadata, SamplingError, StopReason,
+-    TokenUsage, rs,
++    TokenUsage, ToolCall, rs,
+ };
+ 
+ use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingEvent};
+@@ -134,6 +135,9 @@ pub fn stream_responses<'a>(
+         // later `ResponseFunctionCallArgumentsDelta` events
+         // look up `output_index` here to find the matching `tool_index`.
+         let mut output_to_tool_index: BTreeMap<u32, u32> = BTreeMap::new();
++        // Complete streamed function calls keyed by Responses output_index.
++        // ChatGPT Codex may omit them from the terminal response output.
++        let mut streamed_tool_calls: BTreeMap<u32, rs::FunctionToolCall> = BTreeMap::new();
+         let mut next_tool_index: u32 = 0;
+ 
+         let mut stream = raw_stream;
+@@ -244,6 +248,7 @@ pub fn stream_responses<'a>(
+                             };
+                         }
+                         chunk_index += 1;
++                        reasoning_acc.push_str(&delta);
+                         yield SamplingEvent::ChannelToken {
+                             request_id: request_id.clone(),
+                             channel: SamplingChannel::Reasoning,
+@@ -280,13 +285,17 @@ pub fn stream_responses<'a>(
+                         let tool_index = next_tool_index;
+                         next_tool_index += 1;
+                         output_to_tool_index.insert(added_event.output_index, tool_index);
++                        let initial_arguments = (!fc.arguments.is_empty()).then(|| fc.arguments.clone());
++                        let call_id = fc.call_id.clone();
++                        let name = fc.name.clone();
++                        streamed_tool_calls.insert(added_event.output_index, fc);
+ 
+                         yield SamplingEvent::ToolCallDelta {
+                             request_id: request_id.clone(),
+                             tool_index,
+-                            id: Some(fc.call_id),
+-                            name: Some(fc.name),
+-                            arguments_delta: None,
++                            id: Some(call_id),
++                            name: Some(name),
++                            arguments_delta: initial_arguments,
+                         };
+                     }
+                 }
+@@ -299,6 +308,9 @@ pub fn stream_responses<'a>(
+                         && let Some(&tool_index) =
+                             output_to_tool_index.get(&args_event.output_index)
+                     {
++                        if let Some(call) = streamed_tool_calls.get_mut(&args_event.output_index) {
++                            call.arguments.push_str(&delta);
++                        }
+                         yield SamplingEvent::ToolCallDelta {
+                             request_id: request_id.clone(),
+                             tool_index,
+@@ -379,6 +391,40 @@ pub fn stream_responses<'a>(
+                 // For CustomToolCall this includes x_search results.
+                 ResponseStreamEvent::ResponseOutputItemDone(done_event) => {
+                     match &done_event.item {
++                        // Codex may send a complete function call only in the
++                        // done event. Emit it and retain it for final-response
++                        // synthesis. If added/deltas already arrived, use done
++                        // only to fill the canonical completed call.
++                        rs::OutputItem::FunctionCall(fc) => {
++                            let output_index = done_event.output_index;
++                            if let Some(&tool_index) = output_to_tool_index.get(&output_index) {
++                                let prior_args_empty = streamed_tool_calls
++                                    .get(&output_index)
++                                    .is_none_or(|prior| prior.arguments.is_empty());
++                                if prior_args_empty && !fc.arguments.is_empty() {
++                                    yield SamplingEvent::ToolCallDelta {
++                                        request_id: request_id.clone(),
++                                        tool_index,
++                                        id: None,
++                                        name: None,
++                                        arguments_delta: Some(fc.arguments.clone()),
++                                    };
++                                }
++                            } else {
++                                let tool_index = next_tool_index;
++                                next_tool_index += 1;
++                                output_to_tool_index.insert(output_index, tool_index);
++                                yield SamplingEvent::ToolCallDelta {
++                                    request_id: request_id.clone(),
++                                    tool_index,
++                                    id: Some(fc.call_id.clone()),
++                                    name: Some(fc.name.clone()),
++                                    arguments_delta: (!fc.arguments.is_empty())
++                                        .then(|| fc.arguments.clone()),
++                                };
++                            }
++                            streamed_tool_calls.insert(output_index, fc.clone());
++                        }
+                         rs::OutputItem::WebSearchCall(ws) => {
+                             let result = serde_json::to_value(ws).ok();
+                             yield SamplingEvent::BackendToolCallCompleted {
+@@ -494,6 +540,7 @@ pub fn stream_responses<'a>(
+         // Splice policy lives in `inject_streaming_reasoning_fallback`.
+         let mut items = xai_grok_sampling_types::response_to_conversation_items(response);
+         inject_streaming_text_fallback(&mut items, text_acc);
++        inject_streaming_tool_fallback(&mut items, streamed_tool_calls);
+         xai_grok_sampling_types::inject_streaming_reasoning_fallback(&mut items, reasoning_acc);
+ 
+         let has_tool_calls = items.iter().any(|i| match i {
+@@ -547,6 +594,38 @@ pub fn stream_responses<'a>(
+     }
+ }
+ 
++/// Preserve complete function calls observed in stream events when the
++/// terminal response omits its output. Typed terminal tool calls win.
++fn inject_streaming_tool_fallback(
++    items: &mut Vec<ConversationItem>,
++    streamed: BTreeMap<u32, rs::FunctionToolCall>,
++) {
++    if streamed.is_empty()
++        || items
++            .iter()
++            .any(|item| matches!(item, ConversationItem::Assistant(a) if !a.tool_calls.is_empty()))
++    {
++        return;
++    }
++    let tool_calls: Vec<ToolCall> = streamed
++        .into_values()
++        .map(|call| ToolCall {
++            id: Arc::from(call.call_id),
++            name: call.name,
++            arguments: Arc::from(call.arguments),
++        })
++        .collect();
++    if let Some(ConversationItem::Assistant(assistant)) = items
++        .iter_mut()
++        .rev()
++        .find(|item| matches!(item, ConversationItem::Assistant(_)))
++    {
++        assistant.tool_calls = tool_calls;
++    } else {
++        items.push(ConversationItem::assistant_tool_calls(tool_calls));
++    }
++}
++
+ /// Preserve text observed in stream deltas when the terminal response omits
+ /// its assembled output. Prefer typed terminal output whenever it exists.
+ fn inject_streaming_text_fallback(items: &mut Vec<ConversationItem>, text: String) {
+-- 
+2.50.1 (Apple Git-155)
+
