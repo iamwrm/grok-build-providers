@@ -1,20 +1,11 @@
-From 4c791ecfe1708cd8cc5a21d38f68c489eee8df35 Mon Sep 17 00:00:00 2001
+From 9dce0c3bd7066385c18d59f96f9b9ff973c08492 Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
-Date: Sat, 18 Jul 2026 21:48:23 +0800
-Subject: [PATCH 1/5] Add OpenAI (ChatGPT plan) OAuth: flow, storage, and CLI
+Date: Sat, 18 Jul 2026 23:48:11 +0800
+Subject: [PATCH 1/5] Add OpenAI ChatGPT-plan OAuth flow, storage, and CLI
 
-Reimplements the ChatGPT-plan OAuth flow (as used by the official Codex
-CLI and pi's openai-codex provider) in Rust:
-
-- crates/codegen/xai-grok-shell/src/auth/openai_codex.rs: PKCE
-  authorization-code flow against auth.openai.com with the fixed
-  loopback callback on port 1455 (plus stdin paste fallback), a
-  device-code flow for headless environments, token refresh with a
-  process-wide single-flight guard, and chatgpt_account_id extraction
-  from the access-token JWT.
-- Credentials stored in ~/.grok/openai_auth.json (0600), separate from
-  the xAI session in auth.json.
-- New CLI: grok openai login [--device-code] | logout | status.
+Port pi's OpenAI Codex PKCE browser and device-code authentication flows.
+Store the isolated refreshable credential in ~/.grok/openai_auth.json and
+expose grok openai login, logout, and status commands.
 ---
  crates/codegen/xai-grok-pager-bin/src/main.rs |  16 +
  crates/codegen/xai-grok-pager/src/app/cli.rs  |  25 +
@@ -107,7 +98,7 @@ index 5d8e262..5cb283f 100644
  pub(crate) mod single_flight;
 diff --git a/crates/codegen/xai-grok-shell/src/auth/openai_codex.rs b/crates/codegen/xai-grok-shell/src/auth/openai_codex.rs
 new file mode 100644
-index 0000000..3ea405c
+index 0000000..a29b66a
 --- /dev/null
 +++ b/crates/codegen/xai-grok-shell/src/auth/openai_codex.rs
 @@ -0,0 +1,734 @@
@@ -323,9 +314,7 @@ index 0000000..3ea405c
 +}
 +
 +/// Refresh the access token with the stored refresh token.
-+pub async fn refresh_credential(
-+    refresh_token: &str,
-+) -> anyhow::Result<OpenAiCodexCredential> {
++pub async fn refresh_credential(refresh_token: &str) -> anyhow::Result<OpenAiCodexCredential> {
 +    let response = reqwest::Client::new()
 +        .post(token_url())
 +        .form(&[
@@ -492,10 +481,7 @@ index 0000000..3ea405c
 +        })
 +    } else {
 +        let error = params.get("error").cloned().unwrap_or_default();
-+        let desc = params
-+            .get("error_description")
-+            .cloned()
-+            .unwrap_or_default();
++        let desc = params.get("error_description").cloned().unwrap_or_default();
 +        Err(if desc.is_empty() {
 +            error
 +        } else {
@@ -742,7 +728,10 @@ index 0000000..3ea405c
 +/// `grok openai logout`
 +pub fn run_cli_logout() -> anyhow::Result<()> {
 +    if clear_credential()? {
-+        eprintln!("Signed out of OpenAI; removed {}.", credential_path().display());
++        eprintln!(
++            "Signed out of OpenAI; removed {}.",
++            credential_path().display()
++        );
 +    } else {
 +        eprintln!("No OpenAI credential to remove.");
 +    }
@@ -760,7 +749,11 @@ index 0000000..3ea405c
 +            println!("  account_id: {}", cred.account_id);
 +            println!(
 +                "  access token: {}expired (expires {expires})",
-+                if cred.is_expired_or_near() { "" } else { "not " }
++                if cred.is_expired_or_near() {
++                    ""
++                } else {
++                    "not "
++                }
 +            );
 +            println!("  credential file: {}", credential_path().display());
 +        }
@@ -798,10 +791,8 @@ index 0000000..3ea405c
 +
 +    #[test]
 +    fn parses_pasted_redirect_url_code_hash_state_and_bare_code() {
-+        let cb = parse_pasted_input(
-+            "http://localhost:1455/auth/callback?code=abc&state=xyz",
-+        )
-+        .unwrap();
++        let cb =
++            parse_pasted_input("http://localhost:1455/auth/callback?code=abc&state=xyz").unwrap();
 +        assert_eq!((cb.code.as_str(), cb.state.as_str()), ("abc", "xyz"));
 +
 +        let cb = parse_pasted_input("abc#xyz").unwrap();

@@ -2,7 +2,7 @@
 
 **Status:** implemented and exported
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
-**Deliverable:** seven-patch series in `patches/grok-build/`
+**Deliverable:** five-patch series in `patches/grok-build/`
 **Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `98c3b24`
 
 ## Goal
@@ -85,19 +85,19 @@ grok-build already has almost every seam we need:
 
 ## Implementation outcome
 
-Implemented as seven commits/patches:
+Implemented as five cohesive commits/patches:
 
 1. OAuth flow, credential storage/refresh, and `grok openai login|logout|status`.
-2. `AuthScheme::ChatgptOauth`, live bearer/header wiring, and Codex Responses
-   request reshaping.
+2. Complete Codex transport contract: `AuthScheme::ChatgptOauth`, live
+   bearer/header wiring, request shaping, multi-turn history normalization,
+   and streamed text/reasoning/tool-call assembly.
 3. Credential-gated built-in `openai-codex/*` model catalog.
 4. pi-style `/model provider/model:effort` and `-m provider/model:effort` parsing.
-5. Upstream user-guide documentation.
-6. Streamed-text terminal fallback: preserve Codex text deltas when the
-   terminal response omits assembled output, preventing false
-   `no_visible_content` retries.
-7. Multi-turn/tool-loop compatibility: normalize prior assistant output,
-   preserve streamed function calls, and omit unsigned reasoning replay.
+5. Upstream user-guide documentation only.
+
+The series is organized by subsystem. All Codex response compatibility
+behavior is introduced in patch 0002, so every later patch can rely on a
+complete transport rather than repairing it.
 
 Normal users make **no config changes**: run `grok openai login` once, then
 switch in-app with `/model openai-codex/gpt-5.5:xhigh` or Ctrl+M.
@@ -125,7 +125,7 @@ Codex body differences are applied in `client.rs`.
 - CLI: `grok openai login [--device-code]`, `grok openai logout`,
   `grok openai status` wired in `xai-grok-pager/src/app/cli.rs`.
 
-### Patch 0002 — credential wiring + Codex Responses request shape
+### Patch 0002 — complete Codex Responses transport
 
 - Add `AuthScheme::ChatgptOauth`, exposed to custom `[model.*]` entries as
   `auth_scheme = "chatgpt_oauth"`.
@@ -140,6 +140,17 @@ Codex body differences are applied in `client.rs`.
   - move system input items to `instructions`;
   - set `reasoning.summary = "auto"`;
   - strip `max_output_tokens`, `temperature`, and `top_p`, which Codex rejects.
+- Normalize prior assistant history as completed Responses output messages with
+  `output_text`, `status`, and stable synthetic ids, matching pi's wire shape.
+- Do not replay display-only reasoning summaries that lack an authentic
+  upstream reasoning id/signature.
+- Assemble streamed output defensively because Codex can omit assembled items
+  from the terminal response:
+  - preserve `response.output_text.delta` and done-only visible text;
+  - accumulate reasoning-summary deltas for display;
+  - accept complete function calls from `response.output_item.done`;
+  - synthesize streamed text and function calls into the final typed response
+    so normal completion classification and multi-loop tool execution work.
 
 ### Patch 0003 — built-in credential-gated model catalog
 
@@ -180,42 +191,14 @@ grok -m openai-codex/gpt-5.5:xhigh -p "hello"
 
 ### Patch 0005 — user documentation
 
+This patch changes documentation only:
+
 - Document `grok openai login|status|logout`, browser/device-code flows,
   credential isolation, zero-config catalog behavior, and
   `/model openai-codex/gpt-5.5:xhigh`.
 - Clarify API-key OpenAI Responses support versus ChatGPT OAuth.
 - In this repo, add `configs/openai-codex.toml` as an advanced example only;
   normal usage requires no config edit.
-
-### Patch 0006 — streamed terminal-output fallback
-
-Session `019f75c4-c801-78c2-ae47-9aaf05ff5952` exposed a compatibility gap:
-Codex streamed visible `response.output_text.delta` frames, but its terminal
-response omitted the assembled `output` message. Grok rendered the answer,
-then classified the final response as `no_visible_content` and retried it.
-
-The Responses stream transformer now accumulates text deltas and synthesizes
-(or fills) the final Assistant item only when typed terminal output has no
-visible text. It also handles providers that send only
-`response.output_text.done`, without duplicating normal delta streams.
-
-### Patch 0007 — multi-turn history and streamed tool calls
-
-Session `019f75cd-ccc9-72e3-84e0-35df29351ec2` succeeded on its first greeting
-but retried every later turn as empty/reasoning-only. Three Codex differences
-combined:
-
-- Prior assistant history must be replayed as completed output messages with
-  `output_text` content and a stable id (pi's form), not easy-input messages.
-- Codex may deliver a complete function call only in
-  `response.output_item.done`, while omitting it from terminal `output`.
-- Display-only streamed reasoning summaries have no authentic reasoning id;
-  replaying a synthesized `id: ""` is rejected by Codex.
-
-Patch 0007 normalizes assistant history, drops unsigned reasoning from Codex
-input, accumulates reasoning summaries, and synthesizes streamed function calls
-into both live tool-call events and the final response. A fresh two-turn test
-then completed a three-loop tool-driven answer with zero retries.
 
 ## Files affected (summary)
 
@@ -231,7 +214,7 @@ then completed a three-loop tool-driven answer with zero retries.
 | grok-build | `crates/codegen/xai-grok-sampler/src/client.rs` | bearer handling + Codex request shape |
 | grok-build | `crates/codegen/xai-grok-pager/src/slash/commands/model.rs` | `provider/model:level` parsing |
 | grok-build | `crates/codegen/xai-grok-pager/docs/user-guide/{02,04,11}-*.md` | docs |
-| this repo | `patches/grok-build/0001..0007-*.patch` | durable patch series |
+| this repo | `patches/grok-build/0001..0005-*.patch` | durable patch series |
 | this repo | `configs/openai-codex.toml`, `docs/` | sample config, this doc |
 
 ## Non-goals (v1)
@@ -250,10 +233,10 @@ then completed a three-loop tool-driven answer with zero retries.
 - `cargo run -p xai-grok-pager-bin -- openai --help` exposes
   `login|logout|status` as expected.
 - `git diff 98c3b24..HEAD --check` passes.
-- All seven exported patches apply cleanly with `git am` to a fresh detached
+- All five exported patches apply cleanly with `git am` to a fresh detached
   worktree at `98c3b24`.
 - Live release-binary inference with `openai-codex/gpt-5.6-sol:high` returned
-  one answer and exited successfully without retries after patch 0006.
+  one answer and exited successfully without retries.
 - Live two-turn resume session `c8fb606f-6b4d-4d8e-8e9e-48080c2bd3d0`
   completed both turns, including three second-turn model loops with local tool
   calls; every loop completed on attempt 1 with zero inference retries.

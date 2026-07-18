@@ -1,24 +1,18 @@
-From c28ec8953d669fbc11827cb047c4f9cf3ea0bbfa Mon Sep 17 00:00:00 2001
+From b37377b00e2536133c348f731916d4bb9f8a6a80 Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
-Date: Sat, 18 Jul 2026 22:17:54 +0800
-Subject: [PATCH 3/5] Add built-in OpenAI Codex model catalog (openai-codex/*)
+Date: Sat, 18 Jul 2026 23:48:47 +0800
+Subject: [PATCH 3/5] Add built-in OpenAI Codex model catalog
 
-Registers pi's openai-codex catalog (gpt-5.3-codex-spark, gpt-5.4[-mini],
-gpt-5.5, gpt-5.6-luna/sol/terra) as built-in entries keyed
-openai-codex/<slug>, routed to https://chatgpt.com/backend-api/codex over
-the Responses API with auth_scheme = chatgpt_oauth and a low..xhigh
-reasoning-effort menu.
-
-Entries appear only when an OpenAI credential is stored (grok openai
-login), are inserted before [model.*] overrides (still user-overridable),
-and never clobber prefetched entries.
+Register credential-gated openai-codex/* entries backed by the ChatGPT
+Codex endpoint. Keep user model overrides authoritative and expose the
+supported reasoning-effort range without requiring config edits.
 ---
- .../xai-grok-shell/src/agent/config.rs        | 100 ++++++++++++++++++
+ .../xai-grok-shell/src/agent/config.rs        | 104 ++++++++++++++++++
  .../src/agent/config_model_override_parse.rs  |   1 +
- 2 files changed, 101 insertions(+)
+ 2 files changed, 105 insertions(+)
 
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index 2a3b6a1..054341e 100644
+index 88f01b0..1a11fcc 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
 @@ -3175,6 +3175,15 @@ pub fn resolve_model_list(
@@ -37,7 +31,7 @@ index 2a3b6a1..054341e 100644
      for (key, model_override) in &cfg.config_models {
          let had_base = resolved.contains_key(key);
          let base = resolved.shift_remove(key);
-@@ -3432,6 +3441,70 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
+@@ -3432,6 +3441,74 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
          })
          .collect()
  }
@@ -54,7 +48,11 @@ index 2a3b6a1..054341e 100644
 +    const CODEX_GPT_56_CONTEXT: u64 = 372_000;
 +    const CODEX_SPARK_CONTEXT: u64 = 128_000;
 +    let models: [(&str, &str, u64); 7] = [
-+        ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", CODEX_SPARK_CONTEXT),
++        (
++            "gpt-5.3-codex-spark",
++            "GPT-5.3 Codex Spark",
++            CODEX_SPARK_CONTEXT,
++        ),
 +        ("gpt-5.4", "GPT-5.4", CODEX_CONTEXT),
 +        ("gpt-5.4-mini", "GPT-5.4 mini", CODEX_CONTEXT),
 +        ("gpt-5.5", "GPT-5.5", CODEX_CONTEXT),
@@ -108,7 +106,7 @@ index 2a3b6a1..054341e 100644
  #[derive(Debug, Clone, Serialize, Deserialize)]
  pub struct ModelEntryConfig {
      /// Stable unique identifier for this catalog entry. When present,
-@@ -5889,6 +5962,33 @@ reasoning_effort = "low"
+@@ -5885,6 +5962,33 @@ reasoning_effort = "low"
      /// `try_resolve_model_credentials` — swaps it for the session token. BYOK
      /// (non-x.ai) own keys are preserved. (`try_resolve_model_credentials`
      /// loads global config, so this exercises its resolve + enforce core.)

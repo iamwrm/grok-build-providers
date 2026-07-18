@@ -1,26 +1,16 @@
-From 8ee9d9df95edcd2b83f04c2be7f7201bee5df57d Mon Sep 17 00:00:00 2001
+From 9646af6d3bf27dd96837339213d1b3987968b7bf Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
-Date: Sat, 18 Jul 2026 22:24:50 +0800
+Date: Sat, 18 Jul 2026 23:48:58 +0800
 Subject: [PATCH 4/5] Support pi-style provider/model:effort references
 
-Adds single-token model references such as:
-
-  /model openai-codex/gpt-5.5:xhigh
-  grok -m openai-codex/gpt-5.5:xhigh -p "hello"
-
-/model first attempts an exact full catalog match (preserving ids that
-contain colons), then splits on the last colon and resolves the suffix
-against the selected model's offered reasoning efforts. The existing
-/model <name> <effort> syntax remains supported.
-
-CLI -m uses the same last-colon rule for canonical effort suffixes;
-explicit --effort wins. Bare gpt-5.5 also resolves through the existing
-routing-slug fallback when unambiguous.
+Parse provider-qualified model references and optional reasoning effort in
+both -m and /model. Split only the last colon after first trying the exact
+model id, preserving models whose ids contain colons and existing syntax.
 ---
  crates/codegen/xai-grok-pager-bin/src/main.rs | 15 ++++-
- crates/codegen/xai-grok-pager/src/app/cli.rs  | 58 ++++++++++++++++++
+ crates/codegen/xai-grok-pager/src/app/cli.rs  | 55 +++++++++++++++++
  .../src/slash/commands/model.rs               | 59 +++++++++++++++++++
- 3 files changed, 129 insertions(+), 3 deletions(-)
+ 3 files changed, 126 insertions(+), 3 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager-bin/src/main.rs b/crates/codegen/xai-grok-pager-bin/src/main.rs
 index 919e02b..d90fc8d 100644
@@ -73,10 +63,10 @@ index 919e02b..d90fc8d 100644
                  best_of_n: args.best_of_n,
                  wait_for_background: !args.no_wait_for_background,
 diff --git a/crates/codegen/xai-grok-pager/src/app/cli.rs b/crates/codegen/xai-grok-pager/src/app/cli.rs
-index 533f338..aa1a243 100644
+index 533f338..5996b56 100644
 --- a/crates/codegen/xai-grok-pager/src/app/cli.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/cli.rs
-@@ -141,6 +141,30 @@ See ~/.grok/README.md for more information.
+@@ -141,6 +141,27 @@ See ~/.grok/README.md for more information.
      /// var is set.
      Dashboard,
  }
@@ -96,10 +86,7 @@ index 533f338..aa1a243 100644
 +        && !prefix.is_empty()
 +        && xai_grok_shell::sampling::types::parse_canonical_effort_token(suffix).is_some()
 +    {
-+        return (
-+            Some(prefix.to_string()),
-+            Some(suffix.to_ascii_lowercase()),
-+        );
++        return (Some(prefix.to_string()), Some(suffix.to_ascii_lowercase()));
 +    }
 +    (Some(model.to_string()), None)
 +}
@@ -107,7 +94,7 @@ index 533f338..aa1a243 100644
  /// Arguments for the `openai` subcommand.
  #[derive(Debug, clap::Args, Clone)]
  pub struct OpenaiArgs {
-@@ -1219,6 +1243,40 @@ mod tests {
+@@ -1219,6 +1240,40 @@ mod tests {
              PagerArgs::try_parse_from(["grok", "--trust-folder"]).expect("--trust-folder parses");
          assert!(alias.trust);
      }
