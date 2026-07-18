@@ -2,7 +2,7 @@
 
 **Status:** implemented and exported
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
-**Deliverable:** five-patch series in `patches/grok-build/`
+**Deliverable:** six-patch series in `patches/grok-build/`
 **Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `98c3b24`
 
 ## Goal
@@ -85,7 +85,7 @@ grok-build already has almost every seam we need:
 
 ## Implementation outcome
 
-Implemented as five commits/patches:
+Implemented as six commits/patches:
 
 1. OAuth flow, credential storage/refresh, and `grok openai login|logout|status`.
 2. `AuthScheme::ChatgptOauth`, live bearer/header wiring, and Codex Responses
@@ -93,6 +93,9 @@ Implemented as five commits/patches:
 3. Credential-gated built-in `openai-codex/*` model catalog.
 4. pi-style `/model provider/model:effort` and `-m provider/model:effort` parsing.
 5. Upstream user-guide documentation.
+6. Streamed-text terminal fallback: preserve Codex text deltas when the
+   terminal response omits assembled output, preventing false
+   `no_visible_content` retries.
 
 Normal users make **no config changes**: run `grok openai login` once, then
 switch in-app with `/model openai-codex/gpt-5.5:xhigh` or Ctrl+M.
@@ -182,6 +185,18 @@ grok -m openai-codex/gpt-5.5:xhigh -p "hello"
 - In this repo, add `configs/openai-codex.toml` as an advanced example only;
   normal usage requires no config edit.
 
+### Patch 0006 — streamed terminal-output fallback
+
+Session `019f75c4-c801-78c2-ae47-9aaf05ff5952` exposed a compatibility gap:
+Codex streamed visible `response.output_text.delta` frames, but its terminal
+response omitted the assembled `output` message. Grok rendered the answer,
+then classified the final response as `no_visible_content` and retried it.
+
+The Responses stream transformer now accumulates text deltas and synthesizes
+(or fills) the final Assistant item only when typed terminal output has no
+visible text. It also handles providers that send only
+`response.output_text.done`, without duplicating normal delta streams.
+
 ## Files affected (summary)
 
 | Repo | File | Change |
@@ -196,7 +211,7 @@ grok -m openai-codex/gpt-5.5:xhigh -p "hello"
 | grok-build | `crates/codegen/xai-grok-sampler/src/client.rs` | bearer handling + Codex request shape |
 | grok-build | `crates/codegen/xai-grok-pager/src/slash/commands/model.rs` | `provider/model:level` parsing |
 | grok-build | `crates/codegen/xai-grok-pager/docs/user-guide/{02,04,11}-*.md` | docs |
-| this repo | `patches/grok-build/0001..0005-*.patch` | durable patch series |
+| this repo | `patches/grok-build/0001..0006-*.patch` | durable patch series |
 | this repo | `configs/openai-codex.toml`, `docs/` | sample config, this doc |
 
 ## Non-goals (v1)
@@ -215,11 +230,13 @@ grok -m openai-codex/gpt-5.5:xhigh -p "hello"
 - `cargo run -p xai-grok-pager-bin -- openai --help` exposes
   `login|logout|status` as expected.
 - `git diff 98c3b24..HEAD --check` passes.
-- All five exported patches apply cleanly with `git am` to a fresh detached
+- All six exported patches apply cleanly with `git am` to a fresh detached
   worktree at `98c3b24`.
+- Live release-binary inference with `openai-codex/gpt-5.6-sol:high` returned
+  one answer and exited successfully without retries after patch 0006.
 
-Live browser/device login and inference require an interactive ChatGPT account
-and were not exercised by the automated run.
+Browser/device login itself was not repeated during the automated run; the
+existing stored ChatGPT credential was used for live inference.
 
 ## Decisions and deferred work
 
