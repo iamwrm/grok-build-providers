@@ -1,0 +1,438 @@
+From 7c9e7ba6b2649b3f2b0eb2e6042eacb336bf8ff2 Mon Sep 17 00:00:00 2001
+From: Ren Wang <iamwrm@gmail.com>
+Date: Sat, 18 Jul 2026 21:55:44 +0800
+Subject: [PATCH 2/5] Route chatgpt_oauth models through the OpenAI credential
+ + Codex request shape
+
+Adds AuthScheme::ChatgptOauth as a per-model credential source:
+
+- xai-grok-sampler: new AuthScheme variant (wire format = Bearer); when
+  set, serialized Responses requests are rewritten for the ChatGPT Codex
+  backend (system input items hoisted into `instructions`, store:false
+  forced, reasoning.summary=auto, max_output_tokens/temperature/top_p
+  stripped).
+- xai-grok-shell: resolve_credentials sources the bearer from the stored
+  OpenAI credential (never falls back to the xAI session token or
+  XAI_API_KEY), models with the scheme always count as BYOK for the
+  session-token auth gate, and both the aux-model and session sampler
+  configs install OpenAiCodexBearerResolver (live refresh) plus the
+  ChatGPT backend headers (chatgpt-account-id, originator, OpenAI-Beta).
+- [model.*] config accepts auth_scheme = "chatgpt_oauth".
+---
+ crates/codegen/xai-grok-sampler/src/client.rs | 141 +++++++++++++++++-
+ crates/codegen/xai-grok-sampler/src/config.rs |   7 +
+ .../xai-grok-shell/src/agent/config.rs        |  70 ++++++++-
+ .../xai-grok-shell/src/auth/openai_codex.rs   |  14 +-
+ .../session/acp_session_impl/sampler_turn.rs  |  10 +-
+ 5 files changed, 233 insertions(+), 9 deletions(-)
+
+diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
+index 05aff78..bda4189 100644
+--- a/crates/codegen/xai-grok-sampler/src/client.rs
++++ b/crates/codegen/xai-grok-sampler/src/client.rs
+@@ -348,6 +348,75 @@ impl PlatformInfo {
+     }
+ }
+ 
++/// Rewrite a serialized Responses request for the ChatGPT Codex backend
++/// (`https://chatgpt.com/backend-api/codex/responses`), used by models with
++/// [`AuthScheme::ChatgptOauth`]. The ChatGPT backend deviates from the plain
++/// OpenAI Responses API:
++///
++/// * system-role input items are rejected — hoisted into `instructions`;
++/// * `store` must be `false`;
++/// * `reasoning.summary` accepts `auto` (not `concise`);
++/// * sampling params (`max_output_tokens`, `temperature`, `top_p`) are
++///   rejected for codex models and stripped.
++fn apply_chatgpt_codex_request_shape(body: &mut serde_json::Value) {
++    let Some(obj) = body.as_object_mut() else {
++        return;
++    };
++
++    let mut instructions_parts: Vec<String> = Vec::new();
++    if let Some(input) = obj.get_mut("input").and_then(|v| v.as_array_mut()) {
++        input.retain(|item| {
++            let is_system = item.get("role").and_then(|r| r.as_str()) == Some("system");
++            if is_system && let Some(text) = extract_input_message_text(item) {
++                instructions_parts.push(text);
++            }
++            !is_system
++        });
++    }
++    if !instructions_parts.is_empty() {
++        obj.insert(
++            "instructions".to_string(),
++            serde_json::Value::String(instructions_parts.join("\n\n")),
++        );
++    } else if obj.get("instructions").is_none_or(serde_json::Value::is_null) {
++        obj.insert(
++            "instructions".to_string(),
++            serde_json::Value::String("You are a helpful assistant.".to_string()),
++        );
++    }
++
++    obj.insert("store".to_string(), serde_json::Value::Bool(false));
++    if let Some(reasoning) = obj.get_mut("reasoning").and_then(|v| v.as_object_mut()) {
++        reasoning.insert(
++            "summary".to_string(),
++            serde_json::Value::String("auto".to_string()),
++        );
++    }
++    obj.remove("max_output_tokens");
++    obj.remove("temperature");
++    obj.remove("top_p");
++}
++
++/// Text of an easy-input message item: string content or the concatenated
++/// `text` fields of its content parts.
++fn extract_input_message_text(item: &serde_json::Value) -> Option<String> {
++    match item.get("content")? {
++        serde_json::Value::String(s) => Some(s.clone()),
++        serde_json::Value::Array(parts) => {
++            let texts: Vec<&str> = parts
++                .iter()
++                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
++                .collect();
++            if texts.is_empty() {
++                None
++            } else {
++                Some(texts.join("\n"))
++            }
++        }
++        _ => None,
++    }
++}
++
+ fn agent_version() -> String {
+     xai_grok_version::VERSION.to_string()
+ }
+@@ -416,7 +485,7 @@ impl SamplingClient {
+                     })?;
+                     headers.insert(HeaderName::from_static("x-api-key"), header_value);
+                 }
+-                AuthScheme::Bearer => {
++                AuthScheme::Bearer | AuthScheme::ChatgptOauth => {
+                     let bearer = format!("Bearer {}", api_key);
+                     let header_value = HeaderValue::from_str(&bearer).map_err(|_| {
+                         tracing::debug!(
+@@ -559,7 +628,7 @@ impl SamplingClient {
+                         headers.insert(HeaderName::from_static("x-api-key"), v);
+                     }
+                 }
+-                AuthScheme::Bearer => {
++                AuthScheme::Bearer | AuthScheme::ChatgptOauth => {
+                     headers.remove(HeaderName::from_static("x-api-key"));
+                     if let Ok(v) = HeaderValue::from_str(&format!("Bearer {fresh}")) {
+                         headers.insert(AUTHORIZATION, v);
+@@ -617,7 +686,7 @@ impl SamplingClient {
+                 .get(HeaderName::from_static("x-api-key"))
+                 .and_then(|v| v.to_str().ok())
+                 .map(|s| s.to_string()),
+-            AuthScheme::Bearer => self
++            AuthScheme::Bearer | AuthScheme::ChatgptOauth => self
+                 .default_headers
+                 .get(AUTHORIZATION)
+                 .and_then(|v| v.to_str().ok())
+@@ -659,7 +728,7 @@ impl SamplingClient {
+         let auth_prefix = self.current_sent_bearer_prefix();
+         let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
+             (AuthScheme::XApiKey, Some(_)) => "x-api-key",
+-            (AuthScheme::Bearer, Some(_)) => "bearer",
++            (AuthScheme::Bearer | AuthScheme::ChatgptOauth, Some(_)) => "bearer",
+             (_, None) => "none",
+         };
+         crate::sampling_log::AuthInfo {
+@@ -1142,6 +1211,9 @@ impl SamplingClient {
+         // it in post-serialize. This is the last surviving piece of the
+         // old raw_output machinery.
+         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
++        if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
++            apply_chatgpt_codex_request_shape(&mut request_body);
++        }
+         let http_request = grok_headers
+             .apply(self.post(self.endpoint("responses")))
+             .json(&request_body);
+@@ -1287,6 +1359,9 @@ impl SamplingClient {
+             }
+         }
+         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
++        if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
++            apply_chatgpt_codex_request_shape(&mut request_body);
++        }
+         // Fresh per attempt so signals never leak across retries; `None`
+         // (check disabled) sends no header and does no peek work per event.
+         let doom_loop = self
+@@ -2742,4 +2817,62 @@ mod tests {
+             rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
+         ));
+     }
++
++    /// ChatGPT Codex request shape: system input items hoist into
++    /// `instructions`, `store` forces false, `reasoning.summary` becomes
++    /// `auto`, and sampling params the backend rejects are stripped.
++    #[test]
++    fn chatgpt_codex_shape_hoists_system_and_strips_rejected_params() {
++        let mut body = serde_json::json!({
++            "model": "gpt-5.5",
++            "input": [
++                {"type": "message", "role": "system", "content": "You are Grok."},
++                {"type": "message", "role": "user", "content": "hi"},
++            ],
++            "store": true,
++            "max_output_tokens": 128,
++            "temperature": 0.7,
++            "top_p": 0.9,
++            "reasoning": {"effort": "high", "summary": "concise"},
++        });
++        apply_chatgpt_codex_request_shape(&mut body);
++        assert_eq!(body["instructions"], "You are Grok.");
++        let input = body["input"].as_array().unwrap();
++        assert_eq!(input.len(), 1);
++        assert_eq!(input[0]["role"], "user");
++        assert_eq!(body["store"], false);
++        assert_eq!(body["reasoning"]["summary"], "auto");
++        assert_eq!(body["reasoning"]["effort"], "high");
++        assert!(body.get("max_output_tokens").is_none());
++        assert!(body.get("temperature").is_none());
++        assert!(body.get("top_p").is_none());
++    }
++
++    /// No system item and no instructions → a default instructions string is
++    /// injected (the ChatGPT backend rejects requests without one). Content
++    /// parts arrays are flattened.
++    #[test]
++    fn chatgpt_codex_shape_defaults_instructions_and_flattens_parts() {
++        let mut body = serde_json::json!({
++            "model": "gpt-5.5",
++            "input": [
++                {"type": "message", "role": "user", "content": "hi"},
++            ],
++        });
++        apply_chatgpt_codex_request_shape(&mut body);
++        assert_eq!(body["instructions"], "You are a helpful assistant.");
++        assert_eq!(body["store"], false);
++
++        let mut body = serde_json::json!({
++            "input": [
++                {"type": "message", "role": "system", "content": [
++                    {"type": "input_text", "text": "part one"},
++                    {"type": "input_text", "text": "part two"},
++                ]},
++            ],
++        });
++        apply_chatgpt_codex_request_shape(&mut body);
++        assert_eq!(body["instructions"], "part one\npart two");
++        assert!(body["input"].as_array().unwrap().is_empty());
++    }
+ }
+diff --git a/crates/codegen/xai-grok-sampler/src/config.rs b/crates/codegen/xai-grok-sampler/src/config.rs
+index 552d953..a2445bf 100644
+--- a/crates/codegen/xai-grok-sampler/src/config.rs
++++ b/crates/codegen/xai-grok-sampler/src/config.rs
+@@ -21,6 +21,13 @@ pub enum AuthScheme {
+     #[default]
+     Bearer,
+     XApiKey,
++    /// Bearer sourced from the OpenAI (ChatGPT plan) OAuth credential.
++    ///
++    /// Wire format is identical to [`AuthScheme::Bearer`]; the shell layer
++    /// additionally installs a live bearer resolver backed by
++    /// `~/.grok/openai_auth.json` (with refresh) and the ChatGPT Codex
++    /// backend headers (`chatgpt-account-id`, `originator`, `OpenAI-Beta`).
++    ChatgptOauth,
+ }
+ 
+ /// All knobs that control a single sampling request.
+diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
+index c934b1c..2a3b6a1 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/config.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
+@@ -3600,6 +3600,9 @@ pub struct ConfigModelOverride {
+     pub reasoning_effort: Option<ReasoningEffort>,
+     pub supports_reasoning_effort: Option<bool>,
+     pub reasoning_efforts: Vec<ReasoningEffortOption>,
++    /// Per-model auth scheme override (e.g. `auth_scheme = "chatgpt_oauth"`
++    /// to route a custom model through the stored OpenAI credential).
++    pub auth_scheme: Option<AuthScheme>,
+     pub supports_backend_search: Option<bool>,
+     /// Aliases must be registered in `config_model_override_parse::ALIASES`;
+     /// serde rejects a table that contains both spellings otherwise.
+@@ -3681,6 +3684,9 @@ impl ConfigModelOverride {
+         if !self.reasoning_efforts.is_empty() {
+             entry.info.reasoning_efforts = self.reasoning_efforts.clone();
+         }
++        if let Some(v) = self.auth_scheme {
++            entry.info.auth_scheme = v;
++        }
+         if let Some(v) = self.supports_backend_search {
+             entry.info.supports_backend_search = v;
+         }
+@@ -3920,6 +3926,9 @@ impl ModelEntry {
+     /// Non-empty `api_key`, else first non-empty resolved `env_key`.
+     /// `None` → fall through to session / global key.
+     pub(crate) fn own_credential(&self) -> Option<String> {
++        if self.info.auth_scheme == AuthScheme::ChatgptOauth {
++            return crate::auth::openai_codex::current_bearer_blocking();
++        }
+         first_own_credential(self.api_key.as_deref(), self.env_key.as_ref())
+     }
+     /// `true` when the model has a non-empty `api_key` or an `env_key` that
+@@ -4304,7 +4313,23 @@ pub(crate) fn first_own_credential(
+ /// When `env_key` lists multiple names, the first set non-empty value is used.
+ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> ResolvedCredentials {
+     let info = model.info();
+-    let (api_key, base_url, auth_type) = if let Some(key) = model.own_credential() {
++    let (api_key, base_url, auth_type) = if info.auth_scheme == AuthScheme::ChatgptOauth {
++        // ChatGPT-OAuth models never fall back to the xAI session token or
++        // XAI_API_KEY: the ChatGPT backend only accepts the OpenAI bearer.
++        let key = crate::auth::openai_codex::current_bearer_blocking();
++        if key.is_none() {
++            tracing::warn!(
++                model = %info.model,
++                "model uses ChatGPT OAuth but no credential is stored \u{2014} \
++                 run `grok openai login`",
++            );
++        }
++        (
++            key,
++            info.base_url.clone(),
++            xai_chat_state::AuthType::ApiKey,
++        )
++    } else if let Some(key) = model.own_credential() {
+         (
+             Some(key),
+             info.base_url.clone(),
+@@ -4439,7 +4464,13 @@ pub fn resolve_model_auth_facts(model_id: &str) -> ModelAuthFacts {
+ fn byok_from_lookup(lookup: &ModelLookup) -> ModelByok {
+     match lookup {
+         ModelLookup::ConfigUnavailable => ModelByok::Unknown,
+-        ModelLookup::Loaded(Some(e)) if e.has_own_credentials() => ModelByok::Byok,
++        // ChatGPT-OAuth models are always BYOK: even when the user is not
++        // signed in to OpenAI, the xAI session token must never be attached.
++        ModelLookup::Loaded(Some(e))
++            if e.has_own_credentials() || e.info().auth_scheme == AuthScheme::ChatgptOauth =>
++        {
++            ModelByok::Byok
++        }
+         ModelLookup::Loaded(_) => ModelByok::NotByok,
+     }
+ }
+@@ -4633,6 +4664,15 @@ pub fn sampling_config_for_model(
+         alpha_test_key.as_deref(),
+         &credentials.base_url,
+     );
++    let bearer_resolver: Option<xai_grok_sampler::SharedBearerResolver> =
++        if credentials.auth_scheme == AuthScheme::ChatgptOauth {
++            inject_openai_codex_headers(&mut extra_headers);
++            Some(std::sync::Arc::new(
++                crate::auth::openai_codex::OpenAiCodexBearerResolver,
++            ))
++        } else {
++            None
++        };
+     let api_backend = info.api_backend.clone();
+     SamplerConfig {
+         api_key: credentials.api_key,
+@@ -4656,7 +4696,7 @@ pub fn sampling_config_for_model(
+         user_id,
+         origin_client: None,
+         attribution_callback: None,
+-        bearer_resolver: None,
++        bearer_resolver,
+         supports_backend_search: info.supports_backend_search,
+         compactions_remaining: info.compactions_remaining,
+         compaction_at_tokens: info.compaction_at_tokens,
+@@ -4664,6 +4704,30 @@ pub fn sampling_config_for_model(
+         header_injector: None,
+     }
+ }
++/// Fold the ChatGPT Codex backend headers into `extra_headers` for models
++/// with `auth_scheme = "chatgpt_oauth"`:
++///
++/// * `chatgpt-account-id` — from the stored OpenAI credential (required by
++///   the ChatGPT backend),
++/// * `originator` — client identifier gated by the backend,
++/// * `OpenAI-Beta: responses=experimental` — opts in to the Codex Responses
++///   surface.
++///
++/// Explicit user-provided headers win (entries are only inserted when the
++/// key is absent).
++pub fn inject_openai_codex_headers(extra_headers: &mut IndexMap<String, String>) {
++    if let Some(cred) = crate::auth::openai_codex::read_credential() {
++        extra_headers
++            .entry("chatgpt-account-id".to_string())
++            .or_insert(cred.account_id);
++    }
++    extra_headers
++        .entry("originator".to_string())
++        .or_insert_with(|| crate::auth::openai_codex::ORIGINATOR.to_string());
++    extra_headers
++        .entry("OpenAI-Beta".to_string())
++        .or_insert_with(|| "responses=experimental".to_string());
++}
+ /// Fold URL-derived headers into `extra_headers`.
+ ///
+ /// The sampler crate is intentionally URL-agnostic: it does not inspect
+diff --git a/crates/codegen/xai-grok-shell/src/auth/openai_codex.rs b/crates/codegen/xai-grok-shell/src/auth/openai_codex.rs
+index 3ea405c..2062dd1 100644
+--- a/crates/codegen/xai-grok-shell/src/auth/openai_codex.rs
++++ b/crates/codegen/xai-grok-shell/src/auth/openai_codex.rs
+@@ -44,7 +44,7 @@ const JWT_CLAIM_PATH: &str = "https://api.openai.com/auth";
+ /// Sent as the `originator` on the authorize URL. `codex_cli_rs` is the
+ /// official Codex CLI's value; the backend gates some flows on known
+ /// originators.
+-const ORIGINATOR: &str = "codex_cli_rs";
++pub const ORIGINATOR: &str = "codex_cli_rs";
+ /// Refresh this long before expiry.
+ const EARLY_REFRESH_SECS: i64 = 300;
+ /// Maximum time to wait for the browser callback / pasted code.
+@@ -239,6 +239,18 @@ pub async fn ensure_fresh_credential() -> anyhow::Result<OpenAiCodexCredential>
+     refresh_credential(&cred.refresh_token).await
+ }
+ 
++/// Live bearer source for the sampler: reads (and refreshes) the stored
++/// ChatGPT OAuth credential on every request. Installed by the shell for
++/// models with `auth_scheme = "chatgpt_oauth"`.
++#[derive(Debug)]
++pub struct OpenAiCodexBearerResolver;
++
++impl xai_grok_sampler::BearerResolver for OpenAiCodexBearerResolver {
++    fn current_bearer(&self) -> Option<String> {
++        current_bearer_blocking()
++    }
++}
++
+ /// Process-wide single-flight guard for [`current_bearer_blocking`] refreshes.
+ static REFRESH_LOCK: Mutex<()> = Mutex::new(());
+ 
+diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
+index 3e79253..85ac228 100644
+--- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
++++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
+@@ -283,6 +283,10 @@ impl SessionActor {
+             creds.alpha_test_key.as_deref(),
+             &cfg.base_url,
+         );
++        let is_chatgpt_oauth = auth_scheme == xai_grok_sampler::AuthScheme::ChatgptOauth;
++        if is_chatgpt_oauth {
++            crate::agent::config::inject_openai_codex_headers(&mut extra_headers);
++        }
+         let compaction_at_tokens = self.compaction_at_tokens.get();
+         let compactions_remaining = self.compactions_remaining.get();
+         if compactions_remaining.is_some() || compaction_at_tokens.is_some() {
+@@ -336,7 +340,11 @@ impl SessionActor {
+                 .map(|a| a.user_id),
+             origin_client: self.origin_client.clone(),
+             attribution_callback: self.attribution_callback.clone(),
+-            bearer_resolver: if use_bearer_resolver {
++            bearer_resolver: if is_chatgpt_oauth {
++                Some(std::sync::Arc::new(
++                    crate::auth::openai_codex::OpenAiCodexBearerResolver,
++                ))
++            } else if use_bearer_resolver {
+                 self.auth_manager
+                     .as_ref()
+                     .map(|am| -> xai_grok_sampler::SharedBearerResolver {
+-- 
+2.50.1 (Apple Git-155)
+

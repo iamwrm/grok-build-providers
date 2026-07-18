@@ -1,0 +1,230 @@
+From 8ee9d9df95edcd2b83f04c2be7f7201bee5df57d Mon Sep 17 00:00:00 2001
+From: Ren Wang <iamwrm@gmail.com>
+Date: Sat, 18 Jul 2026 22:24:50 +0800
+Subject: [PATCH 4/5] Support pi-style provider/model:effort references
+
+Adds single-token model references such as:
+
+  /model openai-codex/gpt-5.5:xhigh
+  grok -m openai-codex/gpt-5.5:xhigh -p "hello"
+
+/model first attempts an exact full catalog match (preserving ids that
+contain colons), then splits on the last colon and resolves the suffix
+against the selected model's offered reasoning efforts. The existing
+/model <name> <effort> syntax remains supported.
+
+CLI -m uses the same last-colon rule for canonical effort suffixes;
+explicit --effort wins. Bare gpt-5.5 also resolves through the existing
+routing-slug fallback when unambiguous.
+---
+ crates/codegen/xai-grok-pager-bin/src/main.rs | 15 ++++-
+ crates/codegen/xai-grok-pager/src/app/cli.rs  | 58 ++++++++++++++++++
+ .../src/slash/commands/model.rs               | 59 +++++++++++++++++++
+ 3 files changed, 129 insertions(+), 3 deletions(-)
+
+diff --git a/crates/codegen/xai-grok-pager-bin/src/main.rs b/crates/codegen/xai-grok-pager-bin/src/main.rs
+index 919e02b..d90fc8d 100644
+--- a/crates/codegen/xai-grok-pager-bin/src/main.rs
++++ b/crates/codegen/xai-grok-pager-bin/src/main.rs
+@@ -1027,10 +1027,15 @@ async fn run_agent_command(
+         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+     let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
+         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
+-    agent_config.default_model_override = agent_args.model.clone();
++    // `-m model:effort` (pi-style single-token reference); explicit
++    // `--effort` wins over the suffix.
++    let (cli_model, cli_model_effort) =
++        xai_grok_pager::app::cli::split_model_effort_reference(agent_args.model.as_deref());
++    agent_config.default_model_override = cli_model;
+     agent_config.reasoning_effort_override = agent_args
+         .reasoning_effort
+         .as_deref()
++        .or(cli_model_effort.as_deref())
+         .and_then(xai_grok_shell::sampling::types::parse_canonical_effort_token);
+     let launch_yolo = xai_grok_shell::util::config::effective_yolo_for_launch(
+         agent_args.yolo,
+@@ -1964,6 +1969,10 @@ async fn async_main() -> Result<()> {
+                 );
+             }
+         }
++        // `-m model:effort` (pi-style single-token reference); explicit
++        // `--effort` wins over the suffix.
++        let (headless_model, headless_model_effort) =
++            xai_grok_pager::app::cli::split_model_effort_reference(args.model.as_deref());
+         return xai_grok_pager::headless::run_single_turn(
+             prompt,
+             args.verbatim,
+@@ -1975,7 +1984,7 @@ async fn async_main() -> Result<()> {
+                 trust: args.trust,
+                 output_format: args.output_format,
+                 json_schema,
+-                model: args.model,
++                model: headless_model,
+                 rules: args.rules,
+                 system_prompt_override: args.system_prompt_override.clone(),
+                 continue_last_session: args.continue_last_session,
+@@ -1991,7 +2000,7 @@ async fn async_main() -> Result<()> {
+                 deny_rules: args.deny_rules.clone(),
+                 max_turns: args.max_turns,
+                 permission_mode_flag: args.permission_mode_flag.clone(),
+-                reasoning_effort: args.reasoning_effort.clone(),
++                reasoning_effort: args.reasoning_effort.clone().or(headless_model_effort),
+                 self_verify: args.self_verify,
+                 best_of_n: args.best_of_n,
+                 wait_for_background: !args.no_wait_for_background,
+diff --git a/crates/codegen/xai-grok-pager/src/app/cli.rs b/crates/codegen/xai-grok-pager/src/app/cli.rs
+index 533f338..aa1a243 100644
+--- a/crates/codegen/xai-grok-pager/src/app/cli.rs
++++ b/crates/codegen/xai-grok-pager/src/app/cli.rs
+@@ -141,6 +141,30 @@ See ~/.grok/README.md for more information.
+     /// var is set.
+     Dashboard,
+ }
++/// Split a pi-style single-token model reference `<model>[:<effort>]`,
++/// e.g. `-m openai-codex/gpt-5.5:xhigh`.
++///
++/// The suffix after the **last** colon is treated as a reasoning effort only
++/// when it parses as a canonical effort token (`none|minimal|low|medium|
++/// high|xhigh|max`), so model ids that themselves contain colons keep
++/// resolving as plain ids. An explicit `--effort` flag wins over the suffix
++/// at the call sites.
++pub fn split_model_effort_reference(model: Option<&str>) -> (Option<String>, Option<String>) {
++    let Some(model) = model else {
++        return (None, None);
++    };
++    if let Some((prefix, suffix)) = model.rsplit_once(':')
++        && !prefix.is_empty()
++        && xai_grok_shell::sampling::types::parse_canonical_effort_token(suffix).is_some()
++    {
++        return (
++            Some(prefix.to_string()),
++            Some(suffix.to_ascii_lowercase()),
++        );
++    }
++    (Some(model.to_string()), None)
++}
++
+ /// Arguments for the `openai` subcommand.
+ #[derive(Debug, clap::Args, Clone)]
+ pub struct OpenaiArgs {
+@@ -1219,6 +1243,40 @@ mod tests {
+             PagerArgs::try_parse_from(["grok", "--trust-folder"]).expect("--trust-folder parses");
+         assert!(alias.trust);
+     }
++    #[test]
++    fn split_model_effort_reference_matrix() {
++        // (input, expected model, expected effort)
++        let cases: &[(Option<&str>, Option<&str>, Option<&str>)] = &[
++            (None, None, None),
++            (Some("grok-build"), Some("grok-build"), None),
++            (
++                Some("openai-codex/gpt-5.5:xhigh"),
++                Some("openai-codex/gpt-5.5"),
++                Some("xhigh"),
++            ),
++            (Some("gpt-5.5:MAX"), Some("gpt-5.5"), Some("max")),
++            // Non-effort suffix stays part of the model id.
++            (
++                Some("vendor/model:exacto"),
++                Some("vendor/model:exacto"),
++                None,
++            ),
++            // Colon in the middle: only the LAST segment is considered.
++            (
++                Some("vendor:model:high"),
++                Some("vendor:model"),
++                Some("high"),
++            ),
++            // Bare `:high` is not a model reference.
++            (Some(":high"), Some(":high"), None),
++        ];
++        for (input, model, effort) in cases {
++            let (m, e) = split_model_effort_reference(*input);
++            assert_eq!(m.as_deref(), *model, "model for {input:?}");
++            assert_eq!(e.as_deref(), *effort, "effort for {input:?}");
++        }
++    }
++
+     #[test]
+     fn reasoning_effort_and_effort_alias_parse_same_field() {
+         let long = PagerArgs::try_parse_from(["grok", "--reasoning-effort", "high"])
+diff --git a/crates/codegen/xai-grok-pager/src/slash/commands/model.rs b/crates/codegen/xai-grok-pager/src/slash/commands/model.rs
+index c692227..a30d390 100644
+--- a/crates/codegen/xai-grok-pager/src/slash/commands/model.rs
++++ b/crates/codegen/xai-grok-pager/src/slash/commands/model.rs
+@@ -78,6 +78,30 @@ impl SlashCommand for ModelCommand {
+             return CommandResult::Action(Action::SetDefaultModel(id));
+         }
+ 
++        // pi-style single-token reference: `<model>:<effort>`, e.g.
++        // `/model openai-codex/gpt-5.5:xhigh`. Split on the last colon so
++        // model ids containing colons still resolve via the exact match
++        // above; the suffix must be an effort the model offers.
++        if let Some((prefix, token)) = trimmed.rsplit_once(':')
++            && !prefix.trim_end().is_empty()
++            && !token.is_empty()
++            && let Some(id) = resolve_model(ctx.models, prefix.trim_end())
++            && ctx
++                .models
++                .available
++                .get(&id)
++                .map(supports_reasoning_effort)
++                .unwrap_or(false)
++        {
++            return match ctx.models.resolve_effort_for_model(&id, token.trim()) {
++                Ok(effort) => CommandResult::Action(Action::SwitchModel {
++                    model_id: id,
++                    effort: Some(effort),
++                }),
++                Err(err) => CommandResult::Error(err.message()),
++            };
++        }
++
+         // Trailing effort token + reasoning model → session-scoped switch
+         // (not persisted as default). Resolve via the shared gate so a rejected
+         // level (e.g. `none` on grok-4.5) surfaces the effort error with the
+@@ -377,6 +401,41 @@ mod tests {
+         }
+     }
+ 
++    /// pi-style `/model <id>:<effort>` single-token reference resolves the
++    /// prefix as a model and the suffix as its effort.
++    #[test]
++    fn run_parses_colon_effort_reference() {
++        let mut state = ModelState::default();
++        let (id, info) = model_with_reasoning("openai-codex/gpt-5.5", "GPT-5.5 (ChatGPT)");
++        state.available.insert(id, info);
++        let mut ctx = dummy_exec_ctx(&state);
++        let result = ModelCommand.run(&mut ctx, "openai-codex/gpt-5.5:xhigh");
++        match result {
++            CommandResult::Action(Action::SwitchModel { model_id, effort }) => {
++                assert_eq!(model_id.0.as_ref(), "openai-codex/gpt-5.5");
++                assert_eq!(effort, Some(ReasoningEffort::Xhigh));
++            }
++            other => panic!("expected SwitchModel with effort, got {other:?}"),
++        }
++    }
++
++    /// A model id that itself ends in a colon-suffix which is NOT an effort
++    /// keeps resolving via the exact-match path, not the colon-split path.
++    #[test]
++    fn run_colon_in_model_id_still_resolves_exactly() {
++        let mut state = ModelState::default();
++        let (id, info) = model_with_reasoning("vendor/model:exacto", "Vendor Exacto");
++        state.available.insert(id.clone(), info);
++        let mut ctx = dummy_exec_ctx(&state);
++        let result = ModelCommand.run(&mut ctx, "vendor/model:exacto");
++        match result {
++            CommandResult::Action(Action::SetDefaultModel(resolved_id)) => {
++                assert_eq!(resolved_id, id);
++            }
++            other => panic!("expected SetDefaultModel, got {other:?}"),
++        }
++    }
++
+     #[test]
+     fn run_rejects_unoffered_effort_with_effort_error_not_unknown_model() {
+         // Regression: previously `resolve_effort_token_for` returned None and
+-- 
+2.50.1 (Apple Git-155)
+

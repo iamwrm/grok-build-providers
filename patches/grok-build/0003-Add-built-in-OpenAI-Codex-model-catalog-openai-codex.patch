@@ -1,0 +1,159 @@
+From c28ec8953d669fbc11827cb047c4f9cf3ea0bbfa Mon Sep 17 00:00:00 2001
+From: Ren Wang <iamwrm@gmail.com>
+Date: Sat, 18 Jul 2026 22:17:54 +0800
+Subject: [PATCH 3/5] Add built-in OpenAI Codex model catalog (openai-codex/*)
+
+Registers pi's openai-codex catalog (gpt-5.3-codex-spark, gpt-5.4[-mini],
+gpt-5.5, gpt-5.6-luna/sol/terra) as built-in entries keyed
+openai-codex/<slug>, routed to https://chatgpt.com/backend-api/codex over
+the Responses API with auth_scheme = chatgpt_oauth and a low..xhigh
+reasoning-effort menu.
+
+Entries appear only when an OpenAI credential is stored (grok openai
+login), are inserted before [model.*] overrides (still user-overridable),
+and never clobber prefetched entries.
+---
+ .../xai-grok-shell/src/agent/config.rs        | 100 ++++++++++++++++++
+ .../src/agent/config_model_override_parse.rs  |   1 +
+ 2 files changed, 101 insertions(+)
+
+diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
+index 2a3b6a1..054341e 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/config.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
+@@ -3175,6 +3175,15 @@ pub fn resolve_model_list(
+         }
+         resolved = prefetched;
+     }
++    // OpenAI Codex (ChatGPT plan) models: available whenever the user has
++    // signed in with `grok openai login`. Inserted before `[model.*]`
++    // overrides so users can still override any field per entry; never
++    // clobbers a same-keyed prefetched entry.
++    if crate::auth::openai_codex::read_credential().is_some() {
++        for (key, entry) in openai_codex_model_entries() {
++            resolved.entry(key).or_insert(entry);
++        }
++    }
+     for (key, model_override) in &cfg.config_models {
+         let had_base = resolved.contains_key(key);
+         let base = resolved.shift_remove(key);
+@@ -3432,6 +3441,70 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
+         })
+         .collect()
+ }
++/// Base URL of the ChatGPT Codex backend; the sampler appends `/responses`.
++pub const OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
++
++/// Built-in OpenAI Codex (ChatGPT plan) model catalog, keyed
++/// `openai-codex/<id>`. Mirrors pi's `openai-codex` provider catalog.
++/// Callers gate on a stored OpenAI credential (`grok openai login`) so the
++/// picker doesn't fill with models that cannot work.
++pub fn openai_codex_model_entries() -> Vec<(String, ModelEntry)> {
++    // (id, name, context_window)
++    const CODEX_CONTEXT: u64 = 272_000;
++    const CODEX_GPT_56_CONTEXT: u64 = 372_000;
++    const CODEX_SPARK_CONTEXT: u64 = 128_000;
++    let models: [(&str, &str, u64); 7] = [
++        ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", CODEX_SPARK_CONTEXT),
++        ("gpt-5.4", "GPT-5.4", CODEX_CONTEXT),
++        ("gpt-5.4-mini", "GPT-5.4 mini", CODEX_CONTEXT),
++        ("gpt-5.5", "GPT-5.5", CODEX_CONTEXT),
++        ("gpt-5.6-luna", "GPT-5.6 Luna", CODEX_GPT_56_CONTEXT),
++        ("gpt-5.6-sol", "GPT-5.6 Sol", CODEX_GPT_56_CONTEXT),
++        ("gpt-5.6-terra", "GPT-5.6 Terra", CODEX_GPT_56_CONTEXT),
++    ];
++    models
++        .into_iter()
++        .map(|(slug, name, context_window)| {
++            let key = format!("openai-codex/{slug}");
++            let mut info = ModelInfo::fallback(slug);
++            info.id = Some(key.clone());
++            info.base_url = OPENAI_CODEX_BASE_URL.to_string();
++            info.name = Some(format!("{name} (ChatGPT)"));
++            info.description = Some("OpenAI Codex via ChatGPT plan".to_string());
++            info.api_backend = ApiBackend::Responses;
++            info.auth_scheme = AuthScheme::ChatgptOauth;
++            info.context_window =
++                NonZeroU64::new(context_window).expect("codex context windows are non-zero");
++            info.supports_reasoning_effort = true;
++            info.reasoning_effort = Some(ReasoningEffort::Medium);
++            info.reasoning_efforts = [
++                (ReasoningEffort::Low, "low", "Low", false),
++                (ReasoningEffort::Medium, "medium", "Medium", true),
++                (ReasoningEffort::High, "high", "High", false),
++                (ReasoningEffort::Xhigh, "xhigh", "Extra high", false),
++            ]
++            .into_iter()
++            .map(|(value, id, label, default)| ReasoningEffortOption {
++                id: id.to_string(),
++                value,
++                label: label.to_string(),
++                description: None,
++                default,
++            })
++            .collect();
++            (
++                key,
++                ModelEntry {
++                    info,
++                    api_key: None,
++                    env_key: None,
++                    api_base_url: None,
++                },
++            )
++        })
++        .collect()
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct ModelEntryConfig {
+     /// Stable unique identifier for this catalog entry. When present,
+@@ -5889,6 +5962,33 @@ reasoning_effort = "low"
+     /// `try_resolve_model_credentials` — swaps it for the session token. BYOK
+     /// (non-x.ai) own keys are preserved. (`try_resolve_model_credentials`
+     /// loads global config, so this exercises its resolve + enforce core.)
++    /// Built-in Codex catalog: every entry is keyed `openai-codex/<slug>`,
++    /// routes to the ChatGPT Codex backend over the Responses API with the
++    /// ChatGPT OAuth scheme, and exposes the low..xhigh effort menu.
++    #[test]
++    fn openai_codex_entries_route_to_chatgpt_codex_backend() {
++        let entries = openai_codex_model_entries();
++        assert!(!entries.is_empty());
++        assert!(entries.iter().any(|(k, _)| k == "openai-codex/gpt-5.5"));
++        for (key, entry) in &entries {
++            assert_eq!(key, entry.info.id.as_deref().unwrap());
++            let slug = key.strip_prefix("openai-codex/").unwrap();
++            assert_eq!(entry.info.model, slug);
++            assert_eq!(entry.info.base_url, OPENAI_CODEX_BASE_URL);
++            assert_eq!(entry.info.api_backend, ApiBackend::Responses);
++            assert_eq!(entry.info.auth_scheme, AuthScheme::ChatgptOauth);
++            assert!(entry.info.supports_reasoning_effort);
++            assert!(
++                entry
++                    .info
++                    .reasoning_efforts
++                    .iter()
++                    .any(|o| o.value == ReasoningEffort::Xhigh)
++            );
++            assert!(entry.api_key.is_none() && entry.env_key.is_none());
++        }
++    }
++
+     #[test]
+     fn try_resolve_model_credentials_swaps_first_party_own_key_under_kill_switch() {
+         use xai_chat_state::AuthType;
+diff --git a/crates/codegen/xai-grok-shell/src/agent/config_model_override_parse.rs b/crates/codegen/xai-grok-shell/src/agent/config_model_override_parse.rs
+index a3d64b3..433bcd5 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/config_model_override_parse.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/config_model_override_parse.rs
+@@ -531,6 +531,7 @@ mod tests {
+                 description: Some("Deep reasoning".to_string()),
+                 default: true,
+             }],
++            auth_scheme: Some(xai_grok_sampler::AuthScheme::ChatgptOauth),
+             supports_backend_search: Some(false),
+             compactions_remaining: Some(CompactionsRemaining::Fixed(1)),
+             compaction_at_tokens: Some(CompactionAtTokens::Fixed(100_000)),
+-- 
+2.50.1 (Apple Git-155)
+

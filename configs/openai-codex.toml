@@ -1,0 +1,22 @@
+# OpenAI Codex via ChatGPT Plus/Pro requires NO config.toml changes.
+#
+# Sign in once:
+#   grok openai login
+#
+# Then switch inside the app:
+#   /model openai-codex/gpt-5.5:xhigh
+#
+# The built-in catalog is credential-gated and includes all supported
+# openai-codex/* models.
+
+# Advanced example only: define an additional/custom Codex catalog entry
+# backed by the same stored ~/.grok/openai_auth.json credential.
+[model.openai-codex/custom-codex]
+model = "custom-codex-model-id"
+base_url = "https://chatgpt.com/backend-api/codex"
+name = "Custom Codex (ChatGPT)"
+api_backend = "responses"
+auth_scheme = "chatgpt_oauth"
+context_window = 272000
+supports_reasoning_effort = true
+reasoning_efforts = ["low", "medium", "high", "xhigh"]
