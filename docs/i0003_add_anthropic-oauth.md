@@ -1,6 +1,6 @@
 # i0003: Add Anthropic (Claude Pro/Max plan) OAuth provider to grok-build
 
-**Status:** implemented and exported; live verification pending `grok anthropic login`
+**Status:** implemented, exported, and live-verified (2026-07-19)
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
 **Deliverable:** five-patch series `patches/grok-build/0008..0012`, continuing the i0001/i0002 stack
 **Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `98c3b24` (stack tip after i0002: `cd19ebd`)
@@ -220,8 +220,15 @@ between `high` and `max` on Opus 4.7/4.8, Sonnet 5, and Fable 5.
 - Patch 0012 additions: sampling-types suite 273/273 (native wire mapping),
   pager `model_state` 17/17 (incl. the symmetric `xhigh→max` fallback),
   catalog test asserts per-model native-xhigh gating.
-- **Live testing pending:** requires an interactive `grok anthropic login`.
-  Follow the regression recipe below.
+- **Live testing (2026-07-19):** `grok anthropic login` browser flow
+  completed and stored `~/.grok/anthropic_auth.json`; user-confirmed working
+  live inference on the `anthropic/*` catalog (including native `xhigh`
+  selection after patch 0012). No `inference_retry` entries in
+  `~/.grok/logs/unified.jsonl` after the credential timestamp, and —
+  notably — **no classifier rejection with the replacement table empty**:
+  grok-build's system prompt + the Claude Code identity block currently
+  pass the consumer-OAuth classifier as-is. Keep the recipe below for when
+  Anthropic re-tightens the classifier.
 
 ### Live regression recipe
 
