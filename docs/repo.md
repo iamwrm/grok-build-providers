@@ -63,9 +63,30 @@ git fetch origin && git reset --hard origin/main
 git apply ../../patches/grok-build/*.patch   # fix conflicts, re-export patches
 ```
 
+## Initiative docs
+
+Every initiative gets its own doc in `docs/`, following the pattern of
+[`docs/i0001_add_openai-oauth.md`](i0001_add_openai-oauth.md):
+
+- **Naming:** `docs/iNNNN_short-slug.md` — a sequential initiative number
+  (`i0001`, `i0002`, …) plus a short descriptive slug.
+- **Header:** title `# iNNNN: <goal in one line>`, then status, the upstream
+  checkouts involved, the deliverable (usually a patch series under
+  `patches/<project>/`), and the implementation branch/base commit.
+- **Body:** goal, reference material (how an upstream already solves it),
+  integration points found during exploration, the implemented patch series
+  (one section per numbered patch), a files-affected summary table,
+  explicit non-goals, verification performed, handoff notes
+  (requirements to preserve, gotchas, maintenance state), and
+  decisions/deferred work.
+
+The initiative doc is the durable narrative that ties the numbered patches
+together — keep it updated as the patch series evolves.
+
 ## Conventions
 
 - One directory per upstream under `patches/` (`patches/grok-build/`, `patches/pi/`).
+- One doc per initiative under `docs/` (`iNNNN_slug.md`), as described above.
 - Number patches (`0001-...`, `0002-...`) so apply order is explicit.
 - If a patch stops applying cleanly, fix it and commit the updated patch —
   the patch files are the source of truth, not the checkouts.
