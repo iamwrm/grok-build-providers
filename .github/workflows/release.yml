@@ -15,6 +15,15 @@ name: release
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: Build all targets or only Windows (for CI validation)
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - windows
   push:
     tags: ["v*"]
 
@@ -32,24 +41,33 @@ permissions:
   contents: write
 
 jobs:
+  prepare:
+    name: prepare matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - id: matrix
+        name: Select build targets
+        shell: bash
+        env:
+          SELECTED: ${{ inputs.target }}
+        run: |
+          if [[ "${SELECTED:-all}" == "windows" ]]; then
+            matrix='{"include":[{"runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
+          else
+            matrix='{"include":[{"runner":"macos-latest","target":"aarch64-apple-darwin"},{"runner":"macos-15-intel","target":"x86_64-apple-darwin"},{"runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   build:
     name: build (${{ matrix.target }})
+    needs: prepare
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: macos-latest
-            target: aarch64-apple-darwin
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - name: Checkout patches repo
         uses: actions/checkout@v4
