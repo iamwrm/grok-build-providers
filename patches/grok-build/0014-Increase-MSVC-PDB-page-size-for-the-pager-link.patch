@@ -1,0 +1,44 @@
+From d4ff715df7257dfd8ba1aeaa969395ed05849fa8 Mon Sep 17 00:00:00 2001
+From: Ren Wang <iamwrm@gmail.com>
+Date: Sun, 19 Jul 2026 14:38:45 +0800
+Subject: [PATCH] Increase MSVC PDB page size for the pager link
+
+Rustc emits a minimal release PDB even when profile debug info is disabled.
+The pager's public-symbol table exceeds link.exe's default 4 KiB PDB page
+capacity and fails with fatal LNK4319; use the supported 16 KiB maximum for
+both Windows targets.
+---
+ .cargo/config.toml | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/.cargo/config.toml b/.cargo/config.toml
+index 912e93e..5fdac76 100644
+--- a/.cargo/config.toml
++++ b/.cargo/config.toml
+@@ -59,10 +59,21 @@ rustflags = [
+ ]
+ 
+ [target.x86_64-pc-windows-msvc]
+-rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static"]
++rustflags = [
++    "-C", "force-unwind-tables=yes",
++    "-C", "target-feature=+crt-static",
++    # rustc emits a minimal release PDB even with profile debug info disabled.
++    # The pager's public-symbol table exceeds the default 4 KiB PDB page
++    # capacity (fatal LNK4319); 16 KiB is link.exe's supported maximum.
++    "-C", "link-arg=/PDBPAGESIZE:16384",
++]
+ 
+ [target.aarch64-pc-windows-msvc]
+-rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static"]
++rustflags = [
++    "-C", "force-unwind-tables=yes",
++    "-C", "target-feature=+crt-static",
++    "-C", "link-arg=/PDBPAGESIZE:16384",
++]
+ 
+ 
+ # jemalloc page size for Apple Silicon (macOS aarch64 uses 16KB pages = 2^14).
+-- 
+2.50.1 (Apple Git-155)
+
