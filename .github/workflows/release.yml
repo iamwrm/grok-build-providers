@@ -70,6 +70,14 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/setup-nasm@v1
 
+      # xai-grok-tools-api's build.rs needs protoc (upstream pins v29.3 via
+      # a dotslash wrapper that isn't available on CI runners).
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build release binary
         shell: bash
         working-directory: checkouts/grok-build
