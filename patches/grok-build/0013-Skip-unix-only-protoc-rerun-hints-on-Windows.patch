@@ -1,0 +1,39 @@
+From 45a2e89ca64f05e59621451f66b8c8d0a8aeb31e Mon Sep 17 00:00:00 2001
+From: Ren Wang <iamwrm@gmail.com>
+Date: Sun, 19 Jul 2026 13:01:00 +0800
+Subject: [PATCH] Skip unix-only protoc rerun hints on Windows
+
+xai-proto-build shells out to protoc with --dependency_out=/dev/stdout
+and --descriptor_set_out=/dev/null to emit cargo rerun-if-changed hints;
+protoc.exe cannot open device paths, so every proto crate failed to build
+on native Windows. The hints only accelerate incremental local rebuilds,
+so skip emitting them there. Proto compilation itself already resolves
+protoc portably via PROTOC, bin/protoc, or PATH.
+---
+ crates/build/xai-proto-build/src/lib.rs | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/crates/build/xai-proto-build/src/lib.rs b/crates/build/xai-proto-build/src/lib.rs
+index 417c4b2..d0a7be5 100644
+--- a/crates/build/xai-proto-build/src/lib.rs
++++ b/crates/build/xai-proto-build/src/lib.rs
+@@ -103,6 +103,16 @@ impl XaiProtoBuilder {
+         protos: impl IntoIterator<Item = &'a Path>,
+         includes: impl IntoIterator<Item = &'a Path>,
+     ) -> anyhow::Result<()> {
++        // The `--dependency_out=/dev/stdout` / `--descriptor_set_out=/dev/null`
++        // invocation below is unix-only: protoc.exe cannot open device paths on
++        // Windows, and porting the dependency-file parsing would have to cope
++        // with drive-letter colons in the `target:` prefix. The emitted
++        // `rerun-if-changed` hints only speed up incremental local rebuilds,
++        // so skip them on Windows instead (CI/release builds are clean builds).
++        if cfg!(windows) {
++            return Ok(());
++        }
++
+         let includes = Vec::from_iter(includes);
+ 
+         if let Some(protoc) = protoc {
+-- 
+2.50.1 (Apple Git-155)
+
