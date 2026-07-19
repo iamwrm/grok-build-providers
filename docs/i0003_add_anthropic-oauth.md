@@ -214,9 +214,11 @@ between `high` and `max` on Opus 4.7/4.8, Sonnet 5, and Fable 5.
   `~/.grok/openai_auth.json` (or now `anthropic_auth.json`), independent of
   this series.
 - `git diff cd19ebd..HEAD --check` clean.
-- Clean-room: all **twelve** patches `git am` onto a detached worktree at
-  `98c3b24`; resulting tree hash `acd130e5f9027dccb0bfa9fe73e3507c39983798`
-  matches the branch tip (`6ff0a31`) exactly.
+- Historical clean-room snapshot through i0003: all **twelve** patches
+  `git am` onto a detached worktree at `98c3b24`; resulting tree hash
+  `acd130e5f9027dccb0bfa9fe73e3507c39983798` matches the patch-0012 tip
+  (`6ff0a31`) exactly. The current 15-patch stack is validated separately in
+  [i0004](i0004_release-ci.md).
 - Patch 0012 additions: sampling-types suite 273/273 (native wire mapping),
   pager `model_state` 17/17 (incl. the symmetric `xhigh→max` fallback),
   catalog test asserts per-model native-xhigh gating.
@@ -277,8 +279,10 @@ A one-turn greeting does not exercise the risky paths. After login:
    4.7/4.8, Sonnet 5, and Fable 5 (patch 0012; supersedes the v1 decision to
    collapse `xhigh` into `max`). Off-menu `xhigh` resolves to an offered
    `max` and vice versa.
-4. **Classifier table ships empty** pending a live repro; the mechanism and
-   maintenance procedure are in place.
+4. **Classifier table remains empty:** live OAuth inference passed without a
+   classifier rejection, so no grok-build prompt rewrite is currently needed.
+   The mechanism and maintenance procedure remain in place for a future
+   classifier change.
 5. **Deferred:** stealth tool naming, in-TUI `/anthropic-login`, budget
    thinking for older Claude models, `~/.claude` credential import, friendly
    quota-reset error mapping.

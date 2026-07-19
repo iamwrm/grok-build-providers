@@ -6,12 +6,13 @@
 # Then switch inside the app:
 #   /model openai-codex/gpt-5.5:xhigh
 #
-# The built-in catalog is credential-gated and includes all supported
-# openai-codex/* models.
+# The built-in catalog is credential-gated and contains the seven-model
+# snapshot carried by patch 0003 (gpt-5.3-codex-spark, gpt-5.4[-mini],
+# gpt-5.5, and the gpt-5.6 luna/sol/terra family).
 
 # Advanced example only: define an additional/custom Codex catalog entry
 # backed by the same stored ~/.grok/openai_auth.json credential.
-[model.openai-codex/custom-codex]
+[model."openai-codex/custom-codex"]
 model = "custom-codex-model-id"
 base_url = "https://chatgpt.com/backend-api/codex"
 name = "Custom Codex (ChatGPT)"

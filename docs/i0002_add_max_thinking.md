@@ -15,6 +15,16 @@
   patch stops applying cleanly, fix and re-export it as part of maintaining
   this doc's series, and update the status line above.
 
+## Supersession note
+
+This initiative records the stack as it existed through patch `0007`. Later,
+[i0003 patch 0012](i0003_add_anthropic-oauth.md#patch-0012--native-xhigh-on-the-messages-wire)
+changed the **Anthropic Messages** mapping from `Xhigh|Max → "max"` to distinct
+native values (`Xhigh → "xhigh"`, `Max → "max"`) with per-model menu gating.
+The OpenAI Responses behavior implemented here is unchanged. Statements below
+about both top Anthropic levels sharing the same wire value are historical
+patch-0006 behavior, not current full-stack behavior.
+
 ## Goal
 
 Make `max` a real reasoning-effort level **above** `xhigh`, sent verbatim on the
@@ -42,8 +52,9 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
   - `supportsOpenAiMax(model)` — **gpt-5.6 only**, on the
     `openai-responses` / `azure-openai-responses` / `openai-codex-responses` /
     `openai-completions` APIs → merges `{ max: "max" }`;
-  - Anthropic adaptive-thinking models also map `max` (out of scope here —
-    grok-build's Messages path already sends `"max"` for `Xhigh`).
+  - Anthropic adaptive-thinking models also map `max`. That was out of scope
+    for patches `0006–0007`; the then-current Messages path sent `"max"` for
+    `Xhigh`. i0003 patch `0012` later added native `xhigh` differentiation.
 - `packages/ai/src/api/openai-codex-responses.ts` (and `openai-responses.ts`):
   the effort string is passed through `thinkingLevelMap` and lands on
   `reasoning.effort` verbatim — i.e. the wire value is literally `"max"`.
@@ -55,8 +66,9 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
   `"xhigh" | "max" => Xhigh` ("max is a CLI/UX alias of xhigh") and the error
   message plus `parse_canonical_effort_token` document that alias. Also here:
   `to_responses_api` / `from_responses_api` (bridges to async-openai),
-  `to_messages_api` (**already** emits `"max"` for `Xhigh` on the Anthropic
-  Messages API), `ReasoningEffortOption { id, value, label, … }` (per-model
+  `to_messages_api` (at this patch tip emitted `"max"` for `Xhigh` on the
+  Anthropic Messages API; superseded by patch `0012`),
+  `ReasoningEffortOption { id, value, label, … }` (per-model
   effort menus where `id` is presentation/input and `value` is the wire value).
 - **Hard constraint:** `rs::ReasoningEffort` is
   `async_openai::types::responses` from crates.io (`async-openai 0.33`,
@@ -105,8 +117,9 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
 - `FromStr`: `"max" → Max` (alias removed); update the error string and the
   `parse_canonical_effort_token` doc comment; rewrite the upstream
   `reasoning_effort_from_str_accepts_max_as_xhigh` test to the new semantics.
-- `to_messages_api`: `Max → Some("max")` (same wire value as `Xhigh` — that is
-  Anthropic's ceiling; no downgrade needed on that path).
+- `to_messages_api`: `Max → Some("max")` (at the patch-0006 tip this was the
+  same wire value as `Xhigh`; patch `0012` later changed only `Xhigh` to emit
+  native `"xhigh"`).
 - `to_responses_api`: `Max → rs::ReasoningEffort::Xhigh` as a **typed
   placeholder only** (async-openai cannot represent `Max`); the true wire
   value is restored by the post-serialize patch below. Document this loudly.
@@ -204,11 +217,14 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
   the server-driven `reasoning_efforts` menu can introduce it later without
   code changes (a server menu entry `{"value": "max"}` will parse into the
   new variant automatically).
-- Anthropic-side `xhigh`-vs-`max` differentiation (grok-build's Messages path
-  already emits `"max"` at its top level; both map there identically).
+- Anthropic-side `xhigh`-vs-`max` differentiation was a non-goal of this
+  initiative. It was subsequently implemented by i0003 patch `0012`.
 - Changing pi.
 
-## Verification completed
+## Verification completed at the patch-0007 tip
+
+These counts and hashes are the historical validation of patches `0001–0007`,
+not the current 15-patch stack (see i0004 for current cross-platform CI).
 
 - `cargo check --workspace` passes.
 - `cargo test -p xai-grok-sampling-types --lib`: 273 passed (includes new
@@ -226,7 +242,10 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
   applies cleanly; resulting tree hash `cebc20755c05562921ebe8c331f730fb619afded`
   matches the `openai-oauth` branch tip exactly.
 
-### Remaining (not run in this session)
+### Remaining OpenAI `max` live check
+
+This was not run while implementing i0002 and is not superseded by the later
+Anthropic work:
 
 - Live check (requires stored ChatGPT credential): fresh turn + resumed
   tool-using turn with `openai-codex/gpt-5.6-sol:max`; confirm the request

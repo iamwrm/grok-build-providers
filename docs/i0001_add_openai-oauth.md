@@ -22,8 +22,10 @@ Three pieces in `checkouts/pi/packages/ai/src/`:
   scope `openid profile email offline_access`, extra query params
   `id_token_add_organizations=true`, `codex_cli_simplified_flow=true`, `originator`.
 - **Browser flow:** local HTTP callback server on `http://localhost:1455/auth/callback`
-  (port is fixed — it is registered with the client id), with a manual
-  paste-the-redirect-URL fallback when the server can't bind.
+  (port is fixed — it is registered with the client id). While that listener
+  is running, users whose browser is on another machine can manually paste the
+  final redirect URL. If the listener itself cannot bind, use the device-code
+  flow instead.
 - **Device-code flow (headless):** `POST /api/accounts/deviceauth/usercode` →
   show user code + `https://auth.openai.com/codex/device` → poll
   `POST /api/accounts/deviceauth/token` (pending on 403/404 or
@@ -71,8 +73,9 @@ grok-build already has almost every seam we need:
   so `base_url = "https://chatgpt.com/backend-api/codex"` yields the right URL
   with no URL-code changes. Has a 401 retry/attribution path.
 - `crates/codegen/xai-grok-sampler/src/stream/responses.rs` — Responses SSE
-  decode; needs the codex request-shape deltas (`store:false`, `instructions`,
-  `include`, error mapping).
+  decode; needs Codex request/stream compatibility deltas (`store:false`,
+  `instructions`, `include`, terminal-output assembly). Friendly quota/reset
+  error mapping remains deferred rather than part of patch 0002.
 - `crates/codegen/xai-grok-shell/src/agent/{config,models}.rs` +
   `crates/codegen/xai-chat-state/src/types.rs` — `[model.*]` config
   (`api_key`/`env_key`/`base_url`/`api_backend`/`extra_headers`) and its
@@ -119,8 +122,9 @@ Codex body differences are applied in `client.rs`.
   params). Browser flow with local callback server + manual-paste fallback;
   device-code flow for headless.
 - Storage: `~/.grok/openai_auth.json` (mode 0600) with
-  `{access_token, refresh_token, expires_at, account_id}`.
-  Optional (open question): read-compatibility with `~/.codex/auth.json`.
+  `{access_token, refresh_token, expires_at, account_id}`. The credential is
+  intentionally not shared with or imported from `~/.codex/auth.json`, avoiding
+  refresh-token races (see Decisions below).
 - Refresh: single-flight refresh when `expires_at - now < 300s`, persisted back.
 - CLI: `grok openai login [--device-code]`, `grok openai logout`,
   `grok openai status` wired in `xai-grok-pager/src/app/cli.rs`.
@@ -286,24 +290,31 @@ fresh first turn followed by a resumed prompt that requires local tools, then
 confirm every loop completed on attempt 1 and no `inference_retry` appears in
 `~/.grok/logs/unified.jsonl`.
 
-### Current maintenance state
+### Maintenance state and historical snapshot
 
-- Checkout branch `openai-oauth` is a five-commit stack at `230bc7c`, based on
-  `98c3b24`; final tree is `036b562925c84a7551fee6ceaf2e213fc0379c96`.
-- Patch 0002 owns the complete transport; patch 0005 is documentation-only.
+- **i0001 slice:** patches `0001–0005` end at commit `230bc7c`, based on
+  `98c3b24`; that five-patch slice has tree
+  `036b562925c84a7551fee6ceaf2e213fc0379c96`. These identifiers are a
+  historical verification snapshot for this initiative, not the current tip
+  of the combined repository stack.
+- **Current combined stack (through i0004):** 15 patches end at commit
+  `dcb0547f9235c27dddcfa61091d29c742e957840`, tree
+  `0d654afb16ebe075ddccc853ae5452174b2a659a`, still based on
+  `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce`. See
+  [i0004](i0004_release-ci.md) for the all-target CI validation.
+- Patch 0002 owns the complete Codex transport; patch 0005 is
+  documentation-only. Later initiatives stack on top without changing that
+  ownership.
 - Existing release binary:
-  `checkouts/grok-build/target/release/xai-grok-pager`. It was built and live
-  tested from the exact final tree above before the history-only patch-stack
-  refactor, so no post-refactor rebuild was necessary.
-- For a literal rebuild of the binary, run
-  `cargo build -p xai-grok-pager-bin --release` (release mode so the debug
-  tree isn't duplicated for the bin; test/check builds in any profile are
-  fine). `cargo fmt --all` may touch unrelated pager files, so
-  inspect/revert unrelated formatting before export.
-  Remove `target/release/incremental` afterward while preserving the binary.
-- Clean-room validation: create a detached worktree at `98c3b24`, `git am` all
-  five patches, run `git diff --check`, and compare the resulting tree hash to
-  the value above.
+  `checkouts/grok-build/target/release/xai-grok-pager`. For a literal local
+  rebuild, run `cargo build -p xai-grok-pager-bin --release` (release mode so
+  the debug tree isn't duplicated for the bin; test/check builds in any
+  profile are fine). `cargo fmt --all` may touch unrelated pager files, so
+  inspect/revert unrelated formatting before export. Remove
+  `target/release/incremental` afterward while preserving the binary.
+- To reproduce only i0001, clean-room `git am` patches `0001–0005` onto the
+  pinned base and compare with the historical slice tree above. To reproduce
+  the current product, apply the complete series; CI does this automatically.
 
 ## Decisions and deferred work
 

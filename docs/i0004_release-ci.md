@@ -1,9 +1,10 @@
 # i0004: Public repository and cross-platform release CI
 
-**Status:** implemented and verified
+**Status:** implemented; all five target builds verified; `v*` tag publication configured but not yet exercised
 **Upstream:** `checkouts/grok-build` (patch target for Windows portability)
 **Deliverable:** `.github/workflows/release.yml` plus `patches/grok-build/0013..0015`
 **Upstream base:** `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce`
+**Validated combined tip:** commit `dcb0547f9235c27dddcfa61091d29c742e957840`, tree `0d654afb16ebe075ddccc853ae5452174b2a659a` (15 patches)
 
 ## Goal
 
@@ -42,8 +43,8 @@ Tag events always select all targets.
 
 ## Windows portability patches
 
-The Rust workspace already compiled on Windows, but two upstream build/link
-assumptions blocked the final binary.
+Most of the Rust workspace compiled on Windows, but one Unix-only proto-build
+assumption and two MSVC linker limits blocked the final binary.
 
 ### Patch 0013 — protoc dependency hints
 
@@ -81,7 +82,9 @@ uploaded successfully.
   - `xai-grok-pager-x86_64-unknown-linux-gnu`
   - `xai-grok-pager-x86_64-pc-windows-msvc`
 - Manual-dispatch release job was skipped as designed; it runs only for
-  `refs/tags/v*` and uses the same verified build artifacts.
+  `refs/tags/v*` and consumes the same build artifacts. Therefore archive
+  production is verified, but creation of an actual tagged GitHub release and
+  `SHA256SUMS` attachment remains untested until the first `v*` tag.
 - Windows-only validation run after patches 0013–0015:
   https://github.com/iamwrm/grok-build-providers/actions/runs/29678121444
 
@@ -92,7 +95,7 @@ uploaded successfully.
   changes, fail before compiling rather than silently building another tree.
 - Use the currently supported `macos-15-intel` label for x86_64. The legacy
   `macos-13` label remained queued indefinitely during initial validation.
-- The release profile override removes debug info to reduce artifact size, but
-  MSVC still emits a minimal PDB internally; do not remove patches 0014/0015
+- The release profile override disables debug info to reduce artifact size,
+  but MSVC still emits a minimal PDB internally; do not remove patches 0014/0015
   unless the linker behavior or pager symbol volume changes.
 - Upstream is Apache-2.0; each archive includes its `LICENSE`.

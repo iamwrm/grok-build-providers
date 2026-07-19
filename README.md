@@ -18,6 +18,8 @@ upstream commit `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce` and builds
 - Linux arm64 and x86_64
 - Windows x86_64
 
-Run the workflow manually to download Actions artifacts. Pushing a `v*` tag
-publishes the five archives and `SHA256SUMS` as a GitHub release. Archives
-include the upstream Apache-2.0 `LICENSE`.
+Run the workflow manually to download Actions artifacts; those expire under
+GitHub's artifact-retention policy. The workflow is configured so pushing a
+`v*` tag publishes the five archives and `SHA256SUMS` as durable GitHub release
+assets (the tag-publication path has not yet been exercised). Archives include
+the upstream Apache-2.0 `LICENSE`.

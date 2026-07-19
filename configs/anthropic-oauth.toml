@@ -13,7 +13,7 @@
 # backed by the same stored ~/.grok/anthropic_auth.json credential. Grok
 # injects the Claude Code identity headers and system block automatically
 # for auth_scheme = "anthropic_oauth".
-[model.anthropic/custom-claude]
+[model."anthropic/custom-claude"]
 model = "custom-claude-model-id"
 base_url = "https://api.anthropic.com/v1"
 name = "Custom Claude (Anthropic)"
@@ -22,7 +22,8 @@ auth_scheme = "anthropic_oauth"
 context_window = 1000000
 max_completion_tokens = 128000
 supports_reasoning_effort = true
-# Only include "xhigh" for models with native xhigh support (Opus 4.7/4.8,
-# Sonnet 5, Fable 5); it passes through verbatim on the Messages wire and
-# older models reject it. "max" is accepted by every adaptive Claude model.
-reasoning_efforts = ["low", "medium", "high", "xhigh", "max"]
+# This generic entry uses the safe effort set accepted by every adaptive
+# Claude model. Add "xhigh" between "high" and "max" only when the concrete
+# model has native xhigh support (Opus 4.7/4.8, Sonnet 5, Fable 5); it passes
+# through verbatim and older models reject it.
+reasoning_efforts = ["low", "medium", "high", "max"]
