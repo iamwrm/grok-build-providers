@@ -22,6 +22,11 @@ env:
   # Base commit the patch series applies onto (docs/i0001..i0003).
   GROK_BUILD_BASE: 98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce
   CARGO_INCREMENTAL: "0"
+  # No debug info in release artifacts: the workspace is large enough that
+  # MSVC's PDB hits its public-symbol limit at link time (fatal LNK4319 on
+  # x86_64-pc-windows-msvc), and stripping debug info also shrinks every
+  # platform's download.
+  CARGO_PROFILE_RELEASE_DEBUG: "false"
 
 permissions:
   contents: write
