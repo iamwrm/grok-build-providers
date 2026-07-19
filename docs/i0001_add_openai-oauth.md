@@ -244,6 +244,62 @@ This patch changes documentation only:
 Browser/device login itself was not repeated during the automated run; the
 existing stored ChatGPT credential was used for live inference.
 
+## Handoff: requirements, gotchas, and maintenance tips
+
+### Requirements to preserve
+
+- Keep upstream clones disposable and ignored under `checkouts/`; the five
+  numbered patches in `patches/grok-build/` are the durable source of truth.
+  Do not add a fork or submodule.
+- Normal use must remain zero-config: login once, then switch in-app with
+  `/model openai-codex/gpt-5.5:xhigh` (or Ctrl+M). The TOML example is for
+  advanced overrides only.
+- Preserve `provider/model:effort` parsing by trying the full model id first and
+  splitting only the last colon; real model ids may contain colons.
+- Keep OpenAI credentials isolated from xAI and official Codex credentials.
+- Build release artifacts only; disk space is constrained.
+
+### Codex protocol gotchas
+
+These are part of patch 0002's baseline contract, not optional fallbacks:
+
+- Codex can stream visible text while leaving terminal `response.output` empty;
+  streamed text must be synthesized into the typed final response or Grok will
+  render an answer and then retry it as empty.
+- Complete function calls can arrive only in `response.output_item.done`; emit
+  live tool deltas **and** retain the completed call in the final response so
+  local tool loops continue.
+- Prior assistant text must be replayed as completed output messages with
+  `output_text`, `status`, and a stable id—not as easy-input assistant text.
+- Streamed reasoning summaries are display-only unless they carry an authentic
+  upstream id/signature. Never replay a synthesized empty reasoning id; Codex
+  rejects it with HTTP 400.
+- Gate all of the above on `AuthScheme::ChatgptOauth` so ordinary Responses
+  providers retain existing behavior.
+
+A one-turn greeting does not exercise these paths. Regression checks must use a
+fresh first turn followed by a resumed prompt that requires local tools, then
+confirm every loop completed on attempt 1 and no `inference_retry` appears in
+`~/.grok/logs/unified.jsonl`.
+
+### Current maintenance state
+
+- Checkout branch `openai-oauth` is a five-commit stack at `230bc7c`, based on
+  `98c3b24`; final tree is `036b562925c84a7551fee6ceaf2e213fc0379c96`.
+- Patch 0002 owns the complete transport; patch 0005 is documentation-only.
+- Existing release binary:
+  `checkouts/grok-build/target/release/xai-grok-pager`. It was built and live
+  tested from the exact final tree above before the history-only patch-stack
+  refactor, so no post-refactor rebuild was necessary.
+- For a literal rebuild, run only
+  `cargo build -p xai-grok-pager-bin --release`. `cargo fmt --all` may touch
+  unrelated pager files, so inspect/revert unrelated formatting before export.
+  Remove `target/release/incremental` afterward while preserving the binary;
+  do not generate `target/debug`.
+- Clean-room validation: create a detached worktree at `98c3b24`, `git am` all
+  five patches, run `git diff --check`, and compare the resulting tree hash to
+  the value above.
+
 ## Decisions and deferred work
 
 1. **`originator`:** resolved to `"codex_cli_rs"` for backend compatibility.
