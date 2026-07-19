@@ -1,0 +1,124 @@
+# Build patched grok-build release binaries for macOS, Linux, and Windows.
+#
+# The durable source of truth is patches/grok-build/*.patch applied onto the
+# pinned upstream base commit (see env.GROK_BUILD_BASE). Each job:
+#   1. checks out this repo and upstream xai-org/grok-build at the base commit,
+#   2. applies the full patch series with `git am`,
+#   3. builds xai-grok-pager in release mode (toolchain pinned by upstream's
+#      rust-toolchain.toml),
+#   4. uploads a per-target archive (binary + upstream Apache-2.0 LICENSE).
+#
+# On a `v*` tag push the archives (plus SHA256SUMS) are attached to a GitHub
+# release. `workflow_dispatch` builds artifacts without publishing.
+
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+env:
+  # Base commit the patch series applies onto (docs/i0001..i0003).
+  GROK_BUILD_BASE: 98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce
+  CARGO_INCREMENTAL: "0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - name: Checkout patches repo
+        uses: actions/checkout@v4
+
+      - name: Checkout upstream grok-build at pinned base
+        uses: actions/checkout@v4
+        with:
+          repository: xai-org/grok-build
+          ref: ${{ env.GROK_BUILD_BASE }}
+          path: checkouts/grok-build
+
+      - name: Apply patch series
+        shell: bash
+        working-directory: checkouts/grok-build
+        run: |
+          git config user.name "grok-build-providers-ci"
+          git config user.email "ci@invalid"
+          git am ../../patches/grok-build/*.patch
+          git log --oneline "${GROK_BUILD_BASE:0:12}..HEAD"
+
+      # aws-lc-sys (rustls crypto backend) assembles with NASM on Windows.
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: Build release binary
+        shell: bash
+        working-directory: checkouts/grok-build
+        # rustup auto-installs the toolchain pinned in rust-toolchain.toml.
+        run: cargo build -p xai-grok-pager-bin --release --locked
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="xai-grok-pager-${{ matrix.target }}"
+          mkdir -p "dist/$staging"
+          cp checkouts/grok-build/LICENSE "dist/$staging/"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp checkouts/grok-build/target/release/xai-grok-pager.exe "dist/$staging/"
+            (cd dist && 7z a "$staging.zip" "$staging" > /dev/null)
+            echo "ASSET=dist/$staging.zip" >> "$GITHUB_ENV"
+          else
+            cp checkouts/grok-build/target/release/xai-grok-pager "dist/$staging/"
+            tar -C dist -czf "dist/$staging.tar.gz" "$staging"
+            echo "ASSET=dist/$staging.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xai-grok-pager-${{ matrix.target }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
