@@ -22,4 +22,7 @@ auth_scheme = "anthropic_oauth"
 context_window = 1000000
 max_completion_tokens = 128000
 supports_reasoning_effort = true
-reasoning_efforts = ["low", "medium", "high", "max"]
+# Only include "xhigh" for models with native xhigh support (Opus 4.7/4.8,
+# Sonnet 5, Fable 5); it passes through verbatim on the Messages wire and
+# older models reject it. "max" is accepted by every adaptive Claude model.
+reasoning_efforts = ["low", "medium", "high", "xhigh", "max"]
