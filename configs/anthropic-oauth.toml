@@ -1,0 +1,25 @@
+# Anthropic Claude via a Claude Pro/Max plan requires NO config.toml changes.
+#
+# Sign in once:
+#   grok anthropic login
+#
+# Then switch inside the app:
+#   /model anthropic/claude-opus-4-8:high
+#
+# The built-in catalog is credential-gated and includes the adaptive-thinking
+# anthropic/* models (Opus 4.6-4.8, Sonnet 4.6/5, Fable 5).
+
+# Advanced example only: define an additional/custom Claude catalog entry
+# backed by the same stored ~/.grok/anthropic_auth.json credential. Grok
+# injects the Claude Code identity headers and system block automatically
+# for auth_scheme = "anthropic_oauth".
+[model.anthropic/custom-claude]
+model = "custom-claude-model-id"
+base_url = "https://api.anthropic.com/v1"
+name = "Custom Claude (Anthropic)"
+api_backend = "messages"
+auth_scheme = "anthropic_oauth"
+context_window = 1000000
+max_completion_tokens = 128000
+supports_reasoning_effort = true
+reasoning_efforts = ["low", "medium", "high", "max"]

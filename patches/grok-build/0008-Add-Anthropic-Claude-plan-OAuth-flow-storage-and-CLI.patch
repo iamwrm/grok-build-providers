@@ -1,0 +1,688 @@
+From aa6b1cf59ea0b9bc17e9cf1ba24d78a68fd1e7bb Mon Sep 17 00:00:00 2001
+From: Ren Wang <iamwrm@gmail.com>
+Date: Sun, 19 Jul 2026 11:15:49 +0800
+Subject: [PATCH 08/11] Add Anthropic Claude-plan OAuth flow, storage, and CLI
+
+Port pi's Anthropic (Claude Pro/Max) PKCE browser authentication flow with
+a paste-the-code fallback (claude.ai's code#state format). Store the
+isolated refreshable credential in ~/.grok/anthropic_auth.json and expose
+grok anthropic login, logout, and status commands.
+---
+ crates/codegen/xai-grok-pager-bin/src/main.rs |  16 +
+ crates/codegen/xai-grok-pager/src/app/cli.rs  |  23 +
+ .../xai-grok-shell/src/auth/anthropic.rs      | 585 ++++++++++++++++++
+ crates/codegen/xai-grok-shell/src/auth/mod.rs |   1 +
+ 4 files changed, 625 insertions(+)
+ create mode 100644 crates/codegen/xai-grok-shell/src/auth/anthropic.rs
+
+diff --git a/crates/codegen/xai-grok-pager-bin/src/main.rs b/crates/codegen/xai-grok-pager-bin/src/main.rs
+index d90fc8d..95ade94 100644
+--- a/crates/codegen/xai-grok-pager-bin/src/main.rs
++++ b/crates/codegen/xai-grok-pager-bin/src/main.rs
+@@ -1914,6 +1914,22 @@ async fn async_main() -> Result<()> {
+                 }
+                 xai_grok_shell::instrumentation::finalize_and_exit(0);
+             }
++            Command::Anthropic(ref anthropic_args) => {
++                init_tracing_simple("cli");
++                use xai_grok_pager::app::cli::AnthropicCommand;
++                match anthropic_args.command {
++                    AnthropicCommand::Login => {
++                        xai_grok_shell::auth::anthropic::run_cli_login().await?;
++                    }
++                    AnthropicCommand::Logout => {
++                        xai_grok_shell::auth::anthropic::run_cli_logout()?;
++                    }
++                    AnthropicCommand::Status => {
++                        xai_grok_shell::auth::anthropic::run_cli_status()?;
++                    }
++                }
++                xai_grok_shell::instrumentation::finalize_and_exit(0);
++            }
+             Command::Logout => {
+                 init_tracing_simple("cli");
+                 let config = xai_grok_shell::config::load_effective_config_disk_only()
+diff --git a/crates/codegen/xai-grok-pager/src/app/cli.rs b/crates/codegen/xai-grok-pager/src/app/cli.rs
+index 5996b56..58563d6 100644
+--- a/crates/codegen/xai-grok-pager/src/app/cli.rs
++++ b/crates/codegen/xai-grok-pager/src/app/cli.rs
+@@ -44,6 +44,8 @@ pub enum Command {
+     },
+     /// Manage the OpenAI (ChatGPT) provider credential
+     Openai(OpenaiArgs),
++    /// Manage the Anthropic (Claude Pro/Max) provider credential
++    Anthropic(AnthropicArgs),
+     /// Manage MCP server configurations
+     Mcp(crate::mcp_cmd::McpArgs),
+     /// Manage plugins and marketplace sources
+@@ -185,6 +187,27 @@ pub enum OpenaiCommand {
+     Status,
+ }
+ 
++/// Arguments for the `anthropic` subcommand.
++#[derive(Debug, clap::Args, Clone)]
++pub struct AnthropicArgs {
++    #[command(subcommand)]
++    pub command: AnthropicCommand,
++}
++
++/// `grok anthropic <login|logout|status>` — sign in to Anthropic with a
++/// Claude Pro/Max plan so the `anthropic/*` models become available.
++#[derive(Debug, Subcommand, Clone)]
++pub enum AnthropicCommand {
++    /// Sign in to Anthropic (Claude Pro/Max). Opens a browser; paste the
++    /// redirect URL or the code shown by claude.ai when the browser runs
++    /// on another machine.
++    Login,
++    /// Remove the stored Anthropic credential.
++    Logout,
++    /// Show the stored Anthropic credential status.
++    Status,
++}
++
+ /// Arguments for the `wrap` subcommand: the command to run, then its args.
+ #[derive(Debug, clap::Args, Clone)]
+ pub struct WrapArgs {
+diff --git a/crates/codegen/xai-grok-shell/src/auth/anthropic.rs b/crates/codegen/xai-grok-shell/src/auth/anthropic.rs
+new file mode 100644
+index 0000000..0a6b363
+--- /dev/null
++++ b/crates/codegen/xai-grok-shell/src/auth/anthropic.rs
+@@ -0,0 +1,585 @@
++//! Anthropic (Claude Pro/Max) OAuth.
++//!
++//! Reimplements the consumer OAuth flow used by Claude Code (and by pi's
++//! `anthropic` provider): PKCE authorization-code flow against
++//! `claude.ai` with a fixed loopback callback on port 53692, plus a
++//! paste-the-code fallback for browsers on another machine (claude.ai
++//! displays a `code#state` pair for manual copy).
++//!
++//! The resulting access token (`sk-ant-oat...`) is used as the bearer for
++//! requests to the Anthropic Messages API together with the Claude Code
++//! identity headers (`anthropic-beta: claude-code-...,oauth-...`).
++//!
++//! Credentials are stored in `~/.grok/anthropic_auth.json` (owner-only),
++//! separate from the xAI session in `auth.json`: this is a per-provider
++//! model credential, not the Grok session.
++
++use std::collections::HashMap;
++use std::io::IsTerminal;
++use std::path::PathBuf;
++use std::sync::Mutex;
++
++use anyhow::{Context, anyhow, bail};
++use axum::{
++    Router,
++    extract::{Query, State},
++    http::StatusCode,
++    response::Html,
++    routing::get,
++};
++use base64::Engine;
++use base64::engine::general_purpose::URL_SAFE_NO_PAD;
++use chrono::Utc;
++use serde::{Deserialize, Serialize};
++use sha2::{Digest, Sha256};
++use tokio::net::TcpListener;
++
++/// Public client id of the official Claude Code CLI (same one pi uses).
++const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
++const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
++const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
++/// Fixed loopback callback registered for [`CLIENT_ID`]; the port must be 53692.
++const REDIRECT_URI: &str = "http://localhost:53692/callback";
++const CALLBACK_PORT: u16 = 53692;
++const SCOPES: &str = "org:create_api_key user:profile user:inference \
++                      user:sessions:claude_code user:mcp_servers user:file_upload";
++/// Claude Code CLI version advertised in the `user-agent` header
++/// (`claude-cli/<version>`); kept in sync with pi's `anthropic-messages`.
++pub const CLAUDE_CODE_VERSION: &str = "2.1.75";
++/// `anthropic-beta` value required for OAuth (Claude Code identity) requests.
++pub const OAUTH_BETA_HEADER: &str = "claude-code-20250219,oauth-2025-04-20";
++/// Refresh this long before expiry.
++const EARLY_REFRESH_SECS: i64 = 300;
++/// Maximum time to wait for the browser callback / pasted code.
++const AUTH_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
++
++// ============================================================================
++// Credential storage
++// ============================================================================
++
++/// Stored Anthropic OAuth credential.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
++pub struct AnthropicCredential {
++    pub access_token: String,
++    pub refresh_token: String,
++    /// Unix seconds when `access_token` expires.
++    pub expires_at: i64,
++}
++
++impl AnthropicCredential {
++    pub fn is_expired_or_near(&self) -> bool {
++        self.expires_at - EARLY_REFRESH_SECS <= Utc::now().timestamp()
++    }
++}
++
++/// Path of the stored credential: `~/.grok/anthropic_auth.json`.
++pub fn credential_path() -> PathBuf {
++    crate::util::grok_home::grok_home().join("anthropic_auth.json")
++}
++
++/// Read the stored credential, if any. Corrupt files read as `None`.
++pub fn read_credential() -> Option<AnthropicCredential> {
++    let raw = std::fs::read_to_string(credential_path()).ok()?;
++    match serde_json::from_str(&raw) {
++        Ok(cred) => Some(cred),
++        Err(e) => {
++            tracing::warn!(error = %e, "anthropic auth: failed to parse anthropic_auth.json");
++            None
++        }
++    }
++}
++
++/// Persist the credential with owner-only permissions.
++pub fn store_credential(cred: &AnthropicCredential) -> anyhow::Result<()> {
++    let path = credential_path();
++    if let Some(parent) = path.parent() {
++        std::fs::create_dir_all(parent)
++            .with_context(|| format!("creating {}", parent.display()))?;
++    }
++    let json = serde_json::to_string_pretty(cred)?;
++    std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
++    }
++    Ok(())
++}
++
++/// Delete the stored credential. Returns `true` if a file was removed.
++pub fn clear_credential() -> anyhow::Result<bool> {
++    match std::fs::remove_file(credential_path()) {
++        Ok(()) => Ok(true),
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
++        Err(e) => Err(e.into()),
++    }
++}
++
++// ============================================================================
++// Token plumbing
++// ============================================================================
++
++#[derive(Debug, Deserialize)]
++struct TokenResponse {
++    access_token: String,
++    refresh_token: String,
++    expires_in: i64,
++}
++
++fn credential_from_token_response(tokens: TokenResponse) -> AnthropicCredential {
++    AnthropicCredential {
++        access_token: tokens.access_token,
++        refresh_token: tokens.refresh_token,
++        expires_at: Utc::now().timestamp() + tokens.expires_in,
++    }
++}
++
++async fn read_token_response(
++    response: reqwest::Response,
++    operation: &str,
++) -> anyhow::Result<TokenResponse> {
++    let status = response.status();
++    let body = response.text().await.unwrap_or_default();
++    if !status.is_success() {
++        bail!("Anthropic token {operation} failed ({status}): {body}");
++    }
++    serde_json::from_str(&body)
++        .with_context(|| format!("Anthropic token {operation} response missing fields: {body}"))
++}
++
++/// Exchange the authorization code. Unlike the OpenAI endpoint this one
++/// takes a JSON body and additionally requires the `state` value.
++async fn exchange_authorization_code(
++    code: &str,
++    state: &str,
++    code_verifier: &str,
++) -> anyhow::Result<AnthropicCredential> {
++    let response = reqwest::Client::new()
++        .post(TOKEN_URL)
++        .json(&serde_json::json!({
++            "grant_type": "authorization_code",
++            "client_id": CLIENT_ID,
++            "code": code,
++            "state": state,
++            "redirect_uri": REDIRECT_URI,
++            "code_verifier": code_verifier,
++        }))
++        .send()
++        .await
++        .context("Anthropic token exchange request failed")?;
++    Ok(credential_from_token_response(
++        read_token_response(response, "exchange").await?,
++    ))
++}
++
++/// Refresh the access token with the stored refresh token.
++pub async fn refresh_credential(refresh_token: &str) -> anyhow::Result<AnthropicCredential> {
++    let response = reqwest::Client::new()
++        .post(TOKEN_URL)
++        .json(&serde_json::json!({
++            "grant_type": "refresh_token",
++            "client_id": CLIENT_ID,
++            "refresh_token": refresh_token,
++        }))
++        .send()
++        .await
++        .context("Anthropic token refresh request failed")?;
++    let cred = credential_from_token_response(read_token_response(response, "refresh").await?);
++    store_credential(&cred)?;
++    Ok(cred)
++}
++
++/// Read the stored credential, refreshing (and persisting) when near expiry.
++pub async fn ensure_fresh_credential() -> anyhow::Result<AnthropicCredential> {
++    let cred = read_credential()
++        .ok_or_else(|| anyhow!("not signed in to Anthropic. Run `grok anthropic login` first"))?;
++    if !cred.is_expired_or_near() {
++        return Ok(cred);
++    }
++    tracing::info!("anthropic auth: access token near expiry, refreshing");
++    refresh_credential(&cred.refresh_token).await
++}
++
++/// Live bearer source for the sampler: reads (and refreshes) the stored
++/// Anthropic OAuth credential on every request. Installed by the shell for
++/// models with `auth_scheme = "anthropic_oauth"`.
++#[derive(Debug)]
++pub struct AnthropicBearerResolver;
++
++impl xai_grok_sampler::BearerResolver for AnthropicBearerResolver {
++    fn current_bearer(&self) -> Option<String> {
++        current_bearer_blocking()
++    }
++}
++
++/// Process-wide single-flight guard for [`current_bearer_blocking`] refreshes.
++static REFRESH_LOCK: Mutex<()> = Mutex::new(());
++
++/// Synchronous bearer lookup for the sampler's `BearerResolver` seam.
++///
++/// Reads the credential from disk; when near expiry, performs a blocking
++/// refresh on a dedicated thread (safe to call from async contexts — the
++/// HTTP call runs on its own thread with its own runtime).
++pub fn current_bearer_blocking() -> Option<String> {
++    let cred = read_credential()?;
++    if !cred.is_expired_or_near() {
++        return Some(cred.access_token);
++    }
++    let _guard = REFRESH_LOCK.lock().ok()?;
++    // Re-read: another thread may have refreshed while we waited on the lock.
++    let cred = read_credential()?;
++    if !cred.is_expired_or_near() {
++        return Some(cred.access_token);
++    }
++    let refresh_token = cred.refresh_token.clone();
++    let result = std::thread::spawn(move || {
++        tokio::runtime::Builder::new_current_thread()
++            .enable_all()
++            .build()
++            .map_err(anyhow::Error::from)
++            .and_then(|rt| rt.block_on(refresh_credential(&refresh_token)))
++    })
++    .join();
++    match result {
++        Ok(Ok(fresh)) => Some(fresh.access_token),
++        Ok(Err(e)) => {
++            tracing::warn!(error = %e, "anthropic auth: token refresh failed");
++            // Serve the stale token; the request will 401 with a clear error.
++            Some(cred.access_token)
++        }
++        Err(_) => Some(cred.access_token),
++    }
++}
++
++// ============================================================================
++// PKCE
++// ============================================================================
++
++struct Pkce {
++    verifier: String,
++    challenge: String,
++}
++
++fn generate_pkce() -> Pkce {
++    use rand::RngCore;
++    let mut random_bytes = [0u8; 32];
++    rand::rng().fill_bytes(&mut random_bytes);
++    let verifier = URL_SAFE_NO_PAD.encode(random_bytes);
++    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
++    Pkce {
++        verifier,
++        challenge,
++    }
++}
++
++/// The Claude flow uses the PKCE verifier itself as the OAuth `state`
++/// (pi parity), so the pasted `code#state` fallback can be validated
++/// without any extra bookkeeping.
++fn build_authorize_url(pkce: &Pkce) -> String {
++    let mut url = url::Url::parse(AUTHORIZE_URL).expect("static authorize URL parses");
++    url.query_pairs_mut()
++        .append_pair("code", "true")
++        .append_pair("client_id", CLIENT_ID)
++        .append_pair("response_type", "code")
++        .append_pair("redirect_uri", REDIRECT_URI)
++        .append_pair("scope", SCOPES)
++        .append_pair("code_challenge", &pkce.challenge)
++        .append_pair("code_challenge_method", "S256")
++        .append_pair("state", &pkce.verifier);
++    url.to_string()
++}
++
++// ============================================================================
++// Browser login (loopback callback on port 53692 + stdin paste fallback)
++// ============================================================================
++
++#[derive(Debug)]
++struct Callback {
++    code: String,
++    state: String,
++}
++
++type CallbackResult = Result<Callback, String>;
++
++/// Parse a pasted redirect URL, `code#state` pair, or bare code.
++/// claude.ai shows the manual-copy credential as `code#state`.
++fn parse_pasted_input(input: &str) -> Option<Callback> {
++    let input = input.trim();
++    if input.is_empty() {
++        return None;
++    }
++    if let Ok(url) = url::Url::parse(input) {
++        let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
++        if let Some(code) = params.get("code") {
++            return Some(Callback {
++                code: code.clone(),
++                state: params.get("state").cloned().unwrap_or_default(),
++            });
++        }
++        return None;
++    }
++    if let Some((code, state)) = input.split_once('#') {
++        return Some(Callback {
++            code: code.to_owned(),
++            state: state.to_owned(),
++        });
++    }
++    Some(Callback {
++        code: input.to_owned(),
++        state: String::new(),
++    })
++}
++
++fn callback_page(title: &str, message: &str) -> String {
++    format!(
++        r#"<!DOCTYPE html>
++<html lang="en"><head><meta charset="utf-8"/><meta name="color-scheme" content="light dark"/>
++<title>{title}</title>
++<style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
++display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0a0a0a;color:#e5e5e5}}
++.card{{text-align:center;padding:48px}}h1{{font-size:18px;font-weight:600}}p{{font-size:14px;color:#a3a3a3}}
++@media(prefers-color-scheme:light){{body{{background:#fafafa;color:#171717}}p{{color:#525252}}}}</style>
++</head><body><div class="card"><h1>{title}</h1><p>{message}</p></div></body></html>"#
++    )
++}
++
++async fn handle_callback(
++    State(tx): State<tokio::sync::mpsc::Sender<CallbackResult>>,
++    Query(params): Query<HashMap<String, String>>,
++) -> (StatusCode, Html<String>) {
++    let result = if let Some(code) = params.get("code") {
++        Ok(Callback {
++            code: code.clone(),
++            state: params.get("state").cloned().unwrap_or_default(),
++        })
++    } else {
++        let error = params.get("error").cloned().unwrap_or_default();
++        let desc = params.get("error_description").cloned().unwrap_or_default();
++        Err(if desc.is_empty() {
++            error
++        } else {
++            format!("{error}: {desc}")
++        })
++    };
++    let response = match &result {
++        Ok(_) => (
++            StatusCode::OK,
++            Html(callback_page(
++                "Signed in to Anthropic",
++                "You can close this window and return to Grok Build.",
++            )),
++        ),
++        Err(_) => (
++            StatusCode::OK,
++            Html(callback_page(
++                "Sign-in failed",
++                "Close this window and try again.",
++            )),
++        ),
++    };
++    if let Err(e) = tx.try_send(result) {
++        tracing::error!(?e, "anthropic auth: callback channel send failed");
++    }
++    response
++}
++
++fn spawn_stdin_reader(tx: tokio::sync::mpsc::Sender<CallbackResult>) {
++    tokio::task::spawn_blocking(move || {
++        use std::io::BufRead;
++        let stdin = std::io::stdin();
++        loop {
++            if tx.is_closed() {
++                return;
++            }
++            let mut buf = String::new();
++            match stdin.lock().read_line(&mut buf) {
++                Ok(0) | Err(_) => return,
++                Ok(_) => {}
++            }
++            let trimmed = buf.trim();
++            if trimmed.is_empty() {
++                continue;
++            }
++            match parse_pasted_input(trimmed) {
++                Some(cb) => {
++                    let _ = tx.blocking_send(Ok(cb));
++                    return;
++                }
++                None => eprintln!(
++                    "  Could not parse input; paste the full redirect URL or the code#state pair:"
++                ),
++            }
++        }
++    });
++}
++
++async fn login_browser() -> anyhow::Result<AnthropicCredential> {
++    let pkce = generate_pkce();
++    let auth_url = build_authorize_url(&pkce);
++
++    let listener = TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
++        .await
++        .map_err(|e| {
++            anyhow!(
++                "could not bind 127.0.0.1:{CALLBACK_PORT} for the Anthropic login callback \
++                 ({e}). Close the conflicting program and retry."
++            )
++        })?;
++
++    let (tx, mut rx) = tokio::sync::mpsc::channel::<CallbackResult>(1);
++    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
++    let app = Router::new()
++        .route("/callback", get(handle_callback))
++        .with_state(tx.clone());
++    let server = tokio::spawn(async move {
++        let _ = axum::serve(listener, app)
++            .with_graceful_shutdown(async {
++                let _ = shutdown_rx.await;
++            })
++            .await;
++    });
++
++    eprintln!();
++    eprintln!("Signing in to Anthropic (Claude Pro/Max)...");
++    eprintln!();
++    if let Err(e) = webbrowser::open(&auth_url) {
++        tracing::debug!(error = %e, "anthropic auth: failed to open browser");
++    }
++    eprintln!("Open this URL to sign in:");
++    eprintln!("  {auth_url}");
++    let use_stdin = std::io::stdin().is_terminal();
++    if use_stdin {
++        eprintln!();
++        eprintln!(
++            "Paste the redirect URL or the code shown by claude.ai here if the browser \
++             can't reach this machine:"
++        );
++        spawn_stdin_reader(tx.clone());
++    }
++    drop(tx);
++
++    let callback = tokio::time::timeout(AUTH_CALLBACK_TIMEOUT, rx.recv())
++        .await
++        .map_err(|_| anyhow!("timed out waiting for the Anthropic login callback"))?
++        .ok_or_else(|| anyhow!("Anthropic login callback channel closed"))?
++        .map_err(|e| anyhow!("Anthropic sign-in failed: {e}"))?;
++
++    let _ = shutdown_tx.send(());
++    let _ = server.await;
++
++    if !callback.state.is_empty() && callback.state != pkce.verifier {
++        bail!("Anthropic sign-in failed: state mismatch");
++    }
++    let state = if callback.state.is_empty() {
++        pkce.verifier.clone()
++    } else {
++        callback.state
++    };
++    exchange_authorization_code(&callback.code, &state, &pkce.verifier).await
++}
++
++// ============================================================================
++// CLI entry points
++// ============================================================================
++
++/// `grok anthropic login`
++pub async fn run_cli_login() -> anyhow::Result<()> {
++    let cred = login_browser().await?;
++    store_credential(&cred)?;
++    eprintln!();
++    eprintln!(
++        "Signed in to Anthropic. Credential saved to {}.",
++        credential_path().display()
++    );
++    eprintln!("Switch models with `/model anthropic/<model>` inside Grok.");
++    Ok(())
++}
++
++/// `grok anthropic logout`
++pub fn run_cli_logout() -> anyhow::Result<()> {
++    if clear_credential()? {
++        eprintln!(
++            "Signed out of Anthropic; removed {}.",
++            credential_path().display()
++        );
++    } else {
++        eprintln!("No Anthropic credential to remove.");
++    }
++    Ok(())
++}
++
++/// `grok anthropic status`
++pub fn run_cli_status() -> anyhow::Result<()> {
++    match read_credential() {
++        Some(cred) => {
++            let expires = chrono::DateTime::from_timestamp(cred.expires_at, 0)
++                .map(|t| t.to_rfc3339())
++                .unwrap_or_else(|| cred.expires_at.to_string());
++            println!("Signed in to Anthropic (Claude Pro/Max).");
++            println!(
++                "  access token: {}expired (expires {expires})",
++                if cred.is_expired_or_near() {
++                    ""
++                } else {
++                    "not "
++                }
++            );
++            println!("  credential file: {}", credential_path().display());
++        }
++        None => {
++            println!("Not signed in to Anthropic. Run `grok anthropic login`.");
++        }
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn parses_pasted_redirect_url_code_hash_state_and_bare_code() {
++        let cb = parse_pasted_input("http://localhost:53692/callback?code=abc&state=xyz").unwrap();
++        assert_eq!((cb.code.as_str(), cb.state.as_str()), ("abc", "xyz"));
++
++        // claude.ai manual-copy format
++        let cb = parse_pasted_input("abc#xyz").unwrap();
++        assert_eq!((cb.code.as_str(), cb.state.as_str()), ("abc", "xyz"));
++
++        let cb = parse_pasted_input("  bare-code  ").unwrap();
++        assert_eq!((cb.code.as_str(), cb.state.as_str()), ("bare-code", ""));
++
++        assert!(parse_pasted_input("").is_none());
++        assert!(parse_pasted_input("http://localhost:53692/callback?error=denied").is_none());
++    }
++
++    #[test]
++    fn authorize_url_carries_pkce_and_uses_verifier_as_state() {
++        let pkce = generate_pkce();
++        let url = build_authorize_url(&pkce);
++        let parsed = url::Url::parse(&url).unwrap();
++        let params: HashMap<String, String> = parsed.query_pairs().into_owned().collect();
++        assert_eq!(params["client_id"], CLIENT_ID);
++        assert_eq!(params["redirect_uri"], REDIRECT_URI);
++        assert_eq!(params["code"], "true");
++        assert_eq!(params["code_challenge_method"], "S256");
++        assert_eq!(params["state"], pkce.verifier);
++        assert_eq!(
++            params["code_challenge"],
++            URL_SAFE_NO_PAD.encode(Sha256::digest(pkce.verifier.as_bytes()))
++        );
++        assert!(params["scope"].contains("user:inference"));
++    }
++
++    #[test]
++    fn expiry_check_honors_early_refresh_window() {
++        let mut cred = AnthropicCredential {
++            access_token: "a".into(),
++            refresh_token: "r".into(),
++            expires_at: Utc::now().timestamp() + 3600,
++        };
++        assert!(!cred.is_expired_or_near());
++        cred.expires_at = Utc::now().timestamp() + EARLY_REFRESH_SECS - 10;
++        assert!(cred.is_expired_or_near());
++    }
++}
+diff --git a/crates/codegen/xai-grok-shell/src/auth/mod.rs b/crates/codegen/xai-grok-shell/src/auth/mod.rs
+index 5cb283f..a1227a7 100644
+--- a/crates/codegen/xai-grok-shell/src/auth/mod.rs
++++ b/crates/codegen/xai-grok-shell/src/auth/mod.rs
+@@ -1,3 +1,4 @@
++pub mod anthropic;
+ pub(crate) mod attribution;
+ mod config;
+ pub mod credential_provider;
+-- 
+2.50.1 (Apple Git-155)
+
