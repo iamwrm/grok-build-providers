@@ -257,7 +257,11 @@ existing stored ChatGPT credential was used for live inference.
 - Preserve `provider/model:effort` parsing by trying the full model id first and
   splitting only the last colon; real model ids may contain colons.
 - Keep OpenAI credentials isolated from xAI and official Codex credentials.
-- Build release artifacts only; disk space is constrained.
+- Disk space is constrained: when building the **binary**, build it in
+  release mode only (`cargo build -p xai-grok-pager-bin --release`) — don't
+  produce a debug binary on top. Building/running unit tests, `cargo check`,
+  etc. is fine in either profile; the point is to avoid duplicating the big
+  final artifacts across `target/debug` and `target/release`.
 
 ### Codex protocol gotchas
 
@@ -291,11 +295,12 @@ confirm every loop completed on attempt 1 and no `inference_retry` appears in
   `checkouts/grok-build/target/release/xai-grok-pager`. It was built and live
   tested from the exact final tree above before the history-only patch-stack
   refactor, so no post-refactor rebuild was necessary.
-- For a literal rebuild, run only
-  `cargo build -p xai-grok-pager-bin --release`. `cargo fmt --all` may touch
-  unrelated pager files, so inspect/revert unrelated formatting before export.
-  Remove `target/release/incremental` afterward while preserving the binary;
-  do not generate `target/debug`.
+- For a literal rebuild of the binary, run
+  `cargo build -p xai-grok-pager-bin --release` (release mode so the debug
+  tree isn't duplicated for the bin; test/check builds in any profile are
+  fine). `cargo fmt --all` may touch unrelated pager files, so
+  inspect/revert unrelated formatting before export.
+  Remove `target/release/incremental` afterward while preserving the binary.
 - Clean-room validation: create a detached worktree at `98c3b24`, `git am` all
   five patches, run `git diff --check`, and compare the resulting tree hash to
   the value above.
