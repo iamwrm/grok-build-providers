@@ -1,0 +1,39 @@
+From dcb0547f9235c27dddcfa61091d29c742e957840 Mon Sep 17 00:00:00 2001
+From: Ren Wang <iamwrm@gmail.com>
+Date: Sun, 19 Jul 2026 15:25:46 +0800
+Subject: [PATCH] Truncate pathological long symbols in MSVC release PDBs
+
+Even at link.exe's maximum 16 KiB PDB page size, one generated/generic pager
+symbol triggers LNK4318 then exhausts the public-symbol table with LNK4319.
+Use link.exe's recommended DEBUG:LongSymbolTruncate mode on Windows while
+retaining useful release PDB symbols.
+---
+ .cargo/config.toml | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/.cargo/config.toml b/.cargo/config.toml
+index 5fdac76..c5a08b7 100644
+--- a/.cargo/config.toml
++++ b/.cargo/config.toml
+@@ -66,6 +66,10 @@ rustflags = [
+     # The pager's public-symbol table exceeds the default 4 KiB PDB page
+     # capacity (fatal LNK4319); 16 KiB is link.exe's supported maximum.
+     "-C", "link-arg=/PDBPAGESIZE:16384",
++    # The pager also contains generated/generic symbols long enough to hit
++    # LNK4318 and exhaust the PDB public-symbol table even at 16 KiB pages.
++    # Retain useful symbols while truncating only those pathological names.
++    "-C", "link-arg=/DEBUG:LongSymbolTruncate",
+ ]
+ 
+ [target.aarch64-pc-windows-msvc]
+@@ -73,6 +77,7 @@ rustflags = [
+     "-C", "force-unwind-tables=yes",
+     "-C", "target-feature=+crt-static",
+     "-C", "link-arg=/PDBPAGESIZE:16384",
++    "-C", "link-arg=/DEBUG:LongSymbolTruncate",
+ ]
+ 
+ 
+-- 
+2.50.1 (Apple Git-155)
+
