@@ -1,0 +1,724 @@
+From 1acbe1e617a0696577d518668339e9591cb60f2c Mon Sep 17 00:00:00 2001
+From: Ren Wang <iamwrm@gmail.com>
+Date: Sun, 19 Jul 2026 10:28:47 +0800
+Subject: [PATCH 6/7] Add max reasoning effort above xhigh
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Make `max` a distinct canonical reasoning-effort level instead of a UX
+alias of `xhigh`, mirroring pi's thinking levels:
+
+- async-openai's Responses enum has no Max, so the typed request carries
+  an Xhigh placeholder and the sampler restores the literal "max" wire
+  value post-serialize (patch_reasoning_effort_max), driven by a
+  process-local canonical-effort field on CreateResponseWrapper.
+- An echoed reasoning.effort the typed enum can't parse is sanitized to
+  xhigh with the raw string stashed in response metadata
+  (sanitize_unknown_reasoning_effort); effort provenance stamped on
+  assistant items prefers the stash, so Max round-trips.
+- Only the built-in Codex gpt-5.6 entries offer a real Max menu level
+  (pi's supportsOpenAiMax). Elsewhere — pager effort-token resolution
+  and subagent effort overrides — a requested max downgrades to an
+  offered xhigh, preserving the old alias behavior instead of newly
+  rejecting the token or sending a wire value the backend rejects.
+- Anthropic Messages: Max maps to "max" like Xhigh (that API's ceiling).
+---
+ .../xai-grok-pager/src/acp/model_state.rs     |  73 +++++++-
+ .../src/slash/commands/effort_levels.rs       |   3 +
+ crates/codegen/xai-grok-sampler/src/client.rs |  62 ++++++-
+ .../src/conversation.rs                       | 172 +++++++++++++++++-
+ .../xai-grok-sampling-types/src/types.rs      |  54 +++++-
+ .../xai-grok-shell/src/agent/config.rs        |  42 +++--
+ .../src/agent/session_config.rs               |   1 +
+ .../src/agent/subagent/handle_request.rs      |  17 +-
+ 8 files changed, 383 insertions(+), 41 deletions(-)
+
+diff --git a/crates/codegen/xai-grok-pager/src/acp/model_state.rs b/crates/codegen/xai-grok-pager/src/acp/model_state.rs
+index ccb7260..9adf91e 100644
+--- a/crates/codegen/xai-grok-pager/src/acp/model_state.rs
++++ b/crates/codegen/xai-grok-pager/src/acp/model_state.rs
+@@ -231,14 +231,23 @@ impl ModelState {
+         {
+             return Some(option.value);
+         }
+-        // Canonical level (e.g. "high", "max"→xhigh) only if the model menu
+-        // actually offers that value — not free-form power-user aliases that
+-        // would 400 on the server (e.g. `none` on grok-4.5).
++        // Canonical level (e.g. "high") only if the model menu actually
++        // offers that value — not free-form power-user aliases that would
++        // 400 on the server (e.g. `none` on grok-4.5).
+         let parsed = token.parse::<ReasoningEffort>().ok()?;
+-        options
+-            .iter()
+-            .find(|opt| opt.value == parsed)
+-            .map(|o| o.value)
++        if let Some(option) = options.iter().find(|opt| opt.value == parsed) {
++            return Some(option.value);
++        }
++        // `max` was historically a UX alias of xhigh; on models whose menu
++        // does not offer a real Max level, keep that behavior by downgrading
++        // to an offered Xhigh instead of newly rejecting the token.
++        if parsed == ReasoningEffort::Max {
++            return options
++                .iter()
++                .find(|opt| opt.value == ReasoningEffort::Xhigh)
++                .map(|o| o.value);
++        }
++        None
+     }
+ 
+     /// Canonical effort-token policy: gate on the model's support flag first,
+@@ -610,6 +619,56 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn resolve_effort_token_max_downgrades_to_xhigh_unless_offered() {
++        // Menu with a real Max level (Codex gpt-5.6 style): `max` is distinct.
++        let with_max = state_with_meta(Some(serde_json::json!({
++            "supportsReasoningEffort": true,
++            "reasoningEfforts": [
++                { "value": "xhigh", "label": "Extra high" },
++                { "value": "max", "label": "Max" },
++            ],
++        })));
++        assert_eq!(
++            with_max.resolve_effort_token("max"),
++            Some(ReasoningEffort::Max)
++        );
++        assert_eq!(
++            with_max.resolve_effort_token("xhigh"),
++            Some(ReasoningEffort::Xhigh)
++        );
++
++        // Menu topping out at xhigh: `max` keeps its historical alias
++        // behavior and downgrades instead of newly erroring.
++        let without_max = state_with_meta(Some(serde_json::json!({
++            "supportsReasoningEffort": true,
++            "reasoningEfforts": [
++                { "value": "high", "label": "High" },
++                { "value": "xhigh", "label": "Extra high" },
++            ],
++        })));
++        assert_eq!(
++            without_max.resolve_effort_token("max"),
++            Some(ReasoningEffort::Xhigh)
++        );
++
++        // Legacy built-in menu (no server list) also downgrades.
++        let legacy = state_with_meta(Some(serde_json::json!({
++            "supportsReasoningEffort": true,
++        })));
++        assert_eq!(
++            legacy.resolve_effort_token("max"),
++            Some(ReasoningEffort::Xhigh)
++        );
++
++        // No xhigh either → still rejected (no silent multi-step downgrade).
++        let low_only = state_with_meta(Some(serde_json::json!({
++            "supportsReasoningEffort": true,
++            "reasoningEfforts": [{ "value": "low", "label": "Low" }],
++        })));
++        assert!(low_only.resolve_effort_token("max").is_none());
++    }
++
+     #[test]
+     fn resolve_effort_token_legacy_menu_rejects_none() {
+         // supportsReasoningEffort without a server list → built-in low..xhigh.
+diff --git a/crates/codegen/xai-grok-pager/src/slash/commands/effort_levels.rs b/crates/codegen/xai-grok-pager/src/slash/commands/effort_levels.rs
+index 7f79110..3e6e1c2 100644
+--- a/crates/codegen/xai-grok-pager/src/slash/commands/effort_levels.rs
++++ b/crates/codegen/xai-grok-pager/src/slash/commands/effort_levels.rs
+@@ -21,6 +21,9 @@ pub(crate) fn effort_description(level: ReasoningEffort) -> &'static str {
+         ReasoningEffort::Medium => "Balanced reasoning",
+         ReasoningEffort::High => "Heavy reasoning",
+         ReasoningEffort::Xhigh => "Maximum reasoning",
++        // Not in the legacy fallback menu; only models whose server/catalog
++        // menu offers `max` (e.g. Codex gpt-5.6) surface this level.
++        ReasoningEffort::Max => "Deepest reasoning",
+     }
+ }
+ 
+diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
+index 876914a..b99b31c 100644
+--- a/crates/codegen/xai-grok-sampler/src/client.rs
++++ b/crates/codegen/xai-grok-sampler/src/client.rs
+@@ -100,7 +100,8 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
+     let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
+         Ok(event) => event,
+         Err(first_err) => {
+-            // Try sanitizing: parse as Value, strip unknown tools, retry.
++            // Try sanitizing: parse as Value, strip unknown tools, rewrite
++            // unknown reasoning efforts, retry.
+             if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) {
+                 // Strip tools that async_openai's rs::Tool can't deserialize
+                 // (e.g., xAI-specific "x_search"). Instead of maintaining a
+@@ -112,6 +113,12 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
+                 {
+                     tools.retain(|t| serde_json::from_value::<rs::Tool>(t.clone()).is_ok());
+                 }
++                // An echoed `reasoning.effort` the typed enum lacks (`max`)
++                // is stashed into response metadata and downgraded so the
++                // typed parse succeeds; provenance readers prefer the stash.
++                if let Some(response) = value.pointer_mut("/response") {
++                    xai_grok_sampling_types::sanitize_unknown_reasoning_effort(response);
++                }
+                 if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
+                     apply_terminal_event_overrides(&mut event, data);
+                     return Ok(event);
+@@ -1291,6 +1298,12 @@ impl SamplingClient {
+         // it in post-serialize. This is the last surviving piece of the
+         // old raw_output machinery.
+         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
++        // async-openai's ReasoningEffort enum has no `max`; the typed value
++        // is a downgraded placeholder. Restore the literal wire value.
++        xai_grok_sampling_types::patch_reasoning_effort_max(
++            &mut request_body,
++            request.reasoning_effort,
++        );
+         if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
+             apply_chatgpt_codex_request_shape(&mut request_body);
+         }
+@@ -1345,15 +1358,32 @@ impl SamplingClient {
+             });
+         }
+ 
+-        let response_obj = serde_json::from_slice::<rs::Response>(&bytes).map_err(|e| {
+-            let raw_body = String::from_utf8_lossy(&bytes);
+-            tracing::error!(
+-                error = %e,
+-                raw_body = %raw_body,
+-                "Failed to deserialize rs::Response"
+-            );
+-            SamplingError::Serialization(e)
+-        })?;
++        let response_obj = match serde_json::from_slice::<rs::Response>(&bytes) {
++            Ok(response) => response,
++            Err(first_err) => {
++                // Retry once after rewriting an echoed `reasoning.effort`
++                // async-openai's enum lacks (`max`); the raw value is
++                // stashed into response metadata for effort provenance.
++                let sanitized = serde_json::from_slice::<serde_json::Value>(&bytes)
++                    .ok()
++                    .and_then(|mut value| {
++                        xai_grok_sampling_types::sanitize_unknown_reasoning_effort(&mut value);
++                        serde_json::from_value::<rs::Response>(value).ok()
++                    });
++                match sanitized {
++                    Some(response) => response,
++                    None => {
++                        let raw_body = String::from_utf8_lossy(&bytes);
++                        tracing::error!(
++                            error = %first_err,
++                            raw_body = %raw_body,
++                            "Failed to deserialize rs::Response"
++                        );
++                        return Err(SamplingError::Serialization(first_err));
++                    }
++                }
++            }
++        };
+         Ok(response_obj)
+     }
+ 
+@@ -1439,6 +1469,12 @@ impl SamplingClient {
+             }
+         }
+         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
++        // async-openai's ReasoningEffort enum has no `max`; the typed value
++        // is a downgraded placeholder. Restore the literal wire value.
++        xai_grok_sampling_types::patch_reasoning_effort_max(
++            &mut request_body,
++            request.reasoning_effort,
++        );
+         if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
+             apply_chatgpt_codex_request_shape(&mut request_body);
+         }
+@@ -2014,6 +2050,9 @@ impl SamplingClient {
+         wrapper.x_grok_turn_idx = x_grok_turn_idx;
+         wrapper.x_grok_agent_id = x_grok_agent_id;
+         wrapper.extra_raw_tools = extra_tools;
++        // Canonical effort side-channel: `max` survives only here (the typed
++        // request downgrades it to xhigh; see patch_reasoning_effort_max).
++        wrapper.reasoning_effort = request.reasoning_effort;
+ 
+         if let Some(trace) = trace {
+             wrapper.trace = Some(trace);
+@@ -2046,6 +2085,9 @@ impl SamplingClient {
+         wrapper.x_grok_session_id = x_grok_session_id;
+         wrapper.x_grok_turn_idx = x_grok_turn_idx;
+         wrapper.x_grok_agent_id = x_grok_agent_id;
++        // Canonical effort side-channel: `max` survives only here (the typed
++        // request downgrades it to xhigh; see patch_reasoning_effort_max).
++        wrapper.reasoning_effort = request.reasoning_effort;
+ 
+         if let Some(trace) = trace {
+             wrapper.trace = Some(trace);
+diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
+index 98c8a73..c6bda38 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
+@@ -1934,11 +1934,20 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
+         .filter(|s| !s.is_empty());
+     // The server echoes the applied reasoning config; record the effort with
+     // the same per-response provenance as `model`/`system_fingerprint`.
++    // Prefer the raw wire value stashed by `sanitize_unknown_reasoning_effort`
++    // (efforts the typed enum can't represent, e.g. `max`) over the typed echo.
+     let reasoning_effort = response
+-        .reasoning
++        .metadata
+         .as_ref()
+-        .and_then(|r| r.effort.clone())
+-        .map(crate::ReasoningEffort::from_responses_api);
++        .and_then(|m| m.get(REASONING_EFFORT_WIRE_METADATA_KEY))
++        .and_then(|s| s.parse::<crate::ReasoningEffort>().ok())
++        .or_else(|| {
++            response
++                .reasoning
++                .as_ref()
++                .and_then(|r| r.effort.clone())
++                .map(crate::ReasoningEffort::from_responses_api)
++        });
+ 
+     let mut items: Vec<ConversationItem> = Vec::with_capacity(response.output.len() + 1);
+     let mut content = String::new();
+@@ -2217,6 +2226,87 @@ pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
+     }
+ }
+ 
++/// Restore the literal `"max"` reasoning effort on a serialized Responses
++/// request body.
++///
++/// async-openai's `rs::ReasoningEffort` has no `Max` variant, so
++/// [`crate::ReasoningEffort::to_responses_api`] downgrades `Max` to `Xhigh`
++/// in the typed request as a placeholder. Callers that serialize the typed
++/// request must pass the **canonical** effort here to put the real wire
++/// value back. No-op unless `effort` is `Some(Max)`.
++///
++/// Like [`patch_reasoning_text_types`], this papers over an async-openai
++/// gap; when upstream grows a `Max` variant this function can be deleted.
++pub fn patch_reasoning_effort_max(
++    body: &mut serde_json::Value,
++    effort: Option<crate::ReasoningEffort>,
++) {
++    if effort != Some(crate::ReasoningEffort::Max) {
++        return;
++    }
++    let Some(obj) = body.as_object_mut() else {
++        return;
++    };
++    let reasoning = obj
++        .entry("reasoning")
++        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
++    if let Some(reasoning) = reasoning.as_object_mut() {
++        reasoning.insert(
++            "effort".to_string(),
++            serde_json::Value::String("max".to_string()),
++        );
++    }
++}
++
++/// Metadata key holding the raw wire `reasoning.effort` string when the
++/// typed `rs::ReasoningEffort` cannot represent it (currently `"max"`).
++/// Written by [`sanitize_unknown_reasoning_effort`], read by
++/// [`response_to_conversation_items`] for effort provenance.
++pub const REASONING_EFFORT_WIRE_METADATA_KEY: &str = "reasoning_effort_wire";
++
++/// Make a raw Responses API **response** JSON object parseable by
++/// async-openai when the server echoes a `reasoning.effort` the typed enum
++/// does not know (e.g. `"max"`, which async-openai lacks).
++///
++/// The unknown effort string is stashed into
++/// `metadata[`[`REASONING_EFFORT_WIRE_METADATA_KEY`]`]` and the field is
++/// rewritten to `"xhigh"` so `serde_json::from_value::<rs::Response>`
++/// succeeds; [`response_to_conversation_items`] prefers the stashed raw
++/// value when stamping per-response effort provenance. No-op when the
++/// effort is absent or already parseable.
++pub fn sanitize_unknown_reasoning_effort(response: &mut serde_json::Value) {
++    let Some(effort) = response
++        .pointer("/reasoning/effort")
++        .and_then(|v| v.as_str())
++        .map(str::to_owned)
++    else {
++        return;
++    };
++    if serde_json::from_value::<rs::ReasoningEffort>(serde_json::Value::String(effort.clone()))
++        .is_ok()
++    {
++        return;
++    }
++    let Some(obj) = response.as_object_mut() else {
++        return;
++    };
++    let metadata = obj
++        .entry("metadata")
++        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
++    if let Some(metadata) = metadata.as_object_mut() {
++        metadata.insert(
++            REASONING_EFFORT_WIRE_METADATA_KEY.to_string(),
++            serde_json::Value::String(effort),
++        );
++    }
++    if let Some(e) = obj
++        .get_mut("reasoning")
++        .and_then(|r| r.get_mut("effort"))
++    {
++        *e = serde_json::Value::String("xhigh".to_string());
++    }
++}
++
+ /// Convert a ConversationItem to Responses API InputItem(s)
+ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputItem> {
+     match item {
+@@ -3983,6 +4073,82 @@ mod tests {
+         assert_eq!(b.reasoning_effort, Some(crate::ReasoningEffort::Xhigh));
+     }
+ 
++    /// A wire `reasoning.effort: "max"` (unknown to async-openai's enum) is
++    /// sanitized into a parseable response and still stamps `Max` provenance
++    /// via the metadata stash.
++    #[test]
++    fn test_max_effort_response_sanitizes_and_stamps_provenance() {
++        let mut raw = serde_json::json!({
++            "id": "resp_max",
++            "object": "response",
++            "created_at": 1234567890,
++            "model": "gpt-5.6-sol",
++            "status": "completed",
++            "output": [],
++            "reasoning": { "effort": "max" },
++        });
++
++        // Typed parse fails before sanitization…
++        assert!(serde_json::from_value::<rs::Response>(raw.clone()).is_err());
++
++        // …and succeeds after, with the raw effort stashed in metadata.
++        sanitize_unknown_reasoning_effort(&mut raw);
++        assert_eq!(raw["reasoning"]["effort"], "xhigh");
++        assert_eq!(raw["metadata"][REASONING_EFFORT_WIRE_METADATA_KEY], "max");
++        let response: rs::Response =
++            serde_json::from_value(raw).expect("sanitized response parses");
++
++        let items = response_to_conversation_items(response);
++        let ConversationItem::Assistant(a) = items.last().expect("trailing Assistant") else {
++            panic!("Expected Assistant item");
++        };
++        assert_eq!(a.reasoning_effort, Some(crate::ReasoningEffort::Max));
++    }
++
++    /// Known efforts pass through `sanitize_unknown_reasoning_effort` untouched.
++    #[test]
++    fn test_sanitize_unknown_reasoning_effort_noop_on_known_values() {
++        let mut raw = serde_json::json!({
++            "reasoning": { "effort": "xhigh" },
++        });
++        sanitize_unknown_reasoning_effort(&mut raw);
++        assert_eq!(raw["reasoning"]["effort"], "xhigh");
++        assert!(raw.get("metadata").is_none());
++
++        let mut absent = serde_json::json!({ "id": "resp" });
++        sanitize_unknown_reasoning_effort(&mut absent);
++        assert!(absent.get("metadata").is_none());
++    }
++
++    /// `patch_reasoning_effort_max` restores the literal `"max"` wire value
++    /// that the typed request downgraded to `xhigh`, and is a strict no-op
++    /// for every other effort.
++    #[test]
++    fn test_patch_reasoning_effort_max() {
++        // Typed placeholder: Max serializes as xhigh pre-patch.
++        let mut body = serde_json::json!({
++            "model": "gpt-5.6-sol",
++            "reasoning": { "effort": "xhigh", "summary": "auto" },
++        });
++        patch_reasoning_effort_max(&mut body, Some(crate::ReasoningEffort::Max));
++        assert_eq!(body["reasoning"]["effort"], "max");
++        assert_eq!(body["reasoning"]["summary"], "auto", "siblings preserved");
++
++        // Genuine xhigh is untouched.
++        let mut body = serde_json::json!({
++            "reasoning": { "effort": "xhigh" },
++        });
++        patch_reasoning_effort_max(&mut body, Some(crate::ReasoningEffort::Xhigh));
++        assert_eq!(body["reasoning"]["effort"], "xhigh");
++        patch_reasoning_effort_max(&mut body, None);
++        assert_eq!(body["reasoning"]["effort"], "xhigh");
++
++        // Max with no reasoning object yet: the object is created.
++        let mut body = serde_json::json!({ "model": "gpt-5.6-sol" });
++        patch_reasoning_effort_max(&mut body, Some(crate::ReasoningEffort::Max));
++        assert_eq!(body["reasoning"]["effort"], "max");
++    }
++
+     // ============================================================================
+     // Tool Calls Roundtrip Tests
+     // ============================================================================
+diff --git a/crates/codegen/xai-grok-sampling-types/src/types.rs b/crates/codegen/xai-grok-sampling-types/src/types.rs
+index 662052d..edebb1a 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/types.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/types.rs
+@@ -770,9 +770,20 @@ pub enum ReasoningEffort {
+     Medium,
+     High,
+     Xhigh,
++    /// Above `Xhigh`. Only offered by models whose effort menu maps it
++    /// (pi parity: the gpt-5.6 family); elsewhere the resolver downgrades
++    /// it to `Xhigh` (the pre-`Max` alias behavior).
++    Max,
+ }
+ 
+ impl ReasoningEffort {
++    /// Typed bridge to async-openai's Responses enum.
++    ///
++    /// `async_openai::types::responses::ReasoningEffort` has no `Max`
++    /// variant, so `Max` maps to `Xhigh` here as a **typed placeholder
++    /// only**; the sampler restores the literal `"max"` wire value with a
++    /// post-serialize JSON patch (`patch_reasoning_effort_max`). Callers
++    /// that serialize the typed value directly must apply that patch.
+     pub fn to_responses_api(self) -> crate::rs::ReasoningEffort {
+         match self {
+             Self::None => crate::rs::ReasoningEffort::None,
+@@ -781,6 +792,7 @@ impl ReasoningEffort {
+             Self::Medium => crate::rs::ReasoningEffort::Medium,
+             Self::High => crate::rs::ReasoningEffort::High,
+             Self::Xhigh => crate::rs::ReasoningEffort::Xhigh,
++            Self::Max => crate::rs::ReasoningEffort::Xhigh,
+         }
+     }
+ 
+@@ -805,17 +817,19 @@ impl ReasoningEffort {
+             Self::Medium => "medium",
+             Self::High => "high",
+             Self::Xhigh => "xhigh",
++            Self::Max => "max",
+         }
+     }
+ 
+     /// Anthropic Messages API `output_config.effort` string; `None` for unsupported variants.
++    /// `"max"` is that API's ceiling, so `Xhigh` and `Max` map identically.
+     pub fn to_messages_api(self) -> Option<&'static str> {
+         match self {
+             Self::None | Self::Minimal => None,
+             Self::Low => Some("low"),
+             Self::Medium => Some("medium"),
+             Self::High => Some("high"),
+-            Self::Xhigh => Some("max"),
++            Self::Xhigh | Self::Max => Some("max"),
+         }
+     }
+ }
+@@ -836,7 +850,11 @@ impl std::str::FromStr for ReasoningEffort {
+             "low" => Ok(Self::Low),
+             "medium" => Ok(Self::Medium),
+             "high" => Ok(Self::High),
+-            "xhigh" | "max" => Ok(Self::Xhigh), // max is a CLI/UX alias of xhigh
++            "xhigh" => Ok(Self::Xhigh),
++            // A distinct level above xhigh. Models that don't offer it get
++            // the old alias behavior (downgrade to xhigh) at effort-token
++            // resolution, not here.
++            "max" => Ok(Self::Max),
+             _ => Err(format!(
+                 "invalid reasoning effort: {s:?} (expected one of: none, minimal, low, medium, high, xhigh, max)"
+             )),
+@@ -844,7 +862,7 @@ impl std::str::FromStr for ReasoningEffort {
+     }
+ }
+ 
+-/// Canonical wire parse only (`max` → `Xhigh`); remapped menu ids need a model catalog.
++/// Canonical wire parse only (`max` → `Max`); remapped menu ids need a model catalog.
+ pub fn parse_canonical_effort_token(token: &str) -> Option<ReasoningEffort> {
+     token.parse().ok()
+ }
+@@ -1083,6 +1101,14 @@ pub struct CreateResponseWrapper {
+     /// `async_openai`'s `rs::Tool` enum (e.g., `x_search`). Injected
+     /// as raw JSON into the serialized request body's `tools` array.
+     pub extra_raw_tools: Vec<serde_json::Value>,
++
++    /// Process-local: the canonical reasoning effort this request was built
++    /// from. `inner.reasoning.effort` is async-openai's enum, which cannot
++    /// represent [`ReasoningEffort::Max`] (it is downgraded to `Xhigh` by
++    /// [`ReasoningEffort::to_responses_api`]); the sampler consults this
++    /// field post-serialize to restore the literal `"max"` wire value
++    /// (`patch_reasoning_effort_max`). Never sent as a body field itself.
++    pub reasoning_effort: Option<ReasoningEffort>,
+ }
+ 
+ impl CreateResponseWrapper {
+@@ -1099,6 +1125,7 @@ impl CreateResponseWrapper {
+             x_grok_user_id: None,
+             trace: None,
+             extra_raw_tools: vec![],
++            reasoning_effort: None,
+         }
+     }
+ 
+@@ -1207,6 +1234,7 @@ mod tests {
+             ReasoningEffort::Medium,
+             ReasoningEffort::High,
+             ReasoningEffort::Xhigh,
++            ReasoningEffort::Max,
+         ] {
+             let json = serde_json::to_string(&v).unwrap();
+             assert_eq!(json, format!("\"{}\"", v.as_str()), "serialize {v:?}");
+@@ -1214,31 +1242,41 @@ mod tests {
+             assert_eq!(back, v, "round-trip {v:?}");
+         }
+         assert!(serde_json::from_str::<ReasoningEffort>("\"BOGUS\"").is_err());
+-        assert!(serde_json::from_str::<ReasoningEffort>("\"max\"").is_err());
+     }
+ 
+     #[test]
+-    fn reasoning_effort_from_str_accepts_max_as_xhigh() {
++    fn reasoning_effort_from_str_max_is_distinct_above_xhigh() {
+         assert_eq!(
+             "max".parse::<ReasoningEffort>().unwrap(),
+-            ReasoningEffort::Xhigh
++            ReasoningEffort::Max
+         );
+         assert_eq!(
+             "MAX".parse::<ReasoningEffort>().unwrap(),
+-            ReasoningEffort::Xhigh
++            ReasoningEffort::Max
+         );
+         assert_eq!(
+             "xhigh".parse::<ReasoningEffort>().unwrap(),
+             ReasoningEffort::Xhigh
+         );
++        assert_ne!(ReasoningEffort::Max, ReasoningEffort::Xhigh);
++        assert_eq!(ReasoningEffort::Max.as_str(), "max");
+         assert_eq!(ReasoningEffort::Xhigh.as_str(), "xhigh");
++        // The Responses typed bridge has no Max; it degrades to Xhigh and the
++        // sampler patches the literal "max" back in post-serialize.
++        assert_eq!(
++            ReasoningEffort::Max.to_responses_api(),
++            crate::rs::ReasoningEffort::Xhigh
++        );
++        // Anthropic Messages: "max" is the ceiling for both top levels.
++        assert_eq!(ReasoningEffort::Max.to_messages_api(), Some("max"));
++        assert_eq!(ReasoningEffort::Xhigh.to_messages_api(), Some("max"));
+     }
+ 
+     #[test]
+     fn parse_canonical_effort_token_helper() {
+         assert_eq!(
+             parse_canonical_effort_token("max"),
+-            Some(ReasoningEffort::Xhigh)
++            Some(ReasoningEffort::Max)
+         );
+         assert_eq!(
+             parse_canonical_effort_token("high"),
+diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
+index 1a11fcc..92efa8b 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/config.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
+@@ -3481,21 +3481,28 @@ pub fn openai_codex_model_entries() -> Vec<(String, ModelEntry)> {
+                 NonZeroU64::new(context_window).expect("codex context windows are non-zero");
+             info.supports_reasoning_effort = true;
+             info.reasoning_effort = Some(ReasoningEffort::Medium);
+-            info.reasoning_efforts = [
++            let mut efforts = vec![
+                 (ReasoningEffort::Low, "low", "Low", false),
+                 (ReasoningEffort::Medium, "medium", "Medium", true),
+                 (ReasoningEffort::High, "high", "High", false),
+                 (ReasoningEffort::Xhigh, "xhigh", "Extra high", false),
+-            ]
+-            .into_iter()
+-            .map(|(value, id, label, default)| ReasoningEffortOption {
+-                id: id.to_string(),
+-                value,
+-                label: label.to_string(),
+-                description: None,
+-                default,
+-            })
+-            .collect();
++            ];
++            // pi parity (`supportsOpenAiMax`): only the gpt-5.6 family
++            // accepts `reasoning.effort: "max"` above xhigh. Elsewhere the
++            // effort resolver downgrades a requested `max` to xhigh.
++            if slug.starts_with("gpt-5.6") {
++                efforts.push((ReasoningEffort::Max, "max", "Max", false));
++            }
++            info.reasoning_efforts = efforts
++                .into_iter()
++                .map(|(value, id, label, default)| ReasoningEffortOption {
++                    id: id.to_string(),
++                    value,
++                    label: label.to_string(),
++                    description: None,
++                    default,
++                })
++                .collect();
+             (
+                 key,
+                 ModelEntry {
+@@ -5964,7 +5971,8 @@ reasoning_effort = "low"
+     /// loads global config, so this exercises its resolve + enforce core.)
+     /// Built-in Codex catalog: every entry is keyed `openai-codex/<slug>`,
+     /// routes to the ChatGPT Codex backend over the Responses API with the
+-    /// ChatGPT OAuth scheme, and exposes the low..xhigh effort menu.
++    /// ChatGPT OAuth scheme, and exposes the low..xhigh effort menu — plus
++    /// `max` on the gpt-5.6 family only (pi's `supportsOpenAiMax`).
+     #[test]
+     fn openai_codex_entries_route_to_chatgpt_codex_backend() {
+         let entries = openai_codex_model_entries();
+@@ -5985,6 +5993,16 @@ reasoning_effort = "low"
+                     .iter()
+                     .any(|o| o.value == ReasoningEffort::Xhigh)
+             );
++            let offers_max = entry
++                .info
++                .reasoning_efforts
++                .iter()
++                .any(|o| o.value == ReasoningEffort::Max);
++            assert_eq!(
++                offers_max,
++                slug.starts_with("gpt-5.6"),
++                "`max` is gpt-5.6-only (got {slug})"
++            );
+             assert!(entry.api_key.is_none() && entry.env_key.is_none());
+         }
+     }
+diff --git a/crates/codegen/xai-grok-shell/src/agent/session_config.rs b/crates/codegen/xai-grok-shell/src/agent/session_config.rs
+index 2a88454..d804fef 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/session_config.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/session_config.rs
+@@ -59,6 +59,7 @@ fn effort_label(effort: ReasoningEffort) -> String {
+         ReasoningEffort::Medium => "Medium",
+         ReasoningEffort::High => "High",
+         ReasoningEffort::Xhigh => "X-High",
++        ReasoningEffort::Max => "Max",
+     }
+     .to_string()
+ }
+diff --git a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
+index 39fbccd..0e06c90 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
+@@ -476,7 +476,22 @@ pub(crate) async fn handle_subagent_request(
+     {
+         use xai_grok_sampling_types::ReasoningEffort;
+         match raw.parse::<ReasoningEffort>() {
+-            Ok(eff) => effective_sampling_config.reasoning_effort = Some(eff),
++            Ok(mut eff) => {
++                // `max` was historically an alias of xhigh; keep that
++                // behavior for models whose effort menu doesn't offer a
++                // real Max level (only e.g. Codex gpt-5.6 does), instead
++                // of sending a wire value the backend would reject.
++                if eff == ReasoningEffort::Max
++                    && !ctx
++                        .models_manager
++                        .model_reasoning_efforts(effective_model_id.0.as_ref())
++                        .iter()
++                        .any(|o| o.value == ReasoningEffort::Max)
++                {
++                    eff = ReasoningEffort::Xhigh;
++                }
++                effective_sampling_config.reasoning_effort = Some(eff)
++            }
+             Err(err) => {
+                 tracing::warn!(
+                     value = raw, error = % err,
+-- 
+2.50.1 (Apple Git-155)
+

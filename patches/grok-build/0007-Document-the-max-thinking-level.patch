@@ -1,0 +1,98 @@
+From cd19ebd3ab8e1fc58b5dbcd131ad5fcf10a5d112 Mon Sep 17 00:00:00 2001
+From: Ren Wang <iamwrm@gmail.com>
+Date: Sun, 19 Jul 2026 10:28:47 +0800
+Subject: [PATCH 7/7] Document the max thinking level
+
+---
+ .../docs/user-guide/02-authentication.md               |  4 ++++
+ .../docs/user-guide/04-slash-commands.md               | 10 +++++++---
+ .../xai-grok-pager/docs/user-guide/11-custom-models.md |  4 +++-
+ .../xai-grok-pager/docs/user-guide/14-headless-mode.md |  2 +-
+ 4 files changed, 15 insertions(+), 5 deletions(-)
+
+diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
+index ec29a04..fc06be5 100644
+--- a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
++++ b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
+@@ -58,6 +58,7 @@ level:
+ 
+ ```
+ /model openai-codex/gpt-5.5:xhigh
++/model openai-codex/gpt-5.6-sol:max
+ ```
+ 
+ The equivalent CLI form is:
+@@ -66,6 +67,9 @@ The equivalent CLI form is:
+ grok -m openai-codex/gpt-5.5:xhigh -p "hello"
+ ```
+ 
++The gpt-5.6 family additionally offers the `max` thinking level above
++`xhigh`; on models without it, `max` downgrades to `xhigh`.
++
+ Use `grok openai status` to inspect the credential and `grok openai logout` to
+ remove it. OpenAI login does not replace or modify the normal `grok login`
+ session.
+diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
+index 4c78930..d33ee55 100644
+--- a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
++++ b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
+@@ -142,18 +142,22 @@ colon suffix or a second argument:
+ Provider-prefixed IDs such as `openai-codex/gpt-5.5` explicitly select the
+ provider. The suffix is parsed from the last colon only after trying the whole
+ string as an exact model ID, so IDs that contain colons continue to work.
+-Supported canonical levels are `none`, `minimal`, `low`, `medium`, `high`, and
+-`xhigh` (subject to the selected model's offered levels).
++Supported canonical levels are `none`, `minimal`, `low`, `medium`, `high`,
++`xhigh`, and `max` (subject to the selected model's offered levels). `max` is
++a real level above `xhigh` on models that offer it (currently the Codex
++gpt-5.6 family); on other models it downgrades to `xhigh`, matching its old
++alias behavior.
+ 
+ Aliases: `/m`
+ 
+ ### `/effort <level>`
+ 
+-Set reasoning effort on the **current** model without re-selecting it. Levels: `low`, `medium`, `high`, `xhigh`. Only works when the active model supports reasoning effort.
++Set reasoning effort on the **current** model without re-selecting it. Levels: `low`, `medium`, `high`, `xhigh` — plus `max` on models that offer it (e.g. Codex gpt-5.6; elsewhere `max` downgrades to `xhigh`). Only works when the active model supports reasoning effort.
+ 
+ ```
+ /effort high
+ /effort low
++/effort max
+ ```
+ 
+ ### `/always-approve` and `/auto`
+diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md b/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
+index 2015cf6..4ec9bea 100644
+--- a/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
++++ b/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
+@@ -24,10 +24,12 @@ from Ctrl+M or use the provider/model reference directly:
+ 
+ ```
+ /model openai-codex/gpt-5.5:xhigh
++/model openai-codex/gpt-5.6-sol:max
+ ```
+ 
+ The provider prefix chooses the ChatGPT OAuth credential and Codex Responses
+-backend; the optional `:xhigh` suffix chooses reasoning effort. See
++backend; the optional `:effort` suffix chooses reasoning effort (`low` through
++`xhigh`; the gpt-5.6 family also offers `max` above `xhigh`). See
+ [Authentication](02-authentication.md#openai-codex-with-a-chatgpt-plan).
+ 
+ ## Selecting a Model
+diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md b/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md
+index 1cf6ac6..b5df096 100644
+--- a/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md
++++ b/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md
+@@ -33,7 +33,7 @@ Grok processes the prompt, runs any necessary tools, and prints the result to st
+ | `--tools <TOOLS>`       | Allowlist of built-in tools (comma-separated). MCP meta-tools remain available unless denied. Headless only. |
+ | `--disallowed-tools <TOOLS>` | Denylist of built-in tools to remove (comma-separated). Supports `Agent` entries. Headless only. |
+ | `--max-turns <N>`       | Maximum number of agentic turns before stopping. Headless only. |
+-| `--reasoning-effort` / `--effort <LEVEL>` | Reasoning effort for reasoning models. Canonical levels: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (alias of `xhigh`). Also accepts per-model menu option ids (e.g. `deep` → mapped wire value), same as `/effort`. Works in TUI and headless. |
++| `--reasoning-effort` / `--effort <LEVEL>` | Reasoning effort for reasoning models. Canonical levels: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (a real level above `xhigh` on models that offer it, e.g. Codex gpt-5.6; elsewhere it downgrades to `xhigh`). Also accepts per-model menu option ids (e.g. `deep` → mapped wire value), same as `/effort`. Works in TUI and headless. |
+ | `--permission-mode <MODE>` | Permission mode. `bypassPermissions` enables always-approve via this flag (see [22-permissions-and-safety.md](22-permissions-and-safety.md)); for deny-by-default use `defaultMode` in `.claude/settings.json`. |
+ | `--allow <RULE>`        | Permission allow rule with glob patterns (repeatable). Works in TUI and headless. |
+ | `--deny <RULE>`         | Permission deny rule with glob patterns (repeatable). Works in TUI and headless. |
+-- 
+2.50.1 (Apple Git-155)
+
