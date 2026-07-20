@@ -1,7 +1,7 @@
-From b7ee45790d92411726fcbd38163bf6051fd2de47 Mon Sep 17 00:00:00 2001
+From f248fb50b22a3ee85ddb2c88bb780e880fc58c95 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
-Subject: [PATCH 10/13] Make the release pager link successfully with MSVC
+Subject: [PATCH 10/14] Make the release pager link successfully with MSVC
 
 Raise release PDB pages to the supported 16 KiB maximum and enable link.exe long-symbol truncation for both MSVC targets. Both settings are required for the pager's large public-symbol table to link successfully.
 ---

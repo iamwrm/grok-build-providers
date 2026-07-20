@@ -1,7 +1,7 @@
-From 5eedd46d3d04864245680f842d1f9801ed45f258 Mon Sep 17 00:00:00 2001
+From 913303a7a98e3d235213500a252d5346bfc285f9 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
-Subject: [PATCH 13/13] Show prompt-cycle usage on completed-turn markers
+Subject: [PATCH 13/14] Show prompt-cycle usage on completed-turn markers
 
 Carry aggregate PromptUsage on durable and legacy terminal rails and enrich the existing Worked-for marker with uncached input/output, TPS, cache reads/writes, hit ratio, context start:end, and trusted complete cost. Converge driver, viewer, and lost-RPC finalization while preserving legacy and nonstandard marker behavior.
 ---

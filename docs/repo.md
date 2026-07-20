@@ -44,8 +44,8 @@ git clone https://github.com/earendil-works/pi checkouts/pi
 
    ```bash
    cd checkouts/grok-build
-   # Example: export one newly committed patch after current patch 0013.
-   git format-patch HEAD~1..HEAD --start-number 14 \
+   # Example: export one newly committed patch after current patch 0014.
+   git format-patch HEAD~1..HEAD --start-number 15 \
      -o ../../patches/grok-build/
    ```
 
@@ -114,6 +114,7 @@ files.
 | [i0003](i0003_add_anthropic-oauth.md) | `0006–0008` | Anthropic OAuth, Claude catalog, native `xhigh` |
 | [i0004](i0004_release-ci.md) | `0009–0010` | Cross-platform release CI and Windows portability |
 | [i0005](i0005_last-turn-stats.md) | `0011–0013` | Raw sampling diagnostics and turn-end metrics |
+| [i0006](i0006_batch-file-edits.md) | `0014` | Atomic multi-edit search/replace for one file |
 
 ## Conventions
 

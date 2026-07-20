@@ -1,0 +1,1281 @@
+From ec11661ffc1d4c3f664df0932a7ca8b7dd514307 Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 18:01:00 +0800
+Subject: [PATCH 14/14] Apply exact file edits atomically in batches
+
+Let search_replace accept an ordered edits array for multiple exact changes to one file. Validate every replacement against evolving in-memory content and write only once after the complete batch succeeds, so a late miss or ambiguity leaves the file untouched. Preserve the legacy single-edit wire shape, exact matching, CRLF handling, Unicode fallback, concise output, and one FileWritten notification.
+---
+ .../session/acp_session_impl/tool_calls.rs    |  56 +-
+ .../grok_build/search_replace/mod.rs          | 776 +++++++++++++++---
+ .../grok_build_concise/search_replace.rs      |  65 +-
+ .../src/permission/types.rs                   |   5 +-
+ 4 files changed, 774 insertions(+), 128 deletions(-)
+
+diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
+index 73a88b8..d7d91c7 100644
+--- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
++++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
+@@ -1569,32 +1569,41 @@ impl SessionActor {
+             ),
+             ToolInput::SearchReplace(sr) => {
+                 let display_path = self.tool_context.cwd.join(&sr.file_path).to_path_buf();
+-                let meta = if !sr.old_string.is_empty() {
+-                    let _span = tracing::info_span!("tool.sr_line_lookup").entered();
+-                    self.tool_context
+-                        .fs
+-                        .read_to_string(&display_path)
+-                        .await
+-                        .ok()
+-                        .and_then(|file_content| {
+-                            let pos = file_content.find(&sr.old_string)?;
+-                            let line = file_content[..pos].matches('\n').count() + 1;
+-                            serde_json::json!({ "old_line" : line, "new_line" : line, })
+-                                .as_object()
+-                                .cloned()
+-                        })
+-                } else {
+-                    None
++                // A single replacement has one accurate pre-execution diff.
++                // Batch details are emitted after the atomic edit succeeds;
++                // avoid presenting one batch member as if it represented all edits.
++                let content = match (sr.old_string, sr.new_string) {
++                    (Some(old_string), Some(new_string)) => {
++                        let meta = if old_string.is_empty() {
++                            None
++                        } else {
++                            let _span = tracing::info_span!("tool.sr_line_lookup").entered();
++                            self.tool_context
++                                .fs
++                                .read_to_string(&display_path)
++                                .await
++                                .ok()
++                                .and_then(|file_content| {
++                                    let pos = file_content.find(&old_string)?;
++                                    let line = file_content[..pos].matches('\n').count() + 1;
++                                    serde_json::json!({ "old_line" : line, "new_line" : line, })
++                                        .as_object()
++                                        .cloned()
++                                })
++                        };
++                        vec![acp::ToolCallContent::from(
++                            acp::Diff::new(display_path, new_string)
++                                .old_text(Some(old_string))
++                                .meta(meta),
++                        )]
++                    }
++                    _ => Vec::new(),
+                 };
+                 (
+                     format!("Edit `{}`", sr.file_path.as_str()),
+                     acp::ToolKind::Edit,
+                     vec![acp::ToolCallLocation::new(sr.file_path.clone())],
+-                    vec![acp::ToolCallContent::from(
+-                        acp::Diff::new(display_path, sr.new_string)
+-                            .old_text(Some(sr.old_string))
+-                            .meta(meta),
+-                    )],
++                    content,
+                 )
+             }
+             ToolInput::Bash(bash_tool) => execute_tool_call_parts(
+@@ -2779,9 +2788,10 @@ mod plan_mode_edit_gate_tests {
+         use xai_grok_tools::implementations::grok_build::search_replace::SearchReplaceInput;
+         ToolInput::SearchReplace(SearchReplaceInput {
+             file_path: path.into(),
+-            old_string: "a".into(),
+-            new_string: "b".into(),
++            old_string: Some("a".into()),
++            new_string: Some("b".into()),
+             replace_all: false,
++            edits: None,
+         })
+     }
+     fn write(path: &str) -> ToolInput {
+diff --git a/crates/codegen/xai-grok-tools/src/implementations/grok_build/search_replace/mod.rs b/crates/codegen/xai-grok-tools/src/implementations/grok_build/search_replace/mod.rs
+index 7b7af13..a0716d8 100644
+--- a/crates/codegen/xai-grok-tools/src/implementations/grok_build/search_replace/mod.rs
++++ b/crates/codegen/xai-grok-tools/src/implementations/grok_build/search_replace/mod.rs
+@@ -56,11 +56,27 @@ impl SearchReplaceVersion {
+ /// - `${{ tools.by_kind.read }}` — client-facing name for the Read tool
+ /// - `${{ params.edit.old_string }}` — client-facing param name
+ /// - `${{ params.edit.replace_all }}` — client-facing param name
+-pub(crate) const DESCRIPTION_FULL: &str = r#"Replace an exact string in a file.
++pub(crate) const DESCRIPTION_FULL: &str = r#"Replace exact strings in one file.
+ 
+ - Read the file with `${{ tools.by_kind.read }}` before editing it.
+ - `${{ tools.by_kind.read }}` prefixes each line with "LINE_NUMBER→". That prefix is not part of the file: match only what comes after the →, with its exact indentation.
+-- `${{ params.edit.old_string }}` must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set `${{ params.edit.replace_all }}` to change every occurrence (handy for renaming an identifier)."#;
++- For multiple independent changes to the same file, prefer one call with `edits`; the edits run in order and the file is written only if every edit succeeds.
++- For one change, use `${{ params.edit.old_string }}` and `new_string`. The old string must match exactly one place. If it appears more than once, add surrounding context or set `${{ params.edit.replace_all }}` to change every occurrence.
++- Supply either `edits` or the single-edit fields, never both."#;
++/// One exact replacement in an atomic batch.
++#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
++pub struct SearchReplaceEdit {
++    #[schemars(description = "The text to replace")]
++    pub old_string: String,
++    #[schemars(description = "The text to replace it with (must be different from old_string)")]
++    pub new_string: String,
++    #[serde(
++        default,
++        deserialize_with = "crate::types::schema::deserialize_lenient_bool"
++    )]
++    #[schemars(description = "Replace all occurrences of old_string (default false)")]
++    pub replace_all: bool,
++}
+ /// Input for the search_replace tool.
+ #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+ pub struct SearchReplaceInput {
+@@ -68,20 +84,66 @@ pub struct SearchReplaceInput {
+         description = "The path to the file to modify. You can use either a relative path in the workspace or an absolute path."
+     )]
+     pub file_path: String,
+-    #[schemars(description = "The text to replace")]
+-    pub old_string: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schemars(description = "The text to replace (legacy single-edit mode)")]
++    pub old_string: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
+     #[schemars(
+-        description = "The text to replace it with (must be different from ${{ params.edit.old_string }})"
++        description = "The text to replace it with (legacy single-edit mode; must be different from ${{ params.edit.old_string }})"
+     )]
+-    pub new_string: String,
++    pub new_string: Option<String>,
+     #[serde(
+         default,
+         deserialize_with = "crate::types::schema::deserialize_lenient_bool"
+     )]
+     #[schemars(
+-        description = "Replace all occurrences of ${{ params.edit.old_string }} (default false)"
++        description = "Replace all occurrences of ${{ params.edit.old_string }} in legacy single-edit mode (default false)"
+     )]
+     pub replace_all: bool,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schemars(
++        description = "A non-empty sequence of exact replacements to apply atomically to the evolving file content. Use this for multiple independent changes to one file."
++    )]
++    pub edits: Option<Vec<SearchReplaceEdit>>,
++}
++
++enum SearchReplaceMode {
++    Legacy(SearchReplaceEdit),
++    Batch(Vec<SearchReplaceEdit>),
++}
++
++fn validate_input_mode(input: &SearchReplaceInput) -> Result<SearchReplaceMode, String> {
++    match (&input.edits, &input.old_string, &input.new_string) {
++        (Some(edits), None, None) if edits.is_empty() => {
++            Err("Batch mode requires a non-empty edits array".to_owned())
++        }
++        (Some(edits), None, None) if input.replace_all => Err(
++            "Batch mode cannot use the top-level replace_all field; set replace_all on each edit"
++                .to_owned(),
++        ),
++        (Some(edits), None, None) => Ok(SearchReplaceMode::Batch(edits.clone())),
++        (Some(_), _, _) => Err(
++            "Specify exactly one mode: either edits, or legacy old_string and new_string; do not mix them"
++                .to_owned(),
++        ),
++        (None, Some(old_string), Some(new_string)) => {
++            Ok(SearchReplaceMode::Legacy(SearchReplaceEdit {
++                old_string: old_string.clone(),
++                new_string: new_string.clone(),
++                replace_all: input.replace_all,
++            }))
++        }
++        (None, None, None) => Err(
++            "Specify exactly one mode: a non-empty edits array, or both legacy old_string and new_string"
++                .to_owned(),
++        ),
++        (None, Some(_), None) => {
++            Err("Legacy mode requires new_string when old_string is provided".to_owned())
++        }
++        (None, None, Some(_)) => {
++            Err("Legacy mode requires old_string when new_string is provided".to_owned())
++        }
++    }
+ }
+ fn default_true() -> bool {
+     true
+@@ -184,10 +246,31 @@ pub(crate) async fn run_search_replace(
+             )));
+         }
+     }
+-    if input.old_string == input.new_string {
+-        return Ok(SearchReplaceOutput::InvalidInput(
+-            "Old string and new string are the same".to_owned(),
+-        ));
++    let mode = match validate_input_mode(&input) {
++        Ok(mode) => mode,
++        Err(message) => return Ok(SearchReplaceOutput::InvalidInput(message)),
++    };
++    let mode_edits: &[SearchReplaceEdit] = match &mode {
++        SearchReplaceMode::Legacy(edit) => std::slice::from_ref(edit),
++        SearchReplaceMode::Batch(edits) => edits,
++    };
++    for (index, edit) in mode_edits.iter().enumerate() {
++        if edit.old_string == edit.new_string {
++            let prefix = if matches!(mode, SearchReplaceMode::Batch(_)) {
++                format!("Edit {}: ", index + 1)
++            } else {
++                String::new()
++            };
++            return Ok(SearchReplaceOutput::InvalidInput(format!(
++                "{prefix}Old string and new string are the same"
++            )));
++        }
++        if matches!(mode, SearchReplaceMode::Batch(_)) && edit.old_string.is_empty() {
++            return Ok(SearchReplaceOutput::InvalidInput(format!(
++                "Edit {}: old_string must not be empty; batch mode cannot create files",
++                index + 1
++            )));
++        }
+     }
+     let (empty_old_string_does_not_override, include_user_edit_hint);
+     {
+@@ -200,35 +283,57 @@ pub(crate) async fn run_search_replace(
+             .map(|p| p.0.include_user_edit_hint)
+             .unwrap_or(true);
+     }
+-    let result = if input.old_string.is_empty() {
+-        handle_new_file_creation(
+-            &input,
+-            resources.clone(),
+-            &fs,
+-            &notification_handle,
+-            &tool_call_id,
+-            &path,
+-            &cwd,
+-            display_cwd.as_deref(),
+-            hints_enabled,
+-            empty_old_string_does_not_override,
+-        )
+-        .await?
+-    } else {
+-        handle_replacement(
+-            &input,
+-            resources.clone(),
+-            &fs,
+-            &notification_handle,
+-            &tool_call_id,
+-            &path,
+-            &cwd,
+-            display_cwd.as_deref(),
+-            hints_enabled,
+-            is_legacy,
+-            include_user_edit_hint,
+-        )
+-        .await?
++    let result = match mode {
++        SearchReplaceMode::Legacy(edit) if edit.old_string.is_empty() => {
++            handle_new_file_creation(
++                &input.file_path,
++                &edit,
++                resources.clone(),
++                &fs,
++                &notification_handle,
++                &tool_call_id,
++                &path,
++                &cwd,
++                display_cwd.as_deref(),
++                hints_enabled,
++                empty_old_string_does_not_override,
++            )
++            .await?
++        }
++        SearchReplaceMode::Legacy(edit) => {
++            handle_replacement(
++                &input.file_path,
++                &edit,
++                resources.clone(),
++                &fs,
++                &notification_handle,
++                &tool_call_id,
++                &path,
++                &cwd,
++                display_cwd.as_deref(),
++                hints_enabled,
++                is_legacy,
++                include_user_edit_hint,
++            )
++            .await?
++        }
++        SearchReplaceMode::Batch(edits) => {
++            handle_batch_replacement(
++                &input.file_path,
++                &edits,
++                resources.clone(),
++                &fs,
++                &notification_handle,
++                &tool_call_id,
++                &path,
++                &cwd,
++                display_cwd.as_deref(),
++                hints_enabled,
++                is_legacy,
++                include_user_edit_hint,
++            )
++            .await?
++        }
+     };
+     if let SearchReplaceOutput::EditsApplied(applied) = &result {
+         let (mut added, mut removed) = (0i64, 0i64);
+@@ -271,7 +376,8 @@ fn validate_path_length(file_path: &str) -> Option<SearchReplaceOutput> {
+ }
+ /// Handle new file creation when `old_string` is empty.
+ async fn handle_new_file_creation(
+-    input: &SearchReplaceInput,
++    file_path: &str,
++    edit: &SearchReplaceEdit,
+     resources: SharedResources,
+     fs: &std::sync::Arc<dyn crate::computer::types::AsyncFileSystem>,
+     notification_handle: &ToolNotificationHandle,
+@@ -304,11 +410,11 @@ async fn handle_new_file_creation(
+             old_string_name
+         )));
+     }
+-    if let Err(e) = fs.write_file(path, input.new_string.as_bytes()).await {
++    if let Err(e) = fs.write_file(path, edit.new_string.as_bytes()).await {
+         return Ok(match e.io_error_kind() {
+             Some(std::io::ErrorKind::NotFound) => {
+                 let display_dcwd = display_cwd_or_cwd(cwd, display_cwd);
+-                let display_path = display_dcwd.join(&input.file_path);
++                let display_path = display_dcwd.join(file_path);
+                 let msg = crate::util::format_not_found_error(
+                     &display_path,
+                     path,
+@@ -320,8 +426,7 @@ async fn handle_new_file_creation(
+                 SearchReplaceOutput::FileNotFound(msg)
+             }
+             Some(std::io::ErrorKind::AlreadyExists) => SearchReplaceOutput::InvalidInput(format!(
+-                "Error: cannot create {}. A component of the path already exists as a file where a directory is expected.",
+-                input.file_path
++                "Error: cannot create {file_path}. A component of the path already exists as a file where a directory is expected."
+             )),
+             Some(std::io::ErrorKind::InvalidFilename) => {
+                 SearchReplaceOutput::FilenameTooLong(format!(
+@@ -330,8 +435,7 @@ async fn handle_new_file_creation(
+                 ))
+             }
+             _ => SearchReplaceOutput::InvalidInput(format!(
+-                "Error: failed to write {}: {e}",
+-                input.file_path
++                "Error: failed to write {file_path}: {e}"
+             )),
+         });
+     }
+@@ -342,7 +446,7 @@ async fn handle_new_file_creation(
+         notification_handle.send_file_written(FileWritten {
+             tool_call_id: tool_call_id.to_string(),
+             absolute_path: path.to_path_buf(),
+-            content: input.new_string.clone(),
++            content: edit.new_string.clone(),
+             previous_content: Some(old_text.clone()),
+             is_new_file: false,
+         });
+@@ -350,20 +454,17 @@ async fn handle_new_file_creation(
+         notification_handle.send_file_written(FileWritten {
+             tool_call_id: tool_call_id.to_string(),
+             absolute_path: path.to_path_buf(),
+-            content: input.new_string.clone(),
++            content: edit.new_string.clone(),
+             previous_content: None,
+             is_new_file: true,
+         });
+     }
+-    let tool_output_for_prompt = format!(
+-        "The file {} has been created successfully.",
+-        &input.file_path
+-    );
+-    let tool_output_for_prompt_concise = format!("The file {} has been created.", &input.file_path);
++    let tool_output_for_prompt = format!("The file {file_path} has been created successfully.");
++    let tool_output_for_prompt_concise = format!("The file {file_path} has been created.");
+     let edits = vec![SearchReplaceEditDetail {
+-        old_string: input.old_string.clone(),
++        old_string: edit.old_string.clone(),
+         old_line: 1,
+-        new_string: input.new_string.clone(),
++        new_string: edit.new_string.clone(),
+         new_line: 1,
+         context_before: String::new(),
+         context_after: String::new(),
+@@ -371,8 +472,8 @@ async fn handle_new_file_creation(
+     }];
+     Ok(SearchReplaceOutput::EditsApplied(
+         SearchReplaceEditsApplied {
+-            old_string: input.old_string.clone(),
+-            new_string: input.new_string.clone(),
++            old_string: edit.old_string.clone(),
++            new_string: edit.new_string.clone(),
+             tool_output_for_prompt,
+             tool_output_for_prompt_concise: Some(tool_output_for_prompt_concise),
+             absolute_path: path.to_path_buf(),
+@@ -497,9 +598,274 @@ fn build_confusable_hint(
+         line_summary, read_qualifier, old_string_param, terminal_fallback
+     ))
+ }
++fn prefix_batch_error(output: SearchReplaceOutput, edit_index: usize) -> SearchReplaceOutput {
++    let prefix = format!("Edit {edit_index}: ");
++    match output {
++        SearchReplaceOutput::MultipleMatchesFound(message) => {
++            SearchReplaceOutput::MultipleMatchesFound(format!("{prefix}{message}"))
++        }
++        SearchReplaceOutput::NoMatchesFound(mut error) => {
++            error.message = format!("{prefix}{}", error.message);
++            SearchReplaceOutput::NoMatchesFound(error)
++        }
++        SearchReplaceOutput::InvalidInput(message) => {
++            SearchReplaceOutput::InvalidInput(format!("{prefix}{message}"))
++        }
++        other => other,
++    }
++}
++
++async fn apply_edit_in_memory(
++    text: &str,
++    edit: &SearchReplaceEdit,
++    resources: &SharedResources,
++    is_legacy: bool,
++    include_user_edit_hint: bool,
++    path: &std::path::Path,
++) -> Result<
++    Result<(String, Vec<SearchReplaceEditDetail>, bool), SearchReplaceOutput>,
++    xai_tool_runtime::ToolError,
++> {
++    let mut positions: Vec<usize> = text
++        .match_indices(&edit.old_string)
++        .map(|(index, _)| index)
++        .collect();
++    let mut normalized_matches = None;
++    if positions.is_empty() {
++        let fallback_enabled = {
++            let res = resources.lock().await;
++            res.get::<Params<SearchReplaceParams>>()
++                .is_some_and(|p| p.0.unicode_normalized_fallback)
++        };
++        if fallback_enabled {
++            match find_normalized_match_positions(text, &edit.old_string) {
++                NormalizedMatchResult::Matches(matches) => {
++                    if matches.len() > 1 && !edit.replace_all {
++                        let replace_all_name =
++                            TemplateRenderer::resolve(resources, "${{ params.edit.replace_all }}")
++                                .await?;
++                        return Ok(Err(SearchReplaceOutput::MultipleMatchesFound(format!(
++                            "The string to replace was found multiple times in the file (via Unicode normalization). Use {replace_all_name} to replace all occurrences, or include more context to only edit one occurrence."
++                        ))));
++                    }
++                    positions = matches.iter().map(|m| m.original_start).collect();
++                    normalized_matches = Some(matches);
++                }
++                NormalizedMatchResult::Ambiguous => {
++                    let old_string_name =
++                        TemplateRenderer::resolve(resources, "${{ params.edit.old_string }}")
++                            .await?;
++                    return Ok(Err(SearchReplaceOutput::MultipleMatchesFound(format!(
++                        "The string to replace was found via Unicode normalization but the match is ambiguous (partial or overlapping). Use a more specific {old_string_name} that avoids lines with Unicode typography characters."
++                    ))));
++                }
++                NormalizedMatchResult::NoMatch => {}
++            }
++        }
++    }
++    if positions.is_empty() {
++        let (read_name, old_string_param, execute_name) = {
++            let res = resources.lock().await;
++            let renderer = res.require::<TemplateRenderer>()?;
++            let read_name = renderer
++                .render("${{ tools.by_kind.read }}")
++                .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
++            let old_string_param = renderer
++                .render("${{ params.edit.old_string }}")
++                .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
++            let execute_name = renderer
++                .render("${{ tools.by_kind.execute }}")
++                .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
++            (read_name, old_string_param, execute_name)
++        };
++        let hint = if is_legacy {
++            String::new()
++        } else {
++            build_nearest_match_hint(text, &edit.old_string)
++        };
++        let confusable_hint = if is_legacy {
++            String::new()
++        } else {
++            build_confusable_hint(
++                text,
++                &edit.old_string,
++                crate::util::query_tools::QueryTools::detect(),
++                &read_name,
++                &old_string_param,
++                &execute_name,
++            )
++            .unwrap_or_default()
++        };
++        let user_edit_hint = if include_user_edit_hint {
++            " The user may have changed the file since you last read it."
++        } else {
++            ""
++        };
++        return Ok(Err(SearchReplaceOutput::NoMatchesFound(
++            crate::types::output::NoMatchesFoundError {
++                message: format!(
++                    "The string to replace was not found in the file, use the {read_name} tool to see the correct string.{user_edit_hint}{hint}{confusable_hint}"
++                ),
++                file_path: path.to_path_buf(),
++                file_snapshot_at_edit: None,
++            },
++        )));
++    }
++    if positions.len() > 1 && !edit.replace_all {
++        let replace_all_name =
++            TemplateRenderer::resolve(resources, "${{ params.edit.replace_all }}").await?;
++        return Ok(Err(SearchReplaceOutput::MultipleMatchesFound(format!(
++            "The string to replace was found multiple times in the file. Use {replace_all_name} to replace all occurrences, or include more context to only edit one occurrence."
++        ))));
++    }
++    let used_normalized_fallback = normalized_matches.is_some();
++    let (new_text, new_positions) = if let Some(matches) = normalized_matches {
++        replace_normalized_matches(text, &matches, &edit.new_string)
++    } else {
++        replace_using_positions(text, &positions, &edit.old_string, &edit.new_string)
++    };
++    let details = build_edit_details(
++        &new_text,
++        &edit.old_string,
++        &edit.new_string,
++        &new_positions,
++        CONTEXT_LINES,
++    );
++    Ok(Ok((new_text, details, used_normalized_fallback)))
++}
++
++async fn handle_batch_replacement(
++    file_path: &str,
++    edits: &[SearchReplaceEdit],
++    resources: SharedResources,
++    fs: &std::sync::Arc<dyn crate::computer::types::AsyncFileSystem>,
++    notification_handle: &ToolNotificationHandle,
++    tool_call_id: &str,
++    path: &std::path::Path,
++    cwd: &std::path::Path,
++    display_cwd: Option<&std::path::Path>,
++    hints_enabled: bool,
++    is_legacy: bool,
++    include_user_edit_hint: bool,
++) -> Result<SearchReplaceOutput, xai_tool_runtime::ToolError> {
++    let bytes = match fs.read_file(path).await {
++        Ok(bytes) => bytes,
++        Err(e) => {
++            return Ok(match e.io_error_kind() {
++                Some(std::io::ErrorKind::NotFound) => {
++                    let display_dcwd = display_cwd_or_cwd(cwd, display_cwd);
++                    let display_path = display_dcwd.join(file_path);
++                    SearchReplaceOutput::FileNotFound(
++                        crate::util::format_not_found_error(
++                            &display_path,
++                            path,
++                            cwd,
++                            &display_dcwd,
++                            hints_enabled,
++                        )
++                        .await,
++                    )
++                }
++                Some(std::io::ErrorKind::IsADirectory) => SearchReplaceOutput::InvalidInput(
++                    format!("Error: {file_path} is a directory, not a file."),
++                ),
++                Some(std::io::ErrorKind::InvalidFilename) => {
++                    SearchReplaceOutput::FilenameTooLong(format!(
++                        "Error: file name exceeds the {NAME_MAX}-character limit. Please use a shorter file name."
++                    ))
++                }
++                Some(std::io::ErrorKind::PermissionDenied) => SearchReplaceOutput::InvalidInput(
++                    format!("Error: permission denied reading {file_path}."),
++                ),
++                _ => {
++                    return Err(xai_tool_runtime::ToolError::execution(
++                        xai_tool_protocol::ToolId::new("search_replace").expect("valid"),
++                        e.to_string(),
++                    ));
++                }
++            });
++        }
++    };
++    let old_text = String::from_utf8_lossy(&bytes).into_owned();
++    let has_crlf = old_text.contains("\r\n");
++    let mut new_text = if has_crlf {
++        old_text.replace("\r\n", "\n")
++    } else {
++        old_text.clone()
++    };
++    let mut details = Vec::new();
++    let mut unicode_normalized = false;
++    for (index, edit) in edits.iter().enumerate() {
++        match apply_edit_in_memory(
++            &new_text,
++            edit,
++            &resources,
++            is_legacy,
++            include_user_edit_hint,
++            path,
++        )
++        .await?
++        {
++            Ok((next_text, edit_details, used_normalized)) => {
++                new_text = next_text;
++                details.extend(edit_details);
++                unicode_normalized |= used_normalized;
++            }
++            Err(output) => return Ok(prefix_batch_error(output, index + 1)),
++        }
++    }
++    let write_text = if has_crlf {
++        new_text.replace("\r\n", "\n").replace('\n', "\r\n")
++    } else {
++        new_text
++    };
++    if let Err(e) = fs.write_file(path, write_text.as_bytes()).await {
++        return Ok(match e.io_error_kind() {
++            Some(std::io::ErrorKind::AlreadyExists) => SearchReplaceOutput::InvalidInput(format!(
++                "Error: cannot write {file_path}. A component of the path already exists as a file where a directory is expected."
++            )),
++            Some(std::io::ErrorKind::InvalidFilename) => {
++                SearchReplaceOutput::FilenameTooLong(format!(
++                    "Error: file name exceeds the {NAME_MAX}-character limit. Please use a shorter file name."
++                ))
++            }
++            _ => SearchReplaceOutput::InvalidInput(format!(
++                "Error: failed to write {file_path}: {e}"
++            )),
++        });
++    }
++    notification_handle.send_file_written(FileWritten {
++        tool_call_id: tool_call_id.to_string(),
++        absolute_path: path.to_path_buf(),
++        content: write_text.clone(),
++        previous_content: Some(old_text),
++        is_new_file: false,
++    });
++    let edit_count = edits.len();
++    Ok(SearchReplaceOutput::EditsApplied(
++        SearchReplaceEditsApplied {
++            // Per-edit changes live in `edits.details`; these legacy summary
++            // fields cannot faithfully represent a batch.
++            old_string: String::new(),
++            new_string: String::new(),
++            tool_output_for_prompt: format!(
++                "The file {file_path} has been updated successfully with {edit_count} atomic edits."
++            ),
++            tool_output_for_prompt_concise: Some(format!(
++                "The file {file_path} has been updated with {edit_count} edits."
++            )),
++            absolute_path: path.to_path_buf(),
++            edits: SearchReplaceEditContextInformation { details },
++            patch: None,
++            unicode_normalized,
++        },
++    ))
++}
++
+ /// Handle replacement in existing file.
+ async fn handle_replacement(
+-    input: &SearchReplaceInput,
++    file_path: &str,
++    edit: &SearchReplaceEdit,
+     resources: SharedResources,
+     fs: &std::sync::Arc<dyn crate::computer::types::AsyncFileSystem>,
+     notification_handle: &ToolNotificationHandle,
+@@ -517,7 +883,7 @@ async fn handle_replacement(
+             let output = match e.io_error_kind() {
+                 Some(std::io::ErrorKind::NotFound) => {
+                     let display_dcwd = display_cwd_or_cwd(cwd, display_cwd);
+-                    let display_path = display_dcwd.join(&input.file_path);
++                    let display_path = display_dcwd.join(&file_path);
+                     let msg = crate::util::format_not_found_error(
+                         &display_path,
+                         path,
+@@ -529,7 +895,7 @@ async fn handle_replacement(
+                     SearchReplaceOutput::FileNotFound(msg)
+                 }
+                 Some(std::io::ErrorKind::IsADirectory) => SearchReplaceOutput::InvalidInput(
+-                    format!("Error: {} is a directory, not a file.", input.file_path),
++                    format!("Error: {} is a directory, not a file.", file_path),
+                 ),
+                 Some(std::io::ErrorKind::InvalidFilename) => {
+                     SearchReplaceOutput::FilenameTooLong(format!(
+@@ -538,7 +904,7 @@ async fn handle_replacement(
+                     ))
+                 }
+                 Some(std::io::ErrorKind::PermissionDenied) => SearchReplaceOutput::InvalidInput(
+-                    format!("Error: permission denied reading {}.", input.file_path),
++                    format!("Error: permission denied reading {}.", file_path),
+                 ),
+                 _ => {
+                     return Err(xai_tool_runtime::ToolError::execution(
+@@ -558,7 +924,7 @@ async fn handle_replacement(
+         std::borrow::Cow::Borrowed(&old_text)
+     };
+     let mut positions: Vec<usize> = match_text
+-        .match_indices(&input.old_string)
++        .match_indices(&edit.old_string)
+         .map(|(index, _)| index)
+         .collect();
+     let mut used_normalized_fallback = false;
+@@ -569,9 +935,9 @@ async fn handle_replacement(
+                 .is_some_and(|p| p.0.unicode_normalized_fallback)
+         };
+         if fallback_enabled {
+-            match find_normalized_match_positions(&match_text, &input.old_string) {
++            match find_normalized_match_positions(&match_text, &edit.old_string) {
+                 NormalizedMatchResult::Matches(normalized_matches) => {
+-                    if normalized_matches.len() > 1 && !input.replace_all {
++                    if normalized_matches.len() > 1 && !edit.replace_all {
+                         let replace_all_name =
+                             TemplateRenderer::resolve(&resources, "${{ params.edit.replace_all }}")
+                                 .await?;
+@@ -621,14 +987,14 @@ async fn handle_replacement(
+         let hint = if is_legacy {
+             String::new()
+         } else {
+-            build_nearest_match_hint(&match_text, &input.old_string)
++            build_nearest_match_hint(&match_text, &edit.old_string)
+         };
+         let confusable_hint = if is_legacy {
+             String::new()
+         } else {
+             build_confusable_hint(
+                 &match_text,
+-                &input.old_string,
++                &edit.old_string,
+                 crate::util::query_tools::QueryTools::detect(),
+                 &read_name,
+                 &old_string_param,
+@@ -652,7 +1018,7 @@ async fn handle_replacement(
+             },
+         ));
+     }
+-    if positions.len() > 1 && !input.replace_all {
++    if positions.len() > 1 && !edit.replace_all {
+         let replace_all_name =
+             TemplateRenderer::resolve(&resources, "${{ params.edit.replace_all }}").await?;
+         return Ok(SearchReplaceOutput::MultipleMatchesFound(format!(
+@@ -662,7 +1028,7 @@ async fn handle_replacement(
+     }
+     let (new_text, new_positions) = if used_normalized_fallback {
+         let normalized_matches =
+-            match find_normalized_match_positions(&match_text, &input.old_string) {
++            match find_normalized_match_positions(&match_text, &edit.old_string) {
+                 NormalizedMatchResult::Matches(m) => m,
+                 _ => {
+                     return Ok(SearchReplaceOutput::NoMatchesFound(
+@@ -676,14 +1042,9 @@ async fn handle_replacement(
+                     ));
+                 }
+             };
+-        replace_normalized_matches(&match_text, &normalized_matches, &input.new_string)
++        replace_normalized_matches(&match_text, &normalized_matches, &edit.new_string)
+     } else {
+-        replace_using_positions(
+-            &match_text,
+-            &positions,
+-            &input.old_string,
+-            &input.new_string,
+-        )
++        replace_using_positions(&match_text, &positions, &edit.old_string, &edit.new_string)
+     };
+     let write_text = if has_crlf {
+         new_text.replace("\r\n", "\n").replace('\n', "\r\n")
+@@ -694,7 +1055,7 @@ async fn handle_replacement(
+         return Ok(match e.io_error_kind() {
+             Some(std::io::ErrorKind::AlreadyExists) => SearchReplaceOutput::InvalidInput(format!(
+                 "Error: cannot write {}. A component of the path already exists as a file where a directory is expected.",
+-                input.file_path
++                file_path
+             )),
+             Some(std::io::ErrorKind::InvalidFilename) => {
+                 SearchReplaceOutput::FilenameTooLong(format!(
+@@ -703,7 +1064,7 @@ async fn handle_replacement(
+             }
+             _ => SearchReplaceOutput::InvalidInput(format!(
+                 "Error: failed to write {}: {e}",
+-                input.file_path
++                file_path
+             )),
+         });
+     }
+@@ -716,33 +1077,30 @@ async fn handle_replacement(
+     });
+     let edits = build_edit_details(
+         &new_text,
+-        &input.old_string,
+-        &input.new_string,
++        &edit.old_string,
++        &edit.new_string,
+         &new_positions,
+         CONTEXT_LINES,
+     );
+     let (tool_output_for_prompt, tool_output_for_prompt_concise) = if new_positions.len() == 1 {
+-        let default_msg = format!(
+-            "The file {} has been updated successfully.",
+-            &input.file_path
+-        );
+-        let concise_msg = format!("The file {} has been updated.", &input.file_path);
++        let default_msg = format!("The file {} has been updated successfully.", &file_path);
++        let concise_msg = format!("The file {} has been updated.", &file_path);
+         (default_msg, concise_msg)
+     } else {
+         let default_msg = format!(
+             "The file {} has been updated. All occurrences were successfully replaced.",
+-            &input.file_path
++            &file_path
+         );
+         let concise_msg = format!(
+             "The file {} has been updated. All occurrences were replaced.",
+-            &input.file_path,
++            &file_path,
+         );
+         (default_msg, concise_msg)
+     };
+     Ok(SearchReplaceOutput::EditsApplied(
+         SearchReplaceEditsApplied {
+-            old_string: input.old_string.clone(),
+-            new_string: input.new_string.clone(),
++            old_string: edit.old_string.clone(),
++            new_string: edit.new_string.clone(),
+             tool_output_for_prompt,
+             tool_output_for_prompt_concise: Some(tool_output_for_prompt_concise),
+             absolute_path: path.to_path_buf(),
+@@ -777,6 +1135,7 @@ impl crate::types::tool_metadata::ToolMetadata for SearchReplaceTool {
+             Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "old_string")),
+             Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "new_string")),
+             Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "replace_all")),
++            Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "edits")),
+         ])
+     }
+ }
+@@ -805,7 +1164,11 @@ impl xai_tool_runtime::Tool for SearchReplaceTool {
+     #[tracing::instrument(
+         name = "tool.search_replace",
+         skip_all,
+-        fields(file_path = %input.file_path, replace_all = %input.replace_all)
++        fields(
++            file_path = %input.file_path,
++            replace_all = %input.replace_all,
++            edit_count = input.edits.as_ref().map_or(1, Vec::len),
++        )
+     )]
+     async fn run(
+         &self,
+@@ -817,8 +1180,9 @@ impl xai_tool_runtime::Tool for SearchReplaceTool {
+         let bv = crate::types::tool_metadata::behavior_version(&ctx);
+         let is_legacy = SearchReplaceVersion::from_contract(bv.as_deref()).is_legacy();
+         let file_path = input.file_path.clone();
++        let is_batch = input.edits.is_some();
+         let result = run_search_replace(input, &ctx, resources.clone()).await?;
+-        if is_legacy {
++        if is_legacy && !is_batch {
+             versions::legacy_0_4_10::downgrade_structured_errors(result, &resources, &file_path)
+                 .await
+         } else {
+@@ -856,6 +1220,23 @@ mod tests {
+     fn make_input(file_path: &str, old_string: &str, new_string: &str) -> SearchReplaceInput {
+         SearchReplaceInput {
+             file_path: file_path.to_string(),
++            old_string: Some(old_string.to_string()),
++            new_string: Some(new_string.to_string()),
++            replace_all: false,
++            edits: None,
++        }
++    }
++    fn make_batch_input(file_path: &str, edits: Vec<SearchReplaceEdit>) -> SearchReplaceInput {
++        SearchReplaceInput {
++            file_path: file_path.to_string(),
++            old_string: None,
++            new_string: None,
++            replace_all: false,
++            edits: Some(edits),
++        }
++    }
++    fn edit(old_string: &str, new_string: &str) -> SearchReplaceEdit {
++        SearchReplaceEdit {
+             old_string: old_string.to_string(),
+             new_string: new_string.to_string(),
+             replace_all: false,
+@@ -882,6 +1263,209 @@ mod tests {
+             other => panic!("Expected EditsApplied, got {:?}", other),
+         }
+     }
++    #[tokio::test]
++    async fn markdown_batch_applies_atomically_and_reports_details() {
++        let tmp = TempDir::new().unwrap();
++        let original = "# Title\r\n\r\nAlpha paragraph.\r\n\r\nBeta paragraph.\r\n";
++        std::fs::write(tmp.path().join("README.md"), original).unwrap();
++        let (handle, mut rx) = ToolNotificationHandle::channel();
++        let mut resources = test_resources(tmp.path());
++        resources.insert(NotificationHandle(handle));
++        let input = make_batch_input(
++            "README.md",
++            vec![
++                edit("# Title", "# Updated Title"),
++                edit("Alpha paragraph.", "First paragraph."),
++                edit("Beta paragraph.", "Second paragraph."),
++            ],
++        );
++        let result = xai_tool_runtime::Tool::run(
++            &SearchReplaceTool,
++            test_ctx_with_call_id(resources.into_shared(), "batch-call"),
++            input,
++        )
++        .await
++        .unwrap();
++        let SearchReplaceOutput::EditsApplied(applied) = result else {
++            panic!("expected EditsApplied");
++        };
++        assert_eq!(applied.edits.details.len(), 3);
++        assert!(applied.tool_output_for_prompt.contains("3 atomic edits"));
++        assert_eq!(
++            std::fs::read_to_string(tmp.path().join("README.md")).unwrap(),
++            "# Updated Title\r\n\r\nFirst paragraph.\r\n\r\nSecond paragraph.\r\n"
++        );
++        let notification = rx.try_recv().expect("one FileWritten notification");
++        let crate::notification::types::ToolNotification::FileWritten(written) = notification
++        else {
++            panic!("expected FileWritten");
++        };
++        assert_eq!(written.tool_call_id, "batch-call");
++        assert_eq!(written.previous_content.as_deref(), Some(original));
++        assert!(
++            rx.try_recv().is_err(),
++            "batch must emit exactly one notification"
++        );
++    }
++
++    #[tokio::test]
++    async fn batch_late_miss_rolls_back() {
++        let tmp = TempDir::new().unwrap();
++        let path = tmp.path().join("test.txt");
++        std::fs::write(&path, "one two three\n").unwrap();
++        let result = xai_tool_runtime::Tool::run(
++            &SearchReplaceTool,
++            test_ctx(test_resources(tmp.path()).into_shared()),
++            make_batch_input("test.txt", vec![edit("one", "ONE"), edit("missing", "x")]),
++        )
++        .await
++        .unwrap();
++        let SearchReplaceOutput::NoMatchesFound(error) = result else {
++            panic!("expected NoMatchesFound");
++        };
++        assert!(error.message.starts_with("Edit 2:"), "{}", error.message);
++        assert_eq!(std::fs::read_to_string(path).unwrap(), "one two three\n");
++    }
++
++    #[tokio::test]
++    async fn batch_late_ambiguity_rolls_back() {
++        let tmp = TempDir::new().unwrap();
++        let path = tmp.path().join("test.txt");
++        std::fs::write(&path, "one two two\n").unwrap();
++        let result = xai_tool_runtime::Tool::run(
++            &SearchReplaceTool,
++            test_ctx(test_resources(tmp.path()).into_shared()),
++            make_batch_input("test.txt", vec![edit("one", "ONE"), edit("two", "TWO")]),
++        )
++        .await
++        .unwrap();
++        let SearchReplaceOutput::MultipleMatchesFound(message) = result else {
++            panic!("expected MultipleMatchesFound");
++        };
++        assert!(message.starts_with("Edit 2:"), "{message}");
++        assert_eq!(std::fs::read_to_string(path).unwrap(), "one two two\n");
++    }
++
++    #[tokio::test]
++    async fn batch_cannot_create_files() {
++        let tmp = TempDir::new().unwrap();
++        let result = xai_tool_runtime::Tool::run(
++            &SearchReplaceTool,
++            test_ctx(test_resources(tmp.path()).into_shared()),
++            make_batch_input("missing.txt", vec![edit("anything", "replacement")]),
++        )
++        .await
++        .unwrap();
++        assert!(matches!(result, SearchReplaceOutput::FileNotFound(_)));
++        assert!(!tmp.path().join("missing.txt").exists());
++    }
++
++    #[tokio::test]
++    async fn batch_edits_can_depend_on_prior_edits() {
++        let tmp = TempDir::new().unwrap();
++        let path = tmp.path().join("test.txt");
++        std::fs::write(&path, "alpha\n").unwrap();
++        let result = xai_tool_runtime::Tool::run(
++            &SearchReplaceTool,
++            test_ctx(test_resources(tmp.path()).into_shared()),
++            make_batch_input(
++                "test.txt",
++                vec![edit("alpha", "beta"), edit("beta", "gamma")],
++            ),
++        )
++        .await
++        .unwrap();
++        assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
++        assert_eq!(std::fs::read_to_string(path).unwrap(), "gamma\n");
++    }
++
++    #[tokio::test]
++    async fn rejects_mixed_empty_and_incomplete_modes() {
++        let tmp = TempDir::new().unwrap();
++        let path = tmp.path().join("test.txt");
++        std::fs::write(&path, "original\n").unwrap();
++        let resources = test_resources(tmp.path()).into_shared();
++        let cases = [
++            SearchReplaceInput {
++                file_path: "test.txt".into(),
++                old_string: Some("original".into()),
++                new_string: Some("legacy".into()),
++                replace_all: false,
++                edits: Some(vec![edit("original", "batch")]),
++            },
++            make_batch_input("test.txt", vec![]),
++            SearchReplaceInput {
++                file_path: "test.txt".into(),
++                old_string: Some("original".into()),
++                new_string: None,
++                replace_all: false,
++                edits: None,
++            },
++            SearchReplaceInput {
++                file_path: "test.txt".into(),
++                old_string: None,
++                new_string: Some("replacement".into()),
++                replace_all: false,
++                edits: None,
++            },
++            SearchReplaceInput {
++                file_path: "test.txt".into(),
++                old_string: None,
++                new_string: None,
++                replace_all: false,
++                edits: None,
++            },
++        ];
++        for input in cases {
++            let result =
++                xai_tool_runtime::Tool::run(&SearchReplaceTool, test_ctx(resources.clone()), input)
++                    .await
++                    .unwrap();
++            assert!(
++                matches!(result, SearchReplaceOutput::InvalidInput(_)),
++                "{result:?}"
++            );
++            assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
++        }
++    }
++
++    #[test]
++    fn schema_keeps_legacy_fields_optional_and_exposes_batch() {
++        let schema = schemars::schema_for!(SearchReplaceInput);
++        let value = serde_json::to_value(schema).unwrap();
++        let required = value["required"].as_array().unwrap();
++        assert_eq!(required, &[serde_json::Value::String("file_path".into())]);
++        assert!(value["properties"]["old_string"].is_object());
++        assert!(value["properties"]["new_string"].is_object());
++        assert!(value["properties"]["edits"].is_object());
++        let legacy: SearchReplaceInput = serde_json::from_value(serde_json::json!({
++            "file_path": "test.txt",
++            "old_string": "old",
++            "new_string": "new"
++        }))
++        .unwrap();
++        assert_eq!(legacy.old_string.as_deref(), Some("old"));
++        let batch: SearchReplaceInput = serde_json::from_value(serde_json::json!({
++            "file_path": "test.txt",
++            "edits": [{"old_string": "old", "new_string": "new"}]
++        }))
++        .unwrap();
++        assert_eq!(batch.edits.unwrap()[0].replace_all, false);
++        for incomplete_edit in [
++            serde_json::json!({"old_string": "old"}),
++            serde_json::json!({"new_string": "new"}),
++        ] {
++            let input = serde_json::json!({
++                "file_path": "test.txt",
++                "edits": [incomplete_edit]
++            });
++            assert!(
++                serde_json::from_value::<SearchReplaceInput>(input).is_err(),
++                "each batch edit must require complete old_string/new_string fields"
++            );
++        }
++    }
++
+     #[tokio::test]
+     async fn new_file_creation() {
+         let tmp = TempDir::new().unwrap();
+@@ -1104,9 +1688,10 @@ mod tests {
+         }));
+         let input = SearchReplaceInput {
+             file_path: "test.txt".to_string(),
+-            old_string: "aaa".to_string(),
+-            new_string: "ccc".to_string(),
++            old_string: Some("aaa".to_string()),
++            new_string: Some("ccc".to_string()),
+             replace_all: true,
++            edits: None,
+         };
+         let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+             .await
+@@ -2436,9 +3021,10 @@ neutTest_set);
+         }));
+         let input = SearchReplaceInput {
+             file_path: "test.txt".to_string(),
+-            old_string: "foo".to_string(),
+-            new_string: "qux".to_string(),
++            old_string: Some("foo".to_string()),
++            new_string: Some("qux".to_string()),
+             replace_all: true,
++            edits: None,
+         };
+         let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+             .await
+diff --git a/crates/codegen/xai-grok-tools/src/implementations/grok_build_concise/search_replace.rs b/crates/codegen/xai-grok-tools/src/implementations/grok_build_concise/search_replace.rs
+index fac8b9d..56d8276 100644
+--- a/crates/codegen/xai-grok-tools/src/implementations/grok_build_concise/search_replace.rs
++++ b/crates/codegen/xai-grok-tools/src/implementations/grok_build_concise/search_replace.rs
+@@ -3,11 +3,13 @@
+ use crate::implementations::grok_build::search_replace::{SearchReplaceInput, run_search_replace};
+ 
+ /// Concise description — no read-before-edit enforcement, simplified formatting guidance.
+-const DESCRIPTION_CONCISE: &str = r#"Replace an exact string in a file.
++const DESCRIPTION_CONCISE: &str = r#"Replace exact strings in one file.
+ 
+-- Do not include the "LINE_NUMBER→" prefixes from file reads in ${{ params.edit.old_string }} or ${{ params.edit.new_string }}; keep the exact indentation.
+-- ${{ params.edit.old_string }} must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set ${{ params.edit.replace_all }} to change every occurrence (handy for renaming an identifier).
+-- To create a new file, set ${{ params.edit.old_string }} to an empty string."#;
++- Do not include the "LINE_NUMBER→" prefixes from file reads; keep the exact indentation.
++- For multiple independent changes to the same file, prefer one call with `edits`; the edits run in order and the batch is atomic.
++- For one change, use ${{ params.edit.old_string }} and ${{ params.edit.new_string }}. The old string must match exactly once unless ${{ params.edit.replace_all }} is true.
++- Supply either `edits` or the single-edit fields, never both.
++- To create a new file, use single-edit mode with an empty ${{ params.edit.old_string }}; batch mode cannot create files."#;
+ use crate::types::output::SearchReplaceOutput;
+ use crate::types::requirements::{Expr, ToolRequirement};
+ use crate::types::tool::{ToolKind, ToolNamespace};
+@@ -43,6 +45,7 @@ impl crate::types::tool_metadata::ToolMetadata for SearchReplaceConciseTool {
+             Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "old_string")),
+             Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "new_string")),
+             Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "replace_all")),
++            Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "edits")),
+         ])
+     }
+ }
+@@ -79,6 +82,7 @@ impl xai_tool_runtime::Tool for SearchReplaceConciseTool {
+         fields(
+             file_path = %input.file_path,
+             replace_all = %input.replace_all,
++            edit_count = input.edits.as_ref().map_or(1, Vec::len),
+         )
+     )]
+     async fn run(
+@@ -104,6 +108,7 @@ impl xai_tool_runtime::Tool for SearchReplaceConciseTool {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use crate::implementations::grok_build::search_replace::SearchReplaceEdit;
+     use crate::types::tool_metadata::test_ctx;
+ 
+     use crate::computer::local::LocalFs;
+@@ -137,9 +142,10 @@ mod tests {
+     fn make_input(file: &str, old: &str, new: &str) -> SearchReplaceInput {
+         SearchReplaceInput {
+             file_path: file.to_string(),
+-            old_string: old.to_string(),
+-            new_string: new.to_string(),
++            old_string: Some(old.to_string()),
++            new_string: Some(new.to_string()),
+             replace_all: false,
++            edits: None,
+         }
+     }
+ 
+@@ -169,6 +175,48 @@ mod tests {
+         }
+     }
+ 
++    #[tokio::test]
++    async fn concise_batch_uses_atomic_batch_output() {
++        let tmp = TempDir::new().unwrap();
++        std::fs::write(tmp.path().join("test.txt"), "alpha beta\n").unwrap();
++        let input = SearchReplaceInput {
++            file_path: "test.txt".to_string(),
++            old_string: None,
++            new_string: None,
++            replace_all: false,
++            edits: Some(vec![
++                SearchReplaceEdit {
++                    old_string: "alpha".into(),
++                    new_string: "one".into(),
++                    replace_all: false,
++                },
++                SearchReplaceEdit {
++                    old_string: "beta".into(),
++                    new_string: "two".into(),
++                    replace_all: false,
++                },
++            ]),
++        };
++        let result = xai_tool_runtime::Tool::run(
++            &SearchReplaceConciseTool,
++            test_ctx(test_resources(tmp.path()).into_shared()),
++            input,
++        )
++        .await
++        .unwrap();
++        let SearchReplaceOutput::EditsApplied(applied) = result else {
++            panic!("expected EditsApplied");
++        };
++        assert_eq!(
++            applied.tool_output_for_prompt,
++            "The file test.txt has been updated with 2 edits."
++        );
++        assert_eq!(
++            std::fs::read_to_string(tmp.path().join("test.txt")).unwrap(),
++            "one two\n"
++        );
++    }
++
+     #[tokio::test]
+     async fn concise_replace_all_output() {
+         let tmp = TempDir::new().unwrap();
+@@ -179,9 +227,10 @@ mod tests {
+ 
+         let input = SearchReplaceInput {
+             file_path: "test.txt".to_string(),
+-            old_string: "aaa".to_string(),
+-            new_string: "ccc".to_string(),
++            old_string: Some("aaa".to_string()),
++            new_string: Some("ccc".to_string()),
+             replace_all: true,
++            edits: None,
+         };
+         let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+             .await
+diff --git a/crates/codegen/xai-grok-workspace/src/permission/types.rs b/crates/codegen/xai-grok-workspace/src/permission/types.rs
+index ddd6e21..f10b211 100644
+--- a/crates/codegen/xai-grok-workspace/src/permission/types.rs
++++ b/crates/codegen/xai-grok-workspace/src/permission/types.rs
+@@ -562,9 +562,10 @@ mod tests {
+         use xai_grok_tools::types::ToolInput;
+         let input = ToolInput::SearchReplace(SearchReplaceInput {
+             file_path: "lib.rs".into(),
+-            old_string: "old".into(),
+-            new_string: "new".into(),
++            old_string: Some("old".into()),
++            new_string: Some("new".into()),
+             replace_all: false,
++            edits: None,
+         });
+         let access = AccessKind::from(&input);
+         assert!(
+-- 
+2.50.1 (Apple Git-155)
+

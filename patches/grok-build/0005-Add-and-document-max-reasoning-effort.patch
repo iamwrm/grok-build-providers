@@ -1,7 +1,7 @@
-From 94ca834422ac0b852c88b34b599696472bdb52e7 Mon Sep 17 00:00:00 2001
+From cd9de4e07bcc588290d9cf7a48a118fa29fe893f Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
-Subject: [PATCH 05/13] Add and document max reasoning effort
+Subject: [PATCH 05/14] Add and document max reasoning effort
 
 Make max a distinct canonical reasoning-effort level above xhigh. Work around the pinned async-openai type at the JSON request/response seams, gate true max by model capability, preserve compatible max-to-xhigh fallback behavior, and document the resulting model and CLI semantics.
 ---
@@ -209,10 +209,10 @@ index 7f79110..3e6e1c2 100644
  }
  
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index b873c8b..6555e2c 100644
+index 5ffa34d..a103fc8 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
-@@ -113,7 +113,8 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
+@@ -116,7 +116,8 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
      let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
          Ok(event) => event,
          Err(first_err) => {
@@ -222,7 +222,7 @@ index b873c8b..6555e2c 100644
              if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) {
                  // Strip tools that async_openai's rs::Tool can't deserialize
                  // (e.g., xAI-specific "x_search"). Instead of maintaining a
-@@ -125,6 +126,12 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
+@@ -128,6 +129,12 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
                  {
                      tools.retain(|t| serde_json::from_value::<rs::Tool>(t.clone()).is_ok());
                  }
@@ -235,7 +235,7 @@ index b873c8b..6555e2c 100644
                  if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
                      apply_terminal_event_overrides(&mut event, data);
                      return Ok(event);
-@@ -1225,6 +1232,12 @@ impl SamplingClient {
+@@ -1228,6 +1235,12 @@ impl SamplingClient {
          // it in post-serialize. This is the last surviving piece of the
          // old raw_output machinery.
          xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
@@ -248,7 +248,7 @@ index b873c8b..6555e2c 100644
          if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
              apply_chatgpt_codex_request_shape(&mut request_body);
          }
-@@ -1270,15 +1283,32 @@ impl SamplingClient {
+@@ -1273,15 +1286,32 @@ impl SamplingClient {
              });
          }
  
@@ -290,7 +290,7 @@ index b873c8b..6555e2c 100644
          Ok(response_obj)
      }
  
-@@ -1364,6 +1394,12 @@ impl SamplingClient {
+@@ -1367,6 +1397,12 @@ impl SamplingClient {
              }
          }
          xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
@@ -303,7 +303,7 @@ index b873c8b..6555e2c 100644
          if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
              apply_chatgpt_codex_request_shape(&mut request_body);
          }
-@@ -1910,6 +1946,9 @@ impl SamplingClient {
+@@ -1913,6 +1949,9 @@ impl SamplingClient {
          wrapper.x_grok_turn_idx = x_grok_turn_idx;
          wrapper.x_grok_agent_id = x_grok_agent_id;
          wrapper.extra_raw_tools = extra_tools;
@@ -313,7 +313,7 @@ index b873c8b..6555e2c 100644
  
          if let Some(trace) = trace {
              wrapper.trace = Some(trace);
-@@ -1942,6 +1981,9 @@ impl SamplingClient {
+@@ -1945,6 +1984,9 @@ impl SamplingClient {
          wrapper.x_grok_session_id = x_grok_session_id;
          wrapper.x_grok_turn_idx = x_grok_turn_idx;
          wrapper.x_grok_agent_id = x_grok_agent_id;

@@ -1,7 +1,7 @@
-From d3a0c5e7850b9a3842a7b782c4902c97e46e5158 Mon Sep 17 00:00:00 2001
+From 20de94381d4fcd5d34fc498d8f98a7c79d2ea9b3 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
-Subject: [PATCH 08/13] Add the Anthropic catalog with native xhigh support
+Subject: [PATCH 08/14] Add the Anthropic catalog with native xhigh support
 
 Register credential-gated adaptive-thinking anthropic/* models with their final per-model effort menus. Send native xhigh only on supporting models, retain max for older adaptive models with symmetric compatibility fallback, and document OAuth, catalog, and custom Messages behavior.
 ---

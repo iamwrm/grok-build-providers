@@ -1,7 +1,7 @@
-From 9964322b8f9e400830fd49a10ecd5dafd6df67d5 Mon Sep 17 00:00:00 2001
+From de30584ee038b0aa811d28473558309dc411899c Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
-Subject: [PATCH 06/13] Add Anthropic Claude-plan OAuth flow, storage, and CLI
+Subject: [PATCH 06/14] Add Anthropic Claude-plan OAuth flow, storage, and CLI
 
 Port Anthropic Claude Pro/Max PKCE browser authentication with the code#state paste fallback. Store the isolated rotating credential in ~/.grok/anthropic_auth.json and expose grok anthropic login, logout, and status commands.
 ---

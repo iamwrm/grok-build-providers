@@ -1,7 +1,7 @@
-From 4e6f7cd39dd09cd84a268c41190c915f3488dd06 Mon Sep 17 00:00:00 2001
+From 9721937e1809acb4b5acc9b36b910e66c28f2938 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
-Subject: [PATCH 12/13] Track prompt cache writes through usage accounting
+Subject: [PATCH 12/14] Track prompt cache writes through usage accounting
 
 Promote provider cache-write tokens to a normalized usage field and carry them through ledgers, ACP PromptUsage, response metadata, and headless projections. Map Anthropic cache creation directly and preserve OpenAI Responses cache_write_tokens from raw terminal metadata while retaining backward-compatible token identities.
 ---
@@ -122,10 +122,10 @@ index 17db0fe..9dd3990 100644
      fn ledger_sums_partial_subagent_and_zero_cost() {
          let mut ledger = UsageLedger::default();
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index d15cf73..3ad7bd0 100644
+index 3a99853..5132b0f 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
-@@ -180,7 +180,8 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
+@@ -183,7 +183,8 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
      let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
          return;
      };
@@ -135,7 +135,7 @@ index d15cf73..3ad7bd0 100644
      if let Some(ticks) = xai_grok_sampling_types::reported_cost_ticks(
          value
              .pointer("/response/usage/cost_in_usd_ticks")
-@@ -191,6 +192,15 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
+@@ -194,6 +195,15 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
              .get_or_insert_with(Default::default)
              .insert(COST_USD_TICKS_METADATA_KEY.to_owned(), ticks.to_string());
      }
@@ -151,7 +151,7 @@ index d15cf73..3ad7bd0 100644
      let Some(usage) = response.usage.as_mut() else {
          return;
      };
-@@ -200,8 +210,24 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
+@@ -203,8 +213,24 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
      usage.total_tokens = total;
  }
  
@@ -177,7 +177,7 @@ index d15cf73..3ad7bd0 100644
  
  /// Read `response.usage.context_details.{input_tokens, output_tokens}`
  /// from the parsed terminal-event JSON and return their sum. Returns `None`
-@@ -2815,6 +2841,40 @@ mod tests {
+@@ -2829,6 +2855,40 @@ mod tests {
          assert_eq!(usage.total_tokens, 5_593);
      }
  

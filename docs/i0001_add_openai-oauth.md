@@ -284,7 +284,10 @@ confirm every loop completed on attempt 1 and no `inference_retry` appears in
   `5ca9de32f88ec8e5055a2cb92be7f4aad9997df7`. See
   [patch-history.md](patch-history.md) for the old-to-new map.
 - Patch `0002` owns the complete Codex transport, including exact
-  `response.metadata` compatibility. Patch `0004` owns the catalog and docs.
+  `response.metadata` and `keepalive` compatibility. Both informational event
+  names are accepted from either the SSE `event` field or JSON `type`; all
+  other unknown variants remain fail-closed. Patch `0004` owns the catalog and
+  docs.
 - Existing release binary:
   `checkouts/grok-build/target/release/xai-grok-pager`. For a literal local
   rebuild, run `cargo build -p xai-grok-pager-bin --release` (release mode so

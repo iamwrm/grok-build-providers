@@ -135,10 +135,10 @@ explicit, billed cache creation.
 
 ### Codex compatibility discovered during grounding
 
-Live OpenAI Responses turns exposed the informational `response.metadata` SSE
-event, which the pinned typed dependency does not model. Exact-event absorption
-is now owned by i0001 patch `0002` (the Codex transport); all other unknown
-events remain fail-closed.
+Live OpenAI Responses turns exposed informational `response.metadata` and
+`keepalive` SSE events, which the pinned typed dependency does not model.
+Exact-event absorption is owned by i0001 patch `0002` (the Codex transport);
+all other unknown events remain fail-closed.
 
 ### Patch 0013 — show prompt-cycle usage on completed-turn markers
 
@@ -189,8 +189,9 @@ events remain fail-closed.
 - Patch `0012`: sampler 161/161; chat-state 340/340; focused shell
   `PromptResponseMeta` and headless projection tests pass; final
   `cargo check -p xai-grok-shell --all-targets` clean.
-- i0001 patch `0002`: sampler 162/162 including exact-name / JSON-type
-  `response.metadata` absorption.
+- i0001 patch `0002`: focused release regression covers exact-name / JSON-type
+  absorption for `response.metadata` and `keepalive`, while unrelated unknown
+  events remain rejected.
 - Patch `0013`: pager session-event tests 41/41; turn-completion tests 19/19.
 - Consolidation clean-room: all 13 patches apply to `ba76b0a`, final tree
   `0a219b73e452c3ce19ea64cd7679dde3bf1e7a89` exactly matches the old 20-patch

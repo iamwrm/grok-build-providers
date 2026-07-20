@@ -39,8 +39,9 @@ CARGO_INCREMENTAL=0 cargo build --release --locked -p xai-grok-pager-bin
 
 ## Maintenance policy
 
-- Active numbering follows the 13-patch series; the next new grok-build patch
-  is `0014`.
+- The consolidation produced patches `0001–0013`; subsequent feature patch
+  `0014` adds atomic batch file editing. The next new grok-build patch is
+  `0015`.
 - Old patch numbers in historical commits, issue discussions, or validation
   logs should be resolved through the table above.
 - Do not reintroduce a later fix as a separate patch when it solely corrects a

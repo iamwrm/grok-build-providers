@@ -1,7 +1,7 @@
 From d38e56b045a39d208b170ed9cb583d43930d1a9d Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:00 +0800
-Subject: [PATCH 01/13] Add OpenAI ChatGPT-plan OAuth flow, storage, and CLI
+Subject: [PATCH 01/14] Add OpenAI ChatGPT-plan OAuth flow, storage, and CLI
 
 Port the OpenAI Codex PKCE browser and device-code authentication flows. Store the isolated refreshable credential in ~/.grok/openai_auth.json and expose grok openai login, logout, and status commands.
 ---
