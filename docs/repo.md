@@ -109,6 +109,7 @@ together — keep it updated as the patch series evolves.
 | [i0002](i0002_add_max_thinking.md) | `0006–0007` | Distinct `max` reasoning level |
 | [i0003](i0003_add_anthropic-oauth.md) | `0008–0012` | Anthropic OAuth, Claude catalog, native `xhigh` |
 | [i0004](i0004_release-ci.md) | `0013–0015` | Cross-platform release CI and Windows portability |
+| [i0005](i0005_last-turn-stats.md) | `0016–` | Last-prompt stats at turn end (cache read/write, TPS, cost) |
 
 ## Conventions
 
