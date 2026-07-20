@@ -1,9 +1,9 @@
 # i0005: Last-prompt stats at turn end (cache read/write, TPS, cost)
 
-**Status:** implemented through patch 0019; raw-wire grounding and targeted verification complete; user-guide patch deferred
+**Status:** implemented through patch 0020; raw-wire grounding and release-profile verification complete; user-guide patch deferred
 **Upstreams:** `checkouts/pi` + `../piagent-config/packages/ren-public-package/0012-last-turn.ts` (reference), `checkouts/grok-build` (patch target)
 **Deliverable:** patch series `patches/grok-build/0016..`, continuing the i0001–i0004 stack
-**Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `ba76b0a` (stack tip after i0004: `d76cf1c`)
+**Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `ba76b0a` (stack tip `65ef540`; i0004 tip `d76cf1c`)
 
 ## Goal
 
@@ -162,10 +162,40 @@ sampler suite: 162/162.
 - Parked, bash, subagent, cancelled, failed, and replacement-UX markers remain
   unchanged.
 
+### Patch 0020 — enable raw sampling logs before or after startup
+
+Raw recording now supports both startup configuration and a no-restart runtime
+command:
+
+```text
+GROK_LOG_SAMPLING=true grok
+/debug sampling on
+/debug sampling off
+/debug sampling status
+```
+
+- Replaced the sampler's immutable startup cache with one process-wide
+  `AtomicBool`, initialized once from `GROK_LOG_SAMPLING`. Request-body
+  serialization and tracing emission read the same gate. The hidden
+  `--log-sampling` startup flag also explicitly sets that gate after ACP connect,
+  covering an early agent-thread read before pager tracing initialization.
+- The telemetry layer is always installed so a later command can start writing.
+  Sampling event callsites report dynamic interest (`Interest::sometimes()`),
+  preventing tracing from caching the startup-off state permanently. A release
+  test exercises one callsite across `off → on → off`.
+- The hidden release-safe `/debug` command sends `x.ai/debug/sampling` over ACP,
+  so it controls the agent worker in normal TUI mode and the remote leader agent
+  in leader mode. The pager mirrors the confirmed response into its local gate.
+- Enabling prints an explicit warning that `sampling.jsonl` records full prompts,
+  tool calls/results, and responses. The command remains hidden from release
+  completion surfaces but is directly typeable.
+- The writer opens `~/.grok/logs/sampling.jsonl` at startup even when disabled;
+  disabled mode emits no sampling events and avoids request serialization.
+
 ### Deferred
 
-- Patch 0020 / upstream user-guide documentation for the marker and raw-wire
-  privacy warning. The durable initiative doc covers the patch stack for now.
+- Upstream user-guide documentation for the marker and raw-wire privacy warning.
+  The durable initiative doc covers the patch stack for now.
 
 ## Non-goals
 
@@ -194,3 +224,7 @@ sampler suite: 162/162.
 - Final 19-patch release build clean. Live `openai-codex/gpt-5.5:low`
   tool-using headless turn completed successfully (no `response.metadata`
   serialization failure).
+- Patch 0020 release-only validation (disk-constrained; debug artifacts removed):
+  sampler gate 2/2; shell ACP sampling handler 2/2; pager `/debug` command 8/8;
+  focused pager dispatch/status 2/2; telemetry same-callsite dynamic gate 1/1.
+  Final `cargo build --release -p xai-grok-pager-bin` clean.

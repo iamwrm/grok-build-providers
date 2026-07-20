@@ -1,0 +1,754 @@
+From 65ef5405879be39c05870142c9de5c63ce0d108e Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 16:21:24 +0800
+Subject: [PATCH] Toggle raw sampling logs at runtime
+
+Preserve GROK_LOG_SAMPLING and --log-sampling as startup controls while replacing the immutable sampling gate with one process-wide atomic shared by request serialization and telemetry emission.
+
+Always install a dynamically interested sampling layer, and add hidden /debug sampling on|off|status commands routed over ACP so normal TUI and leader agent processes can change or report the gate without restarting. Confirm enablement with a full-payload privacy warning.
+---
+ .../codegen/xai-grok-pager/src/app/actions.rs |  31 +++
+ .../xai-grok-pager/src/app/dispatch/router.rs |   9 +-
+ .../src/app/dispatch/task_result.rs           |  27 +++
+ .../src/app/dispatch/tests/router.rs          |  18 ++
+ .../xai-grok-pager/src/app/effects/mod.rs     |  30 +++
+ .../xai-grok-pager/src/app/event_loop.rs      |   5 +
+ .../src/slash/commands/debug.rs               |  68 ++++++-
+ .../xai-grok-sampler/src/sampling_log.rs      |  46 +++--
+ .../xai-grok-shell/src/extensions/debug.rs    |  68 +++++++
+ .../xai-grok-telemetry/src/sampling_log.rs    | 186 +++++++++++++++++-
+ 10 files changed, 459 insertions(+), 29 deletions(-)
+
+diff --git a/crates/codegen/xai-grok-pager/src/app/actions.rs b/crates/codegen/xai-grok-pager/src/app/actions.rs
+index 1b9c31a..6c48501 100644
+--- a/crates/codegen/xai-grok-pager/src/app/actions.rs
++++ b/crates/codegen/xai-grok-pager/src/app/actions.rs
+@@ -33,6 +33,23 @@ pub enum SwitchModelError {
+ ///
+ /// Produced by [`super::input`] from key/mouse events.
+ /// Consumed by [`super::dispatch::dispatch`] to mutate state and return effects.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum SamplingLogAction {
++    On,
++    Off,
++    Status,
++}
++
++impl SamplingLogAction {
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Self::On => "on",
++            Self::Off => "off",
++            Self::Status => "status",
++        }
++    }
++}
++
+ #[derive(Debug)]
+ #[allow(clippy::large_enum_variant)]
+ pub enum Action {
+@@ -303,6 +320,9 @@ pub enum Action {
+     /// Toggle the scroll flight recorder at runtime (`/debug log`;
+     /// `GROK_SCROLL_LOG=1` enables it from startup).
+     ToggleScrollLog,
++    /// Enable, disable, or inspect full raw sampling logs in both the pager and
++    /// its in-process agent worker (`/debug sampling on|off|status`).
++    SetSamplingLog(SamplingLogAction),
+     /// Print the `/debug` toggles and their on/off state to the transcript.
+     ShowDebugStatus,
+     /// Copy selected block's content to clipboard.
+@@ -1487,6 +1507,11 @@ pub enum Effect {
+         agent_id: AgentId,
+         session_id: acp::SessionId,
+     },
++    /// Apply the raw sampling-log runtime switch in the agent worker over ACP.
++    SetSamplingLog {
++        agent_id: AgentId,
++        action: SamplingLogAction,
++    },
+     /// Kill a background task.
+     KillBgTask {
+         session_id: acp::SessionId,
+@@ -2270,6 +2295,12 @@ pub enum TaskResult {
+         agent_id: AgentId,
+         result: Result<(), String>,
+     },
++    /// Runtime raw sampling-log switch completed in the agent worker.
++    SamplingLogSet {
++        agent_id: AgentId,
++        requested: SamplingLogAction,
++        result: Result<bool, String>,
++    },
+     /// Background task kill result. `outcome` is `None` when the agent
+     /// returned an error envelope or an unparseable payload (treated as
+     /// "clear pending state, keep the row").
+diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs
+index 7412b06..c649411 100644
+--- a/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs
++++ b/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs
+@@ -531,13 +531,20 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
+             }
+             vec![]
+         }
++        Action::SetSamplingLog(action) => {
++            let ActiveView::Agent(agent_id) = app.active_view else {
++                return vec![];
++            };
++            vec![Effect::SetSamplingLog { agent_id, action }]
++        }
+         Action::ShowDebugStatus => {
+             let on = |b: bool| if b { "on" } else { "off" };
+             let msg = format!(
+-                "debug toggles: scroll {} \u{00b7} fps {} \u{00b7} log {} \u{2014} toggle with /debug <scroll|fps|log>",
++                "debug toggles: scroll {} \u{00b7} fps {} \u{00b7} log {} \u{00b7} sampling {} \u{2014} use /debug <scroll|fps|log|sampling on|off|status>",
+                 on(app.scroll_debug_hud.enabled()),
+                 on(app.fps_hud.enabled()),
+                 on(app.scroll_state.scroll_log_active()),
++                on(xai_grok_telemetry::sampling_log::enabled()),
+             );
+             if let Some(agent) = get_active_agent_mut(app) {
+                 agent
+diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
+index 73e6082..5572076 100644
+--- a/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
++++ b/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
+@@ -455,6 +455,33 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
+         TaskResult::CompactComplete { agent_id, result } => {
+             handle_compact_complete(app, agent_id, result)
+         }
++        TaskResult::SamplingLogSet {
++            agent_id,
++            requested,
++            result,
++        } => {
++            if let Some(agent) = app.agents.get_mut(&agent_id) {
++                let message = match result {
++                    Ok(enabled) => {
++                        // Keep the pager-side writer gate in sync with the
++                        // agent worker only after the ACP round-trip succeeds.
++                        xai_grok_telemetry::sampling_log::set_enabled(enabled);
++                        if enabled {
++                            "sampling log: on — recording full prompts, tool calls/results, and responses to ~/.grok/logs/sampling.jsonl"
++                                .to_string()
++                        } else {
++                            "sampling log: off".to_string()
++                        }
++                    }
++                    Err(error) => format!(
++                        "Couldn't set sampling log to {}: {error}",
++                        requested.as_str()
++                    ),
++                };
++                agent.scrollback.push_block(RenderBlock::system(message));
++            }
++            vec![]
++        }
+         TaskResult::SwitchModelComplete {
+             agent_id,
+             model_id,
+diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/tests/router.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/tests/router.rs
+index 17e8635..a35f3d4 100644
+--- a/crates/codegen/xai-grok-pager/src/app/dispatch/tests/router.rs
++++ b/crates/codegen/xai-grok-pager/src/app/dispatch/tests/router.rs
+@@ -2300,11 +2300,29 @@ fn show_debug_status_emits_toggle_states_to_transcript() {
+         .unwrap_or_else(|| panic!("status line missing, got {texts:?}"));
+     assert!(status.contains("fps on"), "got: {status}");
+     assert!(status.contains("log off"), "got: {status}");
++    assert!(status.contains("sampling "), "got: {status}");
+     assert!(
+         status.contains("/debug"),
+         "must point at the command: {status}"
+     );
+ }
++/// `/debug sampling`: route the requested runtime action through an ACP effect.
++#[test]
++fn set_sampling_log_routes_active_agent_and_action() {
++    let mut app = test_app_with_agent();
++    let effects = dispatch(
++        Action::SetSamplingLog(crate::app::actions::SamplingLogAction::On),
++        &mut app,
++    );
++    assert!(matches!(
++        effects.as_slice(),
++        [Effect::SetSamplingLog {
++            agent_id: AgentId(0),
++            action: crate::app::actions::SamplingLogAction::On,
++        }]
++    ));
++}
++
+ /// `/debug log`: the toggle flips the recorder and echoes where it writes.
+ #[test]
+ fn toggle_scroll_log_flips_recorder_and_reports_path() {
+diff --git a/crates/codegen/xai-grok-pager/src/app/effects/mod.rs b/crates/codegen/xai-grok-pager/src/app/effects/mod.rs
+index 7d08f1f..1246866 100644
+--- a/crates/codegen/xai-grok-pager/src/app/effects/mod.rs
++++ b/crates/codegen/xai-grok-pager/src/app/effects/mod.rs
+@@ -1456,6 +1456,36 @@ pub(crate) fn execute(
+                     }
+                 });
+         }
++        Effect::SetSamplingLog { agent_id, action } => {
++            let tx = acp_tx.clone();
++            tasks.spawn(async move {
++                let params = serde_json::json!({ "action": action.as_str() });
++                let req = acp::ExtRequest::new(
++                    "x.ai/debug/sampling",
++                    serde_json::value::to_raw_value(&params)
++                        .expect("serialize sampling-log params")
++                        .into(),
++                );
++                let result = acp_send(req, &tx)
++                    .await
++                    .map_err(|e| sanitize_user_error(&e.to_string()))
++                    .and_then(|response| {
++                        let wrapper: serde_json::Value = serde_json::from_str(response.0.get())
++                            .map_err(|e| format!("invalid sampling-log response: {e}"))?;
++                        wrapper
++                            .get("result")
++                            .unwrap_or(&wrapper)
++                            .get("enabled")
++                            .and_then(serde_json::Value::as_bool)
++                            .ok_or_else(|| "sampling-log response omitted enabled state".to_string())
++                    });
++                TaskResult::SamplingLogSet {
++                    agent_id,
++                    requested: action,
++                    result,
++                }
++            });
++        }
+         Effect::FetchPromptHistory { agent_id, cwd, session_id } => {
+             let tx = acp_tx.clone();
+             tasks
+diff --git a/crates/codegen/xai-grok-pager/src/app/event_loop.rs b/crates/codegen/xai-grok-pager/src/app/event_loop.rs
+index dddedd4..f8ae36e 100644
+--- a/crates/codegen/xai-grok-pager/src/app/event_loop.rs
++++ b/crates/codegen/xai-grok-pager/src/app/event_loop.rs
+@@ -718,6 +718,11 @@ pub(crate) async fn run(
+     if args.log_sampling {
+         // SAFETY: called before any threads are spawned by init_tracing.
+         unsafe { std::env::set_var("GROK_LOG_SAMPLING", "1") };
++        // The in-process agent may have touched the shared gate while the pager
++        // was connecting, before this CLI flag is applied. Explicitly set the
++        // same runtime gate so `--log-sampling` remains a reliable startup
++        // enable path even after the gate becomes mutable.
++        xai_grok_telemetry::sampling_log::set_enabled(true);
+     }
+     let tracing_handle = crate::tracing::init_tracing();
+ 
+diff --git a/crates/codegen/xai-grok-pager/src/slash/commands/debug.rs b/crates/codegen/xai-grok-pager/src/slash/commands/debug.rs
+index af2d4cc..572b485 100644
+--- a/crates/codegen/xai-grok-pager/src/slash/commands/debug.rs
++++ b/crates/codegen/xai-grok-pager/src/slash/commands/debug.rs
+@@ -1,4 +1,4 @@
+-//! `/debug` — debug-overlay toggles (scroll HUD, FPS HUD, scroll log).
++//! `/debug` — hidden runtime diagnostics and logging controls.
+ //!
+ //! Registration/visibility split: the command is registered on EVERY binary
+ //! and fully functional in release — like the hidden diagnostics it fronts
+@@ -17,8 +17,10 @@
+ //! - `/debug log` — the scroll flight recorder
+ //!   ([`crate::input::scroll_log`]), runtime-constructed to a fresh
+ //!   timestamped path.
++//! - `/debug sampling on|off|status` — full raw provider request/response
++//!   recording in `~/.grok/logs/sampling.jsonl`.
+ 
+-use crate::app::actions::Action;
++use crate::app::actions::{Action, SamplingLogAction};
+ use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+ 
+ /// Whether `/debug` is listed on completion surfaces. `visible()` returns
+@@ -33,6 +35,15 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
+     ("scroll", "Toggle the scroll-diagnostics HUD"),
+     ("fps", "Toggle the FPS overlay"),
+     ("log", "Toggle the scroll flight recorder (JSONL)"),
++    (
++        "sampling on",
++        "Record full raw provider payloads (contains sensitive data)",
++    ),
++    ("sampling off", "Stop recording raw provider payloads"),
++    (
++        "sampling status",
++        "Show raw provider payload recording status",
++    ),
+ ];
+ 
+ /// Debug-overlay toggles; listed only on debug binaries.
+@@ -44,11 +55,11 @@ impl SlashCommand for DebugCommand {
+     }
+ 
+     fn description(&self) -> &str {
+-        "Toggle debug overlays"
++        "Control debug diagnostics"
+     }
+ 
+     fn usage(&self) -> &str {
+-        "/debug [scroll|fps|log]"
++        "/debug [scroll|fps|log|sampling on|off|status]"
+     }
+ 
+     fn takes_args(&self) -> bool {
+@@ -56,7 +67,7 @@ impl SlashCommand for DebugCommand {
+     }
+ 
+     fn arg_placeholder(&self) -> Option<&str> {
+-        Some("scroll | fps | log")
++        Some("scroll | fps | log | sampling on|off|status")
+     }
+ 
+     /// Debug binaries only; release keeps it registered but unlisted.
+@@ -85,8 +96,13 @@ impl SlashCommand for DebugCommand {
+             "scroll" => CommandResult::Action(Action::ToggleScrollDebugHud),
+             "fps" => CommandResult::Action(Action::ToggleFpsHud),
+             "log" => CommandResult::Action(Action::ToggleScrollLog),
++            "sampling on" => CommandResult::Action(Action::SetSamplingLog(SamplingLogAction::On)),
++            "sampling off" => CommandResult::Action(Action::SetSamplingLog(SamplingLogAction::Off)),
++            "sampling status" => {
++                CommandResult::Action(Action::SetSamplingLog(SamplingLogAction::Status))
++            }
+             other => CommandResult::Error(format!(
+-                "Unknown /debug option '{other}'. Usage: /debug [scroll|fps|log]"
++                "Unknown /debug option '{other}'. Usage: /debug [scroll|fps|log|sampling on|off|status]"
+             )),
+         }
+     }
+@@ -169,6 +185,34 @@ mod tests {
+         ));
+     }
+ 
++    #[test]
++    fn debug_sampling_routes_each_runtime_action() {
++        let models = ModelState::default();
++        let mut ctx = make_ctx(&models);
++        for (args, expected) in [
++            ("sampling on", SamplingLogAction::On),
++            (" sampling off ", SamplingLogAction::Off),
++            ("sampling status", SamplingLogAction::Status),
++        ] {
++            assert!(matches!(
++                DebugCommand.run(&mut ctx, args),
++                CommandResult::Action(Action::SetSamplingLog(action)) if action == expected
++            ));
++        }
++    }
++
++    #[test]
++    fn debug_sampling_requires_an_explicit_action() {
++        let models = ModelState::default();
++        let mut ctx = make_ctx(&models);
++        match DebugCommand.run(&mut ctx, "sampling") {
++            CommandResult::Error(message) => {
++                assert!(message.contains("sampling on|off|status"), "got: {message}");
++            }
++            other => panic!("expected Error, got {other:?}"),
++        }
++    }
++
+     #[test]
+     fn debug_junk_subcommand_errors_helpfully() {
+         let models = ModelState::default();
+@@ -192,6 +236,16 @@ mod tests {
+             .suggest_args(&app_ctx(&models), "")
+             .expect("suggestions");
+         let names: Vec<&str> = items.iter().map(|i| i.insert_text.as_str()).collect();
+-        assert_eq!(names, vec!["scroll", "fps", "log"]);
++        assert_eq!(
++            names,
++            vec![
++                "scroll",
++                "fps",
++                "log",
++                "sampling on",
++                "sampling off",
++                "sampling status"
++            ]
++        );
+     }
+ }
+diff --git a/crates/codegen/xai-grok-sampler/src/sampling_log.rs b/crates/codegen/xai-grok-sampler/src/sampling_log.rs
+index 3b4bebb..9a2bad1 100644
+--- a/crates/codegen/xai-grok-sampler/src/sampling_log.rs
++++ b/crates/codegen/xai-grok-sampler/src/sampling_log.rs
+@@ -1,23 +1,35 @@
+ //! Sampling log — emits `tracing` events with `target: "sampling_log"`.
+ //! A dedicated layer in `xai-grok-telemetry` routes these to
+-//! `~/.grok/logs/sampling.jsonl`. Enable with `--log-sampling`.
++//! `~/.grok/logs/sampling.jsonl`. Enable before startup with `--log-sampling`
++//! or `GROK_LOG_SAMPLING=true`, and at runtime with `/debug sampling on`.
++
++use std::sync::OnceLock;
++use std::sync::atomic::{AtomicBool, Ordering};
+ 
+ use crate::types::RequestId;
+ 
+ pub const TARGET: &str = "sampling_log";
++pub const ENV_VAR: &str = "GROK_LOG_SAMPLING";
++
++/// Process-wide sampling-log gate. The first read initializes it from the
++/// startup environment; `/debug sampling on|off` mutates the same atomic, so
++/// request serialization and telemetry emission cannot drift.
++fn runtime_gate() -> &'static AtomicBool {
++    static ENABLED: OnceLock<AtomicBool> = OnceLock::new();
++    ENABLED.get_or_init(|| AtomicBool::new(parse_enabled(std::env::var(ENV_VAR).ok().as_deref())))
++}
+ 
+-/// Same switch the `xai-grok-telemetry` sampling layer keys on. The pager's
+-/// hidden `--log-sampling` flag sets this env var before telemetry init, so
+-/// checking it here is equivalent to asking whether the layer is installed.
+-/// Cached: the flag cannot change after startup, and the hot paths below
+-/// run once per LLM call.
+ pub fn enabled() -> bool {
+-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+-    *ENABLED.get_or_init(|| parse_enabled(std::env::var("GROK_LOG_SAMPLING").ok().as_deref()))
++    runtime_gate().load(Ordering::Relaxed)
++}
++
++/// Enable/disable full raw request and response logging at runtime. Returns
++/// the previous state so callers can report whether anything changed.
++pub fn set_enabled(enabled: bool) -> bool {
++    runtime_gate().swap(enabled, Ordering::SeqCst)
+ }
+ 
+-/// Truthy values accepted by the telemetry layer for `GROK_LOG_SAMPLING`;
+-/// keep in sync with `xai-grok-telemetry/src/sampling_log.rs`.
++/// Truthy startup values accepted for `GROK_LOG_SAMPLING`.
+ fn parse_enabled(value: Option<&str>) -> bool {
+     value.is_some_and(|v| matches!(v, "1" | "true" | "on"))
+ }
+@@ -85,7 +97,19 @@ pub fn request_span(
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::parse_enabled;
++    use super::{enabled, parse_enabled, set_enabled};
++
++    #[test]
++    fn runtime_switch_round_trips() {
++        let original = enabled();
++        set_enabled(false);
++        assert!(!enabled());
++        assert!(!set_enabled(true));
++        assert!(enabled());
++        assert!(set_enabled(false));
++        assert!(!enabled());
++        set_enabled(original);
++    }
+ 
+     #[test]
+     fn parse_enabled_accepts_layer_truthy_values_only() {
+diff --git a/crates/codegen/xai-grok-shell/src/extensions/debug.rs b/crates/codegen/xai-grok-shell/src/extensions/debug.rs
+index 4196532..f8f7c37 100644
+--- a/crates/codegen/xai-grok-shell/src/extensions/debug.rs
++++ b/crates/codegen/xai-grok-shell/src/extensions/debug.rs
+@@ -8,6 +8,7 @@
+ //! - `arm_auto_compact`: arm the next turn to unconditionally trigger
+ //!   auto-compaction, regardless of context window usage.
+ //! - `agent`: agent-process diagnostics (registry counts).
++//! - `sampling`: enable, disable, or inspect full raw sampling logs at runtime.
+ 
+ use agent_client_protocol as acp;
+ 
+@@ -24,6 +25,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+         }
+         "x.ai/debug/arm_auto_compact" => handle_arm_auto_compact(agent, args),
+         "x.ai/debug/agent" => handle_agent(agent),
++        "x.ai/debug/sampling" => handle_sampling(args),
+         _ => Err(acp::Error::method_not_found()),
+     }
+ }
+@@ -34,6 +36,72 @@ fn handle_agent(agent: &MvpAgent) -> ExtResult {
+         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+ }
+ 
++fn handle_sampling(args: &acp::ExtRequest) -> ExtResult {
++    #[derive(serde::Deserialize)]
++    #[serde(rename_all = "snake_case")]
++    enum SamplingAction {
++        On,
++        Off,
++        Status,
++    }
++
++    #[derive(serde::Deserialize)]
++    struct SamplingParams {
++        action: SamplingAction,
++    }
++
++    let params: SamplingParams = parse_params(args)?;
++    match params.action {
++        SamplingAction::On => {
++            xai_grok_sampler::sampling_log::set_enabled(true);
++        }
++        SamplingAction::Off => {
++            xai_grok_sampler::sampling_log::set_enabled(false);
++        }
++        SamplingAction::Status => {}
++    }
++
++    ExtMethodResult::success(serde_json::json!({
++        "enabled": xai_grok_sampler::sampling_log::enabled(),
++    }))
++    .to_ext_response()
++    .map_err(|e| acp::Error::internal_error().data(e.to_string()))
++}
++
++#[cfg(test)]
++mod sampling_tests {
++    use std::sync::Arc;
++
++    use super::*;
++
++    fn request(action: &str) -> acp::ExtRequest {
++        let params = serde_json::value::to_raw_value(&serde_json::json!({
++            "action": action,
++        }))
++        .unwrap();
++        acp::ExtRequest::new("x.ai/debug/sampling", Arc::from(params))
++    }
++
++    fn enabled_from(response: acp::ExtResponse) -> bool {
++        let value: serde_json::Value = serde_json::from_str(response.0.get()).unwrap();
++        value["result"]["enabled"].as_bool().unwrap()
++    }
++
++    #[test]
++    fn sampling_handler_supports_on_off_and_status() {
++        let original = xai_grok_sampler::sampling_log::enabled();
++        assert!(enabled_from(handle_sampling(&request("on")).unwrap()));
++        assert!(enabled_from(handle_sampling(&request("status")).unwrap()));
++        assert!(!enabled_from(handle_sampling(&request("off")).unwrap()));
++        xai_grok_sampler::sampling_log::set_enabled(original);
++    }
++
++    #[test]
++    fn sampling_handler_rejects_unknown_action() {
++        assert!(handle_sampling(&request("toggle")).is_err());
++    }
++}
++
+ async fn handle_trigger_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+     use crate::session::feedback::{FeedbackMode, FeedbackTier};
+ 
+diff --git a/crates/codegen/xai-grok-telemetry/src/sampling_log.rs b/crates/codegen/xai-grok-telemetry/src/sampling_log.rs
+index e846169..1f62a7b 100644
+--- a/crates/codegen/xai-grok-telemetry/src/sampling_log.rs
++++ b/crates/codegen/xai-grok-telemetry/src/sampling_log.rs
+@@ -1,32 +1,156 @@
+ //! Tracing layer for `target: "sampling_log"` → `~/.grok/logs/sampling.jsonl`.
+-//! Enable with `--log-sampling` or `GROK_LOG_SAMPLING=1`.
++//! Enable before startup with `--log-sampling` / `GROK_LOG_SAMPLING=1`, or at
++//! runtime with `/debug sampling on`. The runtime command and request logger
++//! share one process-wide gate in `xai-grok-sampler`.
+ 
++use std::marker::PhantomData;
+ use std::sync::Mutex;
+ 
+ use tracing::Subscriber;
++use tracing::subscriber::Interest;
+ use tracing_subscriber::fmt::writer::BoxMakeWriter;
+-use tracing_subscriber::layer::Layer;
++use tracing_subscriber::layer::{Context, Layer};
+ use tracing_subscriber::registry::LookupSpan;
+ 
+ use xai_grok_config::grok_home;
+ 
+-use crate::instrumentation::{NoOpLayer, TargetFilterLayer};
++use crate::instrumentation::NoOpLayer;
+ 
+-const ENV_VAR: &str = "GROK_LOG_SAMPLING";
+ const LOG_FILE: &str = "sampling.jsonl";
+-const TARGET: &str = "sampling_log";
++const TARGET: &str = xai_grok_sampler::sampling_log::TARGET;
+ 
+ static GUARD: std::sync::OnceLock<Mutex<Option<tracing_appender::non_blocking::WorkerGuard>>> =
+     std::sync::OnceLock::new();
+ 
+-pub fn layer<S>() -> Box<dyn Layer<S> + Send + Sync>
++/// Whether full raw sampling logging is currently enabled.
++pub fn enabled() -> bool {
++    xai_grok_sampler::sampling_log::enabled()
++}
++
++/// Change full raw sampling logging at runtime, returning the previous state.
++pub fn set_enabled(enabled: bool) -> bool {
++    xai_grok_sampler::sampling_log::set_enabled(enabled)
++}
++
++/// A target-specific layer whose event interest can change at runtime.
++///
++/// Sampling spans stay enabled so a command issued during an in-flight request
++/// can begin recording subsequent events with their request context. Sampling
++/// events return `Interest::sometimes()` so tracing never caches the startup
++/// state as permanently on or off. Non-sampling callsites remain globally
++/// enabled for the other layers in the subscriber stack.
++struct RuntimeSamplingLayer<L, S> {
++    inner: L,
++    _subscriber: PhantomData<fn(S)>,
++}
++
++impl<L, S> RuntimeSamplingLayer<L, S> {
++    fn new(inner: L) -> Self {
++        Self {
++            inner,
++            _subscriber: PhantomData,
++        }
++    }
++}
++
++impl<L, S> Layer<S> for RuntimeSamplingLayer<L, S>
+ where
+-    S: Subscriber + for<'span> LookupSpan<'span> + Send + Sync + 'static,
++    L: Layer<S>,
++    S: Subscriber + for<'span> LookupSpan<'span>,
+ {
+-    if !std::env::var(ENV_VAR).is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "on")) {
+-        return Box::new(NoOpLayer::new());
++    fn register_callsite(&self, metadata: &'static tracing::Metadata<'static>) -> Interest {
++        if metadata.target() == TARGET && metadata.is_event() {
++            Interest::sometimes()
++        } else {
++            // This layer must not globally suppress spans or events needed by
++            // sibling layers in the tracing subscriber stack.
++            Interest::always()
++        }
++    }
++
++    fn enabled(&self, metadata: &tracing::Metadata<'_>, ctx: Context<'_, S>) -> bool {
++        if metadata.target() != TARGET {
++            return true;
++        }
++        if metadata.is_event() && !enabled() {
++            return false;
++        }
++        self.inner.enabled(metadata, ctx)
++    }
++
++    fn on_new_span(
++        &self,
++        attrs: &tracing::span::Attributes<'_>,
++        id: &tracing::span::Id,
++        ctx: Context<'_, S>,
++    ) {
++        if attrs.metadata().target() == TARGET {
++            self.inner.on_new_span(attrs, id, ctx);
++        }
++    }
++
++    fn on_record(
++        &self,
++        span: &tracing::span::Id,
++        values: &tracing::span::Record<'_>,
++        ctx: Context<'_, S>,
++    ) {
++        if ctx
++            .metadata(span)
++            .is_some_and(|meta| meta.target() == TARGET)
++        {
++            self.inner.on_record(span, values, ctx);
++        }
++    }
++
++    fn on_follows_from(
++        &self,
++        span: &tracing::span::Id,
++        follows: &tracing::span::Id,
++        ctx: Context<'_, S>,
++    ) {
++        if ctx
++            .metadata(span)
++            .is_some_and(|meta| meta.target() == TARGET)
++        {
++            self.inner.on_follows_from(span, follows, ctx);
++        }
++    }
++
++    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
++        if enabled() && event.metadata().target() == TARGET {
++            self.inner.on_event(event, ctx);
++        }
++    }
++
++    fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
++        if ctx.metadata(id).is_some_and(|meta| meta.target() == TARGET) {
++            self.inner.on_enter(id, ctx);
++        }
+     }
+ 
++    fn on_exit(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
++        if ctx.metadata(id).is_some_and(|meta| meta.target() == TARGET) {
++            self.inner.on_exit(id, ctx);
++        }
++    }
++
++    fn on_close(&self, id: tracing::span::Id, ctx: Context<'_, S>) {
++        if ctx
++            .metadata(&id)
++            .is_some_and(|meta| meta.target() == TARGET)
++        {
++            self.inner.on_close(id, ctx);
++        }
++    }
++}
++
++pub fn layer<S>() -> Box<dyn Layer<S> + Send + Sync>
++where
++    S: Subscriber + for<'span> LookupSpan<'span> + Send + Sync + 'static,
++{
++    // The writer must exist even when startup logging is off so a runtime
++    // command can enable recording without rebuilding the tracing subscriber.
+     let path = grok_home().join(crate::unified_log::LOG_DIR).join(LOG_FILE);
+ 
+     if let Some(parent) = path.parent()
+@@ -66,5 +190,47 @@ where
+         .with_target(false)
+         .with_writer(BoxMakeWriter::new(non_blocking));
+ 
+-    Box::new(TargetFilterLayer::new(fmt_layer, TARGET))
++    Box::new(RuntimeSamplingLayer::new(fmt_layer))
++}
++
++#[cfg(test)]
++mod tests {
++    use std::sync::Arc;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++
++    use tracing_subscriber::layer::SubscriberExt as _;
++
++    use super::*;
++
++    struct CountEvents(Arc<AtomicUsize>);
++
++    impl<S: Subscriber> Layer<S> for CountEvents {
++        fn on_event(&self, _event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
++            self.0.fetch_add(1, Ordering::Relaxed);
++        }
++    }
++
++    fn emit_sampling_event() {
++        tracing::info!(target: TARGET, event = "runtime_gate_test");
++    }
++
++    #[test]
++    fn runtime_gate_rechecks_the_same_callsite() {
++        let original = enabled();
++        let events = Arc::new(AtomicUsize::new(0));
++        let subscriber = tracing_subscriber::registry()
++            .with(RuntimeSamplingLayer::new(CountEvents(events.clone())));
++
++        tracing::subscriber::with_default(subscriber, || {
++            set_enabled(false);
++            emit_sampling_event();
++            set_enabled(true);
++            emit_sampling_event();
++            set_enabled(false);
++            emit_sampling_event();
++        });
++
++        set_enabled(original);
++        assert_eq!(events.load(Ordering::Relaxed), 1);
++    }
+ }
+-- 
+2.50.1 (Apple Git-155)
+
