@@ -1,7 +1,7 @@
-From 9646af6d3bf27dd96837339213d1b3987968b7bf Mon Sep 17 00:00:00 2001
+From fa524e65613045cef1d14596156eba8625d5c820 Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
 Date: Sat, 18 Jul 2026 23:48:58 +0800
-Subject: [PATCH 4/5] Support pi-style provider/model:effort references
+Subject: [PATCH 04/15] Support pi-style provider/model:effort references
 
 Parse provider-qualified model references and optional reasoning effort in
 both -m and /model. Split only the last colon after first trying the exact
@@ -13,10 +13,10 @@ model id, preserving models whose ids contain colons and existing syntax.
  3 files changed, 126 insertions(+), 3 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager-bin/src/main.rs b/crates/codegen/xai-grok-pager-bin/src/main.rs
-index 919e02b..d90fc8d 100644
+index 81da5ae..03dace5 100644
 --- a/crates/codegen/xai-grok-pager-bin/src/main.rs
 +++ b/crates/codegen/xai-grok-pager-bin/src/main.rs
-@@ -1027,10 +1027,15 @@ async fn run_agent_command(
+@@ -1057,10 +1057,15 @@ async fn run_agent_command(
          .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
      let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
          .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
@@ -33,7 +33,7 @@ index 919e02b..d90fc8d 100644
          .and_then(xai_grok_shell::sampling::types::parse_canonical_effort_token);
      let launch_yolo = xai_grok_shell::util::config::effective_yolo_for_launch(
          agent_args.yolo,
-@@ -1964,6 +1969,10 @@ async fn async_main() -> Result<()> {
+@@ -1979,6 +1984,10 @@ async fn async_main() -> Result<()> {
                  );
              }
          }
@@ -44,7 +44,7 @@ index 919e02b..d90fc8d 100644
          return xai_grok_pager::headless::run_single_turn(
              prompt,
              args.verbatim,
-@@ -1975,7 +1984,7 @@ async fn async_main() -> Result<()> {
+@@ -1990,7 +1999,7 @@ async fn async_main() -> Result<()> {
                  trust: args.trust,
                  output_format: args.output_format,
                  json_schema,
@@ -53,7 +53,7 @@ index 919e02b..d90fc8d 100644
                  rules: args.rules,
                  system_prompt_override: args.system_prompt_override.clone(),
                  continue_last_session: args.continue_last_session,
-@@ -1991,7 +2000,7 @@ async fn async_main() -> Result<()> {
+@@ -2006,7 +2015,7 @@ async fn async_main() -> Result<()> {
                  deny_rules: args.deny_rules.clone(),
                  max_turns: args.max_turns,
                  permission_mode_flag: args.permission_mode_flag.clone(),

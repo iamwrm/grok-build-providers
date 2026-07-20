@@ -3,7 +3,7 @@
 **Status:** implemented and exported
 **Upstreams:** `checkouts/pi` (reference semantics), `checkouts/grok-build` (patch target)
 **Deliverable:** patches `0006` (code) and `0007` (docs) appended to the series in `patches/grok-build/`
-**Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, commits `1acbe1e` + `cd19ebd` on top of `230bc7c` (base `98c3b24`)
+**Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, commits `5b57d14` + `ff8806e` on top of `a175845` (base `ba76b0a`, Grok `0.2.106`)
 **Depends on:** i0001 (OpenAI Codex OAuth provider, patches 0001–0005)
 
 ## Patch ownership
@@ -221,26 +221,22 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
   initiative. It was subsequently implemented by i0003 patch `0012`.
 - Changing pi.
 
-## Verification completed at the patch-0007 tip
+## Verification completed after the `ba76b0a` rebase
 
-These counts and hashes are the historical validation of patches `0001–0007`,
-not the current 15-patch stack (see i0004 for current cross-platform CI).
+The complete 15-patch stack was tested with an isolated `GROK_HOME`; the
+seven-patch slice hash below records this initiative's clean-room boundary.
 
-- `cargo check --workspace` passes.
-- `cargo test -p xai-grok-sampling-types --lib`: 273 passed (includes new
+- `cargo check --workspace --locked`: passes.
+- `cargo test -p xai-grok-sampling-types --lib --locked`: 277 passed (includes
   patch/sanitize/provenance and enum round-trip tests).
-- `cargo test -p xai-grok-sampler --lib`: 157 passed.
-- `cargo test -p xai-grok-pager --lib`: 7266 passed (includes the new
-  `resolve_effort_token_max_downgrades_to_xhigh_unless_offered`).
-- `cargo test -p xai-grok-shell --lib`: 5637 passed, 11 failed — the same 11
-  fail on the pristine `230bc7c` tip on this machine (environment-dependent:
-  a real `~/.grok/openai_auth.json` injects the credential-gated Codex
-  catalog and ambient xAI keys into enterprise/e2e catalog+auth tests). Not
-  caused by this change; the codex-catalog and models gating suites pass.
+- `cargo test -p xai-grok-sampler --lib --locked`: 159 passed.
+- `cargo test -p xai-grok-pager --lib --locked`: 7390 passed, 10 ignored
+  (includes `resolve_effort_token_max_downgrades_to_xhigh_unless_offered`).
+- `cargo test -p xai-grok-shell --lib --locked`: 5739 passed, 13 ignored.
 - `git diff --check` clean.
-- Clean-room: detached worktree at `98c3b24`, `git am` of all seven patches
-  applies cleanly; resulting tree hash `cebc20755c05562921ebe8c331f730fb619afded`
-  matches the `openai-oauth` branch tip exactly.
+- Clean-room: detached worktree at `ba76b0a`, `git am` of all seven patches
+  applies cleanly; resulting tree hash `5ea6849f16a572ca1c9d9827d53a67ecd2d3a745`
+  matches patch-0007 commit `ff8806e4b0e510e04fcb75144fe56404e5dd8709`.
 
 ### Remaining OpenAI `max` live check
 

@@ -1,7 +1,7 @@
-From 0dbc3ea2f9b0b0f0b9166801fa9d4171a77d9a12 Mon Sep 17 00:00:00 2001
+From 8a1824efb3916a61b769417f3f909be106ee0741 Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
 Date: Sun, 19 Jul 2026 11:24:23 +0800
-Subject: [PATCH 10/11] Add built-in Anthropic Claude model catalog
+Subject: [PATCH 10/15] Add built-in Anthropic Claude model catalog
 
 Register pi's adaptive-thinking Claude generation (Opus 4.6-4.8, Sonnet
 4.6/5, Fable 5) under anthropic/<id> keys routed to the Anthropic
@@ -13,10 +13,10 @@ inserted before [model.*] overrides so user customization still wins.
  1 file changed, 110 insertions(+)
 
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index 1579c24..6c8b021 100644
+index dffc6e1..67f47eb 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
-@@ -3184,6 +3184,14 @@ pub fn resolve_model_list(
+@@ -3186,6 +3186,14 @@ pub fn resolve_model_list(
              resolved.entry(key).or_insert(entry);
          }
      }
@@ -31,7 +31,7 @@ index 1579c24..6c8b021 100644
      for (key, model_override) in &cfg.config_models {
          let had_base = resolved.contains_key(key);
          let base = resolved.shift_remove(key);
-@@ -3516,6 +3524,79 @@ pub fn openai_codex_model_entries() -> Vec<(String, ModelEntry)> {
+@@ -3522,6 +3530,79 @@ pub fn openai_codex_model_entries() -> Vec<(String, ModelEntry)> {
          .collect()
  }
  
@@ -111,7 +111,7 @@ index 1579c24..6c8b021 100644
  #[derive(Debug, Clone, Serialize, Deserialize)]
  pub struct ModelEntryConfig {
      /// Stable unique identifier for this catalog entry. When present,
-@@ -6057,6 +6138,35 @@ reasoning_effort = "low"
+@@ -6063,6 +6144,35 @@ reasoning_effort = "low"
          }
      }
  

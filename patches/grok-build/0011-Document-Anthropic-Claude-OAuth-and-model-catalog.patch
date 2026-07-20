@@ -1,7 +1,7 @@
-From fa68913f4e9883d14dabf264f616c7e8706714ae Mon Sep 17 00:00:00 2001
+From 89712513eebb0515be2317f9b7c250f864eb8342 Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
 Date: Sun, 19 Jul 2026 11:25:13 +0800
-Subject: [PATCH 11/11] Document Anthropic Claude OAuth and model catalog
+Subject: [PATCH 11/15] Document Anthropic Claude OAuth and model catalog
 
 Document grok anthropic login, status, and logout, the paste-the-code
 fallback, credential isolation, the zero-config anthropic/* catalog, and
@@ -15,10 +15,10 @@ override.
  3 files changed, 74 insertions(+), 6 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
-index fc06be5..b0ef035 100644
+index eeda4fb..79f3083 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
-@@ -76,6 +76,48 @@ session.
+@@ -84,6 +84,48 @@ session.
  
  ---
  
@@ -68,10 +68,10 @@ index fc06be5..b0ef035 100644
  
  For CI/CD, automation, or environments without browser access, use an API key from [console.x.ai](https://console.x.ai):
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-index d33ee55..7e9fa39 100644
+index ea5d78e..39e3b3f 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-@@ -137,16 +137,18 @@ colon suffix or a second argument:
+@@ -140,16 +140,18 @@ colon suffix or a second argument:
  /model Grok Build
  /model Reasoning X high
  /model openai-codex/gpt-5.5:xhigh

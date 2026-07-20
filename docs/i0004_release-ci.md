@@ -1,10 +1,10 @@
 # i0004: Public repository and cross-platform release CI
 
-**Status:** implemented; all five target builds verified; `v*` tag publication configured but not yet exercised
+**Status:** implemented; current base locally verified, prior base verified on all five CI targets; `v*` tag publication configured but not yet exercised
 **Upstream:** `checkouts/grok-build` (patch target for Windows portability)
 **Deliverable:** `.github/workflows/release.yml` plus `patches/grok-build/0013..0015`
-**Upstream base:** `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce`
-**Validated combined tip:** commit `dcb0547f9235c27dddcfa61091d29c742e957840`, tree `0d654afb16ebe075ddccc853ae5452174b2a659a` (15 patches)
+**Upstream base:** `ba76b0a683fa52e4e60685017b85905451be17bc` (Grok `0.2.106`)
+**Current combined tip:** commit `d76cf1c8315728a9304b414734691ca692b1cc8e`, tree `f622605759a368e772f2da9afa0287321d6c8592` (15 patches)
 
 ## Goal
 
@@ -71,9 +71,23 @@ uploaded successfully.
 
 ## Verification
 
+Current `ba76b0a` base:
+
+- All 15 re-exported patches apply cleanly in a detached clean-room worktree;
+  the result has tree `f622605759a368e772f2da9afa0287321d6c8592`.
+- `cargo check --workspace --locked` passes.
+- Sampling-types, sampler, shell, and pager library suites pass: 277, 159,
+  5739, and 7390 tests respectively (23 ignored across shell and pager).
+- Native arm64 macOS release build passes with `CARGO_INCREMENTAL=0`,
+  `CARGO_PROFILE_RELEASE_DEBUG=false`, and `--locked`; the resulting
+  `target/release/xai-grok-pager` reports `grok 0.2.106 (d76cf1c) [stable]`.
+- Cross-platform CI for the rebased stack has not yet been run.
+
+Prior-base CI validation:
+
 - Repository visibility changed from `PRIVATE` to `PUBLIC`; a credential-pattern
   scan over tracked patches/docs/configs found no access tokens.
-- Final all-target workflow run:
+- The all-target workflow run at the previous upstream base was:
   https://github.com/iamwrm/grok-build-providers/actions/runs/29679405277
 - Every build completed successfully and uploaded an archive:
   - `xai-grok-pager-aarch64-apple-darwin`

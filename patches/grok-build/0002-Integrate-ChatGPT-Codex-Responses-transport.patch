@@ -1,7 +1,7 @@
-From 2afa27bbffc41bf4fc3ab139f9cb1187ae6d5117 Mon Sep 17 00:00:00 2001
+From 0ad8b0867d086f5c02802847940490cd43813b29 Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
 Date: Sat, 18 Jul 2026 23:48:40 +0800
-Subject: [PATCH 2/5] Integrate ChatGPT Codex Responses transport
+Subject: [PATCH 02/15] Integrate ChatGPT Codex Responses transport
 
 Add the chatgpt_oauth auth scheme, live bearer and account-header
 resolution, and the complete Codex request and SSE response contract.
@@ -20,7 +20,7 @@ empty-response retries.
  6 files changed, 470 insertions(+), 13 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index 05aff78..876914a 100644
+index 28b1058..8cc38b2 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
 @@ -348,6 +348,155 @@ impl PlatformInfo {
@@ -215,7 +215,7 @@ index 05aff78..876914a 100644
              (_, None) => "none",
          };
          crate::sampling_log::AuthInfo {
-@@ -1142,6 +1291,9 @@ impl SamplingClient {
+@@ -1063,6 +1212,9 @@ impl SamplingClient {
          // it in post-serialize. This is the last surviving piece of the
          // old raw_output machinery.
          xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
@@ -225,7 +225,7 @@ index 05aff78..876914a 100644
          let http_request = grok_headers
              .apply(self.post(self.endpoint("responses")))
              .json(&request_body);
-@@ -1287,6 +1439,9 @@ impl SamplingClient {
+@@ -1199,6 +1351,9 @@ impl SamplingClient {
              }
          }
          xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
@@ -235,7 +235,7 @@ index 05aff78..876914a 100644
          // Fresh per attempt so signals never leak across retries; `None`
          // (check disabled) sends no header and does no peek work per event.
          let doom_loop = self
-@@ -2742,4 +2897,71 @@ mod tests {
+@@ -2625,4 +2780,71 @@ mod tests {
              rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
          ));
      }
@@ -586,10 +586,10 @@ index 63bf55d..36dc738 100644
      async fn response_failed_yields_failed_500() {
          let failed = rs::ResponseStreamEvent::ResponseFailed(rs_types::ResponseFailedEvent {
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index c934b1c..88f01b0 100644
+index d076f39..6e1ffad 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
-@@ -3600,6 +3600,9 @@ pub struct ConfigModelOverride {
+@@ -3606,6 +3606,9 @@ pub struct ConfigModelOverride {
      pub reasoning_effort: Option<ReasoningEffort>,
      pub supports_reasoning_effort: Option<bool>,
      pub reasoning_efforts: Vec<ReasoningEffortOption>,
@@ -599,7 +599,7 @@ index c934b1c..88f01b0 100644
      pub supports_backend_search: Option<bool>,
      /// Aliases must be registered in `config_model_override_parse::ALIASES`;
      /// serde rejects a table that contains both spellings otherwise.
-@@ -3681,6 +3684,9 @@ impl ConfigModelOverride {
+@@ -3687,6 +3690,9 @@ impl ConfigModelOverride {
          if !self.reasoning_efforts.is_empty() {
              entry.info.reasoning_efforts = self.reasoning_efforts.clone();
          }
@@ -609,7 +609,7 @@ index c934b1c..88f01b0 100644
          if let Some(v) = self.supports_backend_search {
              entry.info.supports_backend_search = v;
          }
-@@ -3920,6 +3926,9 @@ impl ModelEntry {
+@@ -3926,6 +3932,9 @@ impl ModelEntry {
      /// Non-empty `api_key`, else first non-empty resolved `env_key`.
      /// `None` → fall through to session / global key.
      pub(crate) fn own_credential(&self) -> Option<String> {
@@ -619,7 +619,7 @@ index c934b1c..88f01b0 100644
          first_own_credential(self.api_key.as_deref(), self.env_key.as_ref())
      }
      /// `true` when the model has a non-empty `api_key` or an `env_key` that
-@@ -4304,7 +4313,19 @@ pub(crate) fn first_own_credential(
+@@ -4312,7 +4321,19 @@ pub(crate) fn first_own_credential(
  /// When `env_key` lists multiple names, the first set non-empty value is used.
  pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> ResolvedCredentials {
      let info = model.info();
@@ -640,7 +640,7 @@ index c934b1c..88f01b0 100644
          (
              Some(key),
              info.base_url.clone(),
-@@ -4439,7 +4460,13 @@ pub fn resolve_model_auth_facts(model_id: &str) -> ModelAuthFacts {
+@@ -4447,7 +4468,13 @@ pub fn resolve_model_auth_facts(model_id: &str) -> ModelAuthFacts {
  fn byok_from_lookup(lookup: &ModelLookup) -> ModelByok {
      match lookup {
          ModelLookup::ConfigUnavailable => ModelByok::Unknown,
@@ -655,7 +655,7 @@ index c934b1c..88f01b0 100644
          ModelLookup::Loaded(_) => ModelByok::NotByok,
      }
  }
-@@ -4633,6 +4660,15 @@ pub fn sampling_config_for_model(
+@@ -4641,6 +4668,15 @@ pub fn sampling_config_for_model(
          alpha_test_key.as_deref(),
          &credentials.base_url,
      );
@@ -671,7 +671,7 @@ index c934b1c..88f01b0 100644
      let api_backend = info.api_backend.clone();
      SamplerConfig {
          api_key: credentials.api_key,
-@@ -4656,7 +4692,7 @@ pub fn sampling_config_for_model(
+@@ -4664,7 +4700,7 @@ pub fn sampling_config_for_model(
          user_id,
          origin_client: None,
          attribution_callback: None,
@@ -680,7 +680,7 @@ index c934b1c..88f01b0 100644
          supports_backend_search: info.supports_backend_search,
          compactions_remaining: info.compactions_remaining,
          compaction_at_tokens: info.compaction_at_tokens,
-@@ -4664,6 +4700,30 @@ pub fn sampling_config_for_model(
+@@ -4672,6 +4708,30 @@ pub fn sampling_config_for_model(
          header_injector: None,
      }
  }
@@ -744,7 +744,7 @@ index a29b66a..722986d 100644
  static REFRESH_LOCK: Mutex<()> = Mutex::new(());
  
 diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
-index 3e79253..85ac228 100644
+index 710dfae..e3f7b74 100644
 --- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
 @@ -283,6 +283,10 @@ impl SessionActor {

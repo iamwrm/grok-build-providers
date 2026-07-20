@@ -1,7 +1,7 @@
-From aa6b1cf59ea0b9bc17e9cf1ba24d78a68fd1e7bb Mon Sep 17 00:00:00 2001
+From 1abd914839682d810e2c5037bc45bbb70755cf0f Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
 Date: Sun, 19 Jul 2026 11:15:49 +0800
-Subject: [PATCH 08/11] Add Anthropic Claude-plan OAuth flow, storage, and CLI
+Subject: [PATCH 08/15] Add Anthropic Claude-plan OAuth flow, storage, and CLI
 
 Port pi's Anthropic (Claude Pro/Max) PKCE browser authentication flow with
 a paste-the-code fallback (claude.ai's code#state format). Store the
@@ -16,10 +16,10 @@ grok anthropic login, logout, and status commands.
  create mode 100644 crates/codegen/xai-grok-shell/src/auth/anthropic.rs
 
 diff --git a/crates/codegen/xai-grok-pager-bin/src/main.rs b/crates/codegen/xai-grok-pager-bin/src/main.rs
-index d90fc8d..95ade94 100644
+index 03dace5..cf59ba8 100644
 --- a/crates/codegen/xai-grok-pager-bin/src/main.rs
 +++ b/crates/codegen/xai-grok-pager-bin/src/main.rs
-@@ -1914,6 +1914,22 @@ async fn async_main() -> Result<()> {
+@@ -1929,6 +1929,22 @@ async fn async_main() -> Result<()> {
                  }
                  xai_grok_shell::instrumentation::finalize_and_exit(0);
              }
@@ -675,7 +675,7 @@ index 0000000..0a6b363
 +    }
 +}
 diff --git a/crates/codegen/xai-grok-shell/src/auth/mod.rs b/crates/codegen/xai-grok-shell/src/auth/mod.rs
-index 5cb283f..a1227a7 100644
+index eadb8c9..0bd9ce7 100644
 --- a/crates/codegen/xai-grok-shell/src/auth/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/auth/mod.rs
 @@ -1,3 +1,4 @@

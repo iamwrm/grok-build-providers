@@ -39,7 +39,7 @@ git clone https://github.com/earendil-works/pi checkouts/pi
 1. Hack inside `checkouts/<project>/` on a branch or dirty tree.
 2. Export the change as the next numbered patch in the existing stack. The
    grok-build series is based on pinned commit
-   `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce`, not whatever `origin/main`
+   `ba76b0a683fa52e4e60685017b85905451be17bc`, not whatever `origin/main`
    happens to contain:
 
    ```bash
@@ -62,7 +62,7 @@ Use the same pinned base as CI, then apply the complete ordered series:
 cd checkouts/grok-build
 git fetch origin
 
-git switch --detach 98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce
+git switch --detach ba76b0a683fa52e4e60685017b85905451be17bc
 git am ../../patches/grok-build/*.patch
 ```
 

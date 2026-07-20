@@ -11,7 +11,8 @@ See [docs/repo.md](docs/repo.md) for the repo layout and workflow
 ## Release binaries
 
 `.github/workflows/release.yml` applies the complete patch series to pinned
-upstream commit `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce` and builds
+upstream commit `ba76b0a683fa52e4e60685017b85905451be17bc`
+(Grok `0.2.106`) and builds
 `xai-grok-pager` for:
 
 - macOS arm64 and x86_64

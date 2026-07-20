@@ -1,7 +1,7 @@
-From 1acbe1e617a0696577d518668339e9591cb60f2c Mon Sep 17 00:00:00 2001
+From 5b57d14081b58dfe63e796d0075da1482219d1da Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
 Date: Sun, 19 Jul 2026 10:28:47 +0800
-Subject: [PATCH 6/7] Add max reasoning effort above xhigh
+Subject: [PATCH 06/15] Add max reasoning effort above xhigh
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -141,7 +141,7 @@ index 7f79110..3e6e1c2 100644
  }
  
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index 876914a..b99b31c 100644
+index 8cc38b2..34908b9 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
 @@ -100,7 +100,8 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
@@ -167,7 +167,7 @@ index 876914a..b99b31c 100644
                  if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
                      apply_terminal_event_overrides(&mut event, data);
                      return Ok(event);
-@@ -1291,6 +1298,12 @@ impl SamplingClient {
+@@ -1212,6 +1219,12 @@ impl SamplingClient {
          // it in post-serialize. This is the last surviving piece of the
          // old raw_output machinery.
          xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
@@ -180,7 +180,7 @@ index 876914a..b99b31c 100644
          if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
              apply_chatgpt_codex_request_shape(&mut request_body);
          }
-@@ -1345,15 +1358,32 @@ impl SamplingClient {
+@@ -1257,15 +1270,32 @@ impl SamplingClient {
              });
          }
  
@@ -222,7 +222,7 @@ index 876914a..b99b31c 100644
          Ok(response_obj)
      }
  
-@@ -1439,6 +1469,12 @@ impl SamplingClient {
+@@ -1351,6 +1381,12 @@ impl SamplingClient {
              }
          }
          xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
@@ -235,7 +235,7 @@ index 876914a..b99b31c 100644
          if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
              apply_chatgpt_codex_request_shape(&mut request_body);
          }
-@@ -2014,6 +2050,9 @@ impl SamplingClient {
+@@ -1897,6 +1933,9 @@ impl SamplingClient {
          wrapper.x_grok_turn_idx = x_grok_turn_idx;
          wrapper.x_grok_agent_id = x_grok_agent_id;
          wrapper.extra_raw_tools = extra_tools;
@@ -245,7 +245,7 @@ index 876914a..b99b31c 100644
  
          if let Some(trace) = trace {
              wrapper.trace = Some(trace);
-@@ -2046,6 +2085,9 @@ impl SamplingClient {
+@@ -1929,6 +1968,9 @@ impl SamplingClient {
          wrapper.x_grok_session_id = x_grok_session_id;
          wrapper.x_grok_turn_idx = x_grok_turn_idx;
          wrapper.x_grok_agent_id = x_grok_agent_id;
@@ -256,10 +256,10 @@ index 876914a..b99b31c 100644
          if let Some(trace) = trace {
              wrapper.trace = Some(trace);
 diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-index 98c8a73..c6bda38 100644
+index ad485d4..c4b162a 100644
 --- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
 +++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-@@ -1934,11 +1934,20 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
+@@ -1950,11 +1950,20 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
          .filter(|s| !s.is_empty());
      // The server echoes the applied reasoning config; record the effort with
      // the same per-response provenance as `model`/`system_fingerprint`.
@@ -283,7 +283,7 @@ index 98c8a73..c6bda38 100644
  
      let mut items: Vec<ConversationItem> = Vec::with_capacity(response.output.len() + 1);
      let mut content = String::new();
-@@ -2217,6 +2226,87 @@ pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
+@@ -2233,6 +2242,87 @@ pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
      }
  }
  
@@ -371,7 +371,7 @@ index 98c8a73..c6bda38 100644
  /// Convert a ConversationItem to Responses API InputItem(s)
  fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputItem> {
      match item {
-@@ -3983,6 +4073,82 @@ mod tests {
+@@ -3999,6 +4089,82 @@ mod tests {
          assert_eq!(b.reasoning_effort, Some(crate::ReasoningEffort::Xhigh));
      }
  
@@ -609,10 +609,10 @@ index 662052d..edebb1a 100644
          assert_eq!(
              parse_canonical_effort_token("high"),
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index 1a11fcc..92efa8b 100644
+index 8469962..286aaa2 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
-@@ -3481,21 +3481,28 @@ pub fn openai_codex_model_entries() -> Vec<(String, ModelEntry)> {
+@@ -3487,21 +3487,28 @@ pub fn openai_codex_model_entries() -> Vec<(String, ModelEntry)> {
                  NonZeroU64::new(context_window).expect("codex context windows are non-zero");
              info.supports_reasoning_effort = true;
              info.reasoning_effort = Some(ReasoningEffort::Medium);
@@ -652,7 +652,7 @@ index 1a11fcc..92efa8b 100644
              (
                  key,
                  ModelEntry {
-@@ -5964,7 +5971,8 @@ reasoning_effort = "low"
+@@ -5970,7 +5977,8 @@ reasoning_effort = "low"
      /// loads global config, so this exercises its resolve + enforce core.)
      /// Built-in Codex catalog: every entry is keyed `openai-codex/<slug>`,
      /// routes to the ChatGPT Codex backend over the Responses API with the
@@ -662,7 +662,7 @@ index 1a11fcc..92efa8b 100644
      #[test]
      fn openai_codex_entries_route_to_chatgpt_codex_backend() {
          let entries = openai_codex_model_entries();
-@@ -5985,6 +5993,16 @@ reasoning_effort = "low"
+@@ -5991,6 +5999,16 @@ reasoning_effort = "low"
                      .iter()
                      .any(|o| o.value == ReasoningEffort::Xhigh)
              );
@@ -692,10 +692,10 @@ index 2a88454..d804fef 100644
      .to_string()
  }
 diff --git a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
-index 39fbccd..0e06c90 100644
+index 645dbef..f8ad4b9 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
-@@ -476,7 +476,22 @@ pub(crate) async fn handle_subagent_request(
+@@ -488,7 +488,22 @@ pub(crate) async fn handle_subagent_request(
      {
          use xai_grok_sampling_types::ReasoningEffort;
          match raw.parse::<ReasoningEffort>() {

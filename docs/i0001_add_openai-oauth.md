@@ -3,7 +3,7 @@
 **Status:** implemented and exported
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
 **Deliverable:** five-patch series in `patches/grok-build/`
-**Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `98c3b24`
+**Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `ba76b0a` (Grok `0.2.106`)
 
 ## Goal
 
@@ -236,9 +236,9 @@ This patch changes documentation only:
 - pi-style model-reference tests: 3 passed.
 - `cargo run -p xai-grok-pager-bin -- openai --help` exposes
   `login|logout|status` as expected.
-- `git diff 98c3b24..HEAD --check` passes.
+- `git diff ba76b0a..HEAD --check` passes.
 - All five exported patches apply cleanly with `git am` to a fresh detached
-  worktree at `98c3b24`.
+  worktree at `ba76b0a`.
 - Live release-binary inference with `openai-codex/gpt-5.6-sol:high` returned
   one answer and exited successfully without retries.
 - Live two-turn resume session `c8fb606f-6b4d-4d8e-8e9e-48080c2bd3d0`
@@ -292,16 +292,16 @@ confirm every loop completed on attempt 1 and no `inference_retry` appears in
 
 ### Maintenance state and historical snapshot
 
-- **i0001 slice:** patches `0001–0005` end at commit `230bc7c`, based on
-  `98c3b24`; that five-patch slice has tree
-  `036b562925c84a7551fee6ceaf2e213fc0379c96`. These identifiers are a
-  historical verification snapshot for this initiative, not the current tip
-  of the combined repository stack.
+- **i0001 slice:** patches `0001–0005` end at commit
+  `a17584579eee3824ee5a4b2135a3d8d62128ee3f`, based on `ba76b0a`; that
+  five-patch slice has tree `5ca9de32f88ec8e5055a2cb92be7f4aad9997df7`.
+  These identifiers are a verification snapshot for this initiative, not the
+  current tip of the combined repository stack.
 - **Current combined stack (through i0004):** 15 patches end at commit
-  `dcb0547f9235c27dddcfa61091d29c742e957840`, tree
-  `0d654afb16ebe075ddccc853ae5452174b2a659a`, still based on
-  `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce`. See
-  [i0004](i0004_release-ci.md) for the all-target CI validation.
+  `d76cf1c8315728a9304b414734691ca692b1cc8e`, tree
+  `f622605759a368e772f2da9afa0287321d6c8592`, based on
+  `ba76b0a683fa52e4e60685017b85905451be17bc` (Grok `0.2.106`). See
+  [i0004](i0004_release-ci.md) for release-build validation.
 - Patch 0002 owns the complete Codex transport; patch 0005 is
   documentation-only. Later initiatives stack on top without changing that
   ownership.

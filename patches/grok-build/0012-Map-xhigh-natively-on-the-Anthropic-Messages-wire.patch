@@ -1,7 +1,7 @@
-From 6ff0a31d3cb6e52d47b8af90d193d108aa1560f1 Mon Sep 17 00:00:00 2001
+From 4f9056cc498247b0e7f542efcc462dcaf4e4fec2 Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
 Date: Sun, 19 Jul 2026 12:12:36 +0800
-Subject: [PATCH] Map xhigh natively on the Anthropic Messages wire
+Subject: [PATCH 12/15] Map xhigh natively on the Anthropic Messages wire
 
 Pass xhigh through as its own adaptive effort instead of collapsing it to
 max: pi's model data has native xhigh as a distinct level between high
@@ -21,10 +21,10 @@ use max, which every adaptive model accepts.
  7 files changed, 111 insertions(+), 26 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
-index b0ef035..a42869f 100644
+index 79f3083..565762e 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
-@@ -109,8 +109,10 @@ The equivalent CLI form is:
+@@ -117,8 +117,10 @@ The equivalent CLI form is:
  grok -m anthropic/claude-opus-4-8:high -p "hello"
  ```
  
@@ -38,10 +38,10 @@ index b0ef035..a42869f 100644
  Use `grok anthropic status` to inspect the credential and
  `grok anthropic logout` to remove it. Anthropic login does not replace or
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-index 7e9fa39..22ff190 100644
+index 39e3b3f..d441268 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-@@ -148,7 +148,8 @@ Supported canonical levels are `none`, `minimal`, `low`, `medium`, `high`,
+@@ -151,7 +151,8 @@ Supported canonical levels are `none`, `minimal`, `low`, `medium`, `high`,
  `xhigh`, and `max` (subject to the selected model's offered levels). `max` is
  a real level above `xhigh` on models that offer it (the Codex gpt-5.6 family
  and the Claude catalog); on other models it downgrades to `xhigh`, matching
@@ -142,10 +142,10 @@ index 9adf91e..45a3c77 100644
      fn resolve_effort_token_legacy_menu_rejects_none() {
          // supportsReasoningEffort without a server list → built-in low..xhigh.
 diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-index c6bda38..880c1ad 100644
+index c4b162a..32ac83e 100644
 --- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
 +++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-@@ -5243,7 +5243,8 @@ mod tests {
+@@ -5259,7 +5259,8 @@ mod tests {
              (crate::ReasoningEffort::Low, "low"),
              (crate::ReasoningEffort::Medium, "medium"),
              (crate::ReasoningEffort::High, "high"),
@@ -189,10 +189,10 @@ index edebb1a..94725f6 100644
  
      #[test]
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index 6c8b021..b20904d 100644
+index 67f47eb..7f5b818 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
-@@ -3566,24 +3566,34 @@ pub fn anthropic_model_entries() -> Vec<(String, ModelEntry)> {
+@@ -3572,24 +3572,34 @@ pub fn anthropic_model_entries() -> Vec<(String, ModelEntry)> {
              info.max_completion_tokens = Some(max_completion_tokens);
              info.supports_reasoning_effort = true;
              info.reasoning_effort = Some(ReasoningEffort::High);
@@ -242,7 +242,7 @@ index 6c8b021..b20904d 100644
              (
                  key,
                  ModelEntry {
-@@ -6140,8 +6150,8 @@ reasoning_effort = "low"
+@@ -6146,8 +6156,8 @@ reasoning_effort = "low"
  
      /// Built-in Anthropic catalog: every entry is keyed `anthropic/<slug>`,
      /// routes to the Anthropic Messages API with the OAuth auth scheme, and
@@ -253,7 +253,7 @@ index 6c8b021..b20904d 100644
      #[test]
      fn anthropic_entries_route_to_messages_backend() {
          let entries = anthropic_model_entries();
-@@ -6162,6 +6172,19 @@ reasoning_effort = "low"
+@@ -6168,6 +6178,19 @@ reasoning_effort = "low"
                      .iter()
                      .any(|o| o.value == ReasoningEffort::Max)
              );

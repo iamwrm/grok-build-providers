@@ -1,7 +1,7 @@
-From 45a2e89ca64f05e59621451f66b8c8d0a8aeb31e Mon Sep 17 00:00:00 2001
+From f36f41273bb68b72bfba8910c406ea77ce9d3720 Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
 Date: Sun, 19 Jul 2026 13:01:00 +0800
-Subject: [PATCH] Skip unix-only protoc rerun hints on Windows
+Subject: [PATCH 13/15] Skip unix-only protoc rerun hints on Windows
 
 xai-proto-build shells out to protoc with --dependency_out=/dev/stdout
 and --descriptor_set_out=/dev/null to emit cargo rerun-if-changed hints;

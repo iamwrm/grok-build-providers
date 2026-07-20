@@ -1,7 +1,7 @@
-From b7fdc633924217082e0cb5ed87cd85e9c6067a54 Mon Sep 17 00:00:00 2001
+From 3e5cb8094e6385493e8b38bf0e4d171634d071c8 Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
 Date: Sun, 19 Jul 2026 11:21:40 +0800
-Subject: [PATCH 09/11] Integrate Anthropic OAuth Messages transport
+Subject: [PATCH 09/15] Integrate Anthropic OAuth Messages transport
 
 Add the anthropic_oauth auth scheme with live bearer resolution and the
 Claude Code identity headers (anthropic-version, anthropic-beta oauth,
@@ -19,7 +19,7 @@ user-agent headers now win over the sampler default.
  4 files changed, 253 insertions(+), 8 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index b99b31c..d6cf3e2 100644
+index 34908b9..64e006b 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
 @@ -425,6 +425,83 @@ fn apply_chatgpt_codex_request_shape(body: &mut serde_json::Value) {
@@ -156,7 +156,7 @@ index b99b31c..d6cf3e2 100644
              (_, None) => "none",
          };
          crate::sampling_log::AuthInfo {
-@@ -1661,6 +1743,10 @@ impl SamplingClient {
+@@ -1563,6 +1645,10 @@ impl SamplingClient {
              request.inner.top_p = self.defaults.top_p;
          }
  
@@ -167,7 +167,7 @@ index b99b31c..d6cf3e2 100644
          Ok(())
      }
  
-@@ -3006,4 +3092,73 @@ mod tests {
+@@ -2889,4 +2975,73 @@ mod tests {
          assert_eq!(body["instructions"], "part one\npart two");
          assert!(body["input"].as_array().unwrap().is_empty());
      }
@@ -262,10 +262,10 @@ index a2445bf..fb3143d 100644
  
  /// All knobs that control a single sampling request.
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index 92efa8b..1579c24 100644
+index 286aaa2..dffc6e1 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
-@@ -4013,6 +4013,9 @@ impl ModelEntry {
+@@ -4019,6 +4019,9 @@ impl ModelEntry {
          if self.info.auth_scheme == AuthScheme::ChatgptOauth {
              return crate::auth::openai_codex::current_bearer_blocking();
          }
@@ -275,7 +275,7 @@ index 92efa8b..1579c24 100644
          first_own_credential(self.api_key.as_deref(), self.env_key.as_ref())
      }
      /// `true` when the model has a non-empty `api_key` or an `env_key` that
-@@ -4409,6 +4412,19 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
+@@ -4417,6 +4420,19 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
              );
          }
          (key, info.base_url.clone(), xai_chat_state::AuthType::ApiKey)
@@ -295,7 +295,7 @@ index 92efa8b..1579c24 100644
      } else if let Some(key) = model.own_credential() {
          (
              Some(key),
-@@ -4544,10 +4560,15 @@ pub fn resolve_model_auth_facts(model_id: &str) -> ModelAuthFacts {
+@@ -4552,10 +4568,15 @@ pub fn resolve_model_auth_facts(model_id: &str) -> ModelAuthFacts {
  fn byok_from_lookup(lookup: &ModelLookup) -> ModelByok {
      match lookup {
          ModelLookup::ConfigUnavailable => ModelByok::Unknown,
@@ -314,7 +314,7 @@ index 92efa8b..1579c24 100644
          {
              ModelByok::Byok
          }
-@@ -4750,6 +4771,11 @@ pub fn sampling_config_for_model(
+@@ -4758,6 +4779,11 @@ pub fn sampling_config_for_model(
              Some(std::sync::Arc::new(
                  crate::auth::openai_codex::OpenAiCodexBearerResolver,
              ))
@@ -326,7 +326,7 @@ index 92efa8b..1579c24 100644
          } else {
              None
          };
-@@ -4808,6 +4834,30 @@ pub fn inject_openai_codex_headers(extra_headers: &mut IndexMap<String, String>)
+@@ -4816,6 +4842,30 @@ pub fn inject_openai_codex_headers(extra_headers: &mut IndexMap<String, String>)
          .entry("OpenAI-Beta".to_string())
          .or_insert_with(|| "responses=experimental".to_string());
  }
@@ -357,7 +357,7 @@ index 92efa8b..1579c24 100644
  /// Fold URL-derived headers into `extra_headers`.
  ///
  /// The sampler crate is intentionally URL-agnostic: it does not inspect
-@@ -6007,6 +6057,30 @@ reasoning_effort = "low"
+@@ -6013,6 +6063,30 @@ reasoning_effort = "low"
          }
      }
  
@@ -389,7 +389,7 @@ index 92efa8b..1579c24 100644
      fn try_resolve_model_credentials_swaps_first_party_own_key_under_kill_switch() {
          use xai_chat_state::AuthType;
 diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
-index 85ac228..d63c3bb 100644
+index e3f7b74..27c6fda 100644
 --- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
 @@ -284,8 +284,11 @@ impl SessionActor {

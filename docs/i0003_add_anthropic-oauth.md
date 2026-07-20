@@ -3,7 +3,7 @@
 **Status:** implemented, exported, and live-verified (2026-07-19)
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
 **Deliverable:** five-patch series `patches/grok-build/0008..0012`, continuing the i0001/i0002 stack
-**Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `98c3b24` (stack tip after i0002: `cd19ebd`)
+**Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `ba76b0a` (Grok `0.2.106`; stack tip after i0002: `ff8806e`)
 
 ## Goal
 
@@ -213,15 +213,16 @@ between `high` and `max` on Opus 4.7/4.8, Sonnet 5, and Fable 5.
   entries and fail pre-existing on any machine with a stored
   `~/.grok/openai_auth.json` (or now `anthropic_auth.json`), independent of
   this series.
-- `git diff cd19ebd..HEAD --check` clean.
-- Historical clean-room snapshot through i0003: all **twelve** patches
-  `git am` onto a detached worktree at `98c3b24`; resulting tree hash
-  `acd130e5f9027dccb0bfa9fe73e3507c39983798` matches the patch-0012 tip
-  (`6ff0a31`) exactly. The current 15-patch stack is validated separately in
-  [i0004](i0004_release-ci.md).
-- Patch 0012 additions: sampling-types suite 273/273 (native wire mapping),
-  pager `model_state` 17/17 (incl. the symmetric `xhigh→max` fallback),
-  catalog test asserts per-model native-xhigh gating.
+- `git diff ff8806e..HEAD --check` clean.
+- Clean-room snapshot through i0003: all **twelve** patches `git am` onto a
+  detached worktree at `ba76b0a`; resulting tree hash
+  `d0a27a1eca6dea6d0cc03ca6fc8e1db16ca45643` matches the patch-0012 tip
+  (`4f9056cc498247b0e7f542efcc462dcaf4e4fec2`) exactly. The current 15-patch
+  stack is validated separately in [i0004](i0004_release-ci.md).
+- After the rebase, the sampling-types suite passes 277/277 (native wire
+  mapping), the pager suite passes 7390 tests with 10 ignored (including the
+  symmetric `xhigh→max` fallback), and the catalog test retains per-model
+  native-xhigh gating.
 - **Live testing (2026-07-19):** `grok anthropic login` browser flow
   completed and stored `~/.grok/anthropic_auth.json`; user-confirmed working
   live inference on the `anthropic/*` catalog (including native `xhigh`

@@ -1,7 +1,7 @@
-From 230bc7c7a5349df18b269ea0161d8c278a136155 Mon Sep 17 00:00:00 2001
+From a17584579eee3824ee5a4b2135a3d8d62128ee3f Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
 Date: Sat, 18 Jul 2026 23:49:09 +0800
-Subject: [PATCH 5/5] Document OpenAI Codex OAuth and in-app model switching
+Subject: [PATCH 05/15] Document OpenAI Codex OAuth and in-app model switching
 
 Document browser and device-code login, credential isolation, the built-in
 zero-config model catalog, and provider/model:effort selection. Clarify the
@@ -13,10 +13,10 @@ separate API-key Responses path and advanced custom-model configuration.
  3 files changed, 73 insertions(+), 4 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
-index a6c84d5..ec29a04 100644
+index 08313b9..ae1fdbd 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
-@@ -33,6 +33,45 @@ To sign out, run `grok logout`. It takes no flags and clears your cached credent
+@@ -41,6 +41,45 @@ To sign out, run `grok logout`. It takes no flags and clears your cached credent
  
  ---
  
@@ -63,10 +63,10 @@ index a6c84d5..ec29a04 100644
  
  For CI/CD, automation, or environments without browser access, use an API key from [console.x.ai](https://console.x.ai):
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-index 64b302d..4c78930 100644
+index 6c21e2b..6d8a965 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-@@ -126,16 +126,25 @@ Aliases: `/title`
+@@ -129,16 +129,25 @@ Aliases: `/title`
  
  ## Model and Mode
  

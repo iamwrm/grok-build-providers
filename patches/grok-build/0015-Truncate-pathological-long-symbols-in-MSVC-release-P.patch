@@ -1,7 +1,7 @@
-From dcb0547f9235c27dddcfa61091d29c742e957840 Mon Sep 17 00:00:00 2001
+From d76cf1c8315728a9304b414734691ca692b1cc8e Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
 Date: Sun, 19 Jul 2026 15:25:46 +0800
-Subject: [PATCH] Truncate pathological long symbols in MSVC release PDBs
+Subject: [PATCH 15/15] Truncate pathological long symbols in MSVC release PDBs
 
 Even at link.exe's maximum 16 KiB PDB page size, one generated/generic pager
 symbol triggers LNK4318 then exhausts the public-symbol table with LNK4319.

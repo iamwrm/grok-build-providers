@@ -1,7 +1,7 @@
-From d4ff715df7257dfd8ba1aeaa969395ed05849fa8 Mon Sep 17 00:00:00 2001
+From 51043caa8e91be38756a0a5eaa95bbe6e579d66f Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
 Date: Sun, 19 Jul 2026 14:38:45 +0800
-Subject: [PATCH] Increase MSVC PDB page size for the pager link
+Subject: [PATCH 14/15] Increase MSVC PDB page size for the pager link
 
 Rustc emits a minimal release PDB even when profile debug info is disabled.
 The pager's public-symbol table exceeds link.exe's default 4 KiB PDB page

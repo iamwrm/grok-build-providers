@@ -1,7 +1,7 @@
-From 9dce0c3bd7066385c18d59f96f9b9ff973c08492 Mon Sep 17 00:00:00 2001
+From 42a1ba66037758b4f7be7bde2af761ae25312af2 Mon Sep 17 00:00:00 2001
 From: Ren Wang <iamwrm@gmail.com>
 Date: Sat, 18 Jul 2026 23:48:11 +0800
-Subject: [PATCH 1/5] Add OpenAI ChatGPT-plan OAuth flow, storage, and CLI
+Subject: [PATCH 01/15] Add OpenAI ChatGPT-plan OAuth flow, storage, and CLI
 
 Port pi's OpenAI Codex PKCE browser and device-code authentication flows.
 Store the isolated refreshable credential in ~/.grok/openai_auth.json and
@@ -15,10 +15,10 @@ expose grok openai login, logout, and status commands.
  create mode 100644 crates/codegen/xai-grok-shell/src/auth/openai_codex.rs
 
 diff --git a/crates/codegen/xai-grok-pager-bin/src/main.rs b/crates/codegen/xai-grok-pager-bin/src/main.rs
-index de17b9a..919e02b 100644
+index 8f28eed..81da5ae 100644
 --- a/crates/codegen/xai-grok-pager-bin/src/main.rs
 +++ b/crates/codegen/xai-grok-pager-bin/src/main.rs
-@@ -1893,6 +1893,22 @@ async fn async_main() -> Result<()> {
+@@ -1908,6 +1908,22 @@ async fn async_main() -> Result<()> {
                  println!();
                  xai_grok_shell::instrumentation::finalize_and_exit(0);
              }
@@ -85,7 +85,7 @@ index e2ed796..533f338 100644
  #[derive(Debug, clap::Args, Clone)]
  pub struct WrapArgs {
 diff --git a/crates/codegen/xai-grok-shell/src/auth/mod.rs b/crates/codegen/xai-grok-shell/src/auth/mod.rs
-index 5d8e262..5cb283f 100644
+index 16be304..eadb8c9 100644
 --- a/crates/codegen/xai-grok-shell/src/auth/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/auth/mod.rs
 @@ -11,6 +11,7 @@ mod jwt;
