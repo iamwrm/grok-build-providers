@@ -1,8 +1,8 @@
 # i0005: Last-prompt stats at turn end (cache read/write, TPS, cost)
 
-**Status:** implemented in consolidated patches `0011–0013`; raw-wire grounding and release-profile verification complete; user-guide patch deferred
+**Status:** implemented in consolidated patches `0011–0013` plus follow-up `0016` (sampling layer panic fix); raw-wire grounding and release-profile verification complete; user-guide patch deferred
 **Upstreams:** `checkouts/pi` + `../piagent-config/packages/ren-public-package/0012-last-turn.ts` (reference), `checkouts/grok-build` (patch target)
-**Deliverable:** patches `0011–0013`, continuing the i0001–i0004 stack
+**Deliverable:** patches `0011–0013` and `0016`, continuing the i0001–i0004 stack
 **Implementation branch:** clean-room series based on `ba76b0a`; full tip `d8c0564`, tree `0a219b73e452c3ce19ea64cd7679dde3bf1e7a89`
 
 ## Goal
@@ -61,6 +61,36 @@ captured. Raw **requests** were not.
 - Privacy note: when enabled, `sampling.jsonl` contains full prompts, tool
   calls/results, and responses. It is off by default and enabling prints an
   explicit warning; existing size trimming applies.
+
+### Patch 0016 — sampling JSON layer must not panic under agent parents
+
+Enabling `/debug sampling on` (or `--log-sampling`) then issuing a real
+request crashed the `acp-agent-worker` with:
+
+```text
+Unable to find FormattedFields in extensions; this is a bug
+```
+
+Root cause: `RuntimeSamplingLayer` only called the inner JSON `fmt` layer’s
+`on_new_span` for `target: "sampling_log"` spans. The JSON formatter still
+walks **every** ancestor when writing the `spans` array and panics if any
+span lacks `FormattedFields`. Sampling events almost always fire under
+non-`sampling_log` agent/shell parents, so the first logged request aborted
+the process.
+
+Fix:
+
+1. Always forward span lifecycle methods (`on_new_span` / `on_record` /
+   enter/exit/close) to the inner formatter; keep gating only on event
+   emission (`target == sampling_log` && runtime enabled).
+2. Hard guarantee: JSON layer uses `with_current_span(false)` and
+   `with_span_list(false)` so it never walks ancestors looking for
+   `FormattedFields` (event fields alone carry `request_body` /
+   `sse_chunk` payloads).
+
+Regression test `json_fmt_does_not_panic_under_non_sampling_parent_spans`
+covers both the production config and the old span-list panic path.
+Release binary is built from **`xai-grok-pager-bin`** (not `-p xai-grok-pager`).
 
 ### Grounding run (2026-07-20, live)
 
@@ -181,6 +211,10 @@ all other unknown events remain fail-closed.
   final runtime gate verification passed sampler 2/2, shell ACP handler 2/2,
   pager `/debug` 8/8, focused pager dispatch/status 2/2, and dynamic callsite
   gating 1/1 in release profile.
+- Patch `0016`: telemetry `sampling_log` release tests 2/2 (runtime gate +
+  non-sampling parent JSON regression); `cargo build -p xai-grok-pager-bin
+  --release` relinks `target/release/xai-grok-pager` (mtime check required —
+  rebuilding only `-p xai-grok-pager` leaves a stale binary).
 - Live pre-consolidation grounding: headless
   `-m anthropic/claude-sonnet-4-6:low` tool-using turn completed on attempt
   1 with `GROK_LOG_SAMPLING=true`; `sampling.jsonl` contained 3
