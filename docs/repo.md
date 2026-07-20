@@ -115,6 +115,7 @@ replacement series before deleting old patch files.
 | [i0005](i0005_last-turn-stats.md) | `0011–0013`, `0016` | Raw sampling diagnostics, turn-end metrics, sampling-layer panic fix |
 | [i0006](i0006_batch-file-edits.md) | `0014` | Atomic multi-edit search/replace for one file |
 | [i0007](i0007_codex-parallel-tools.md) | `0015` | Codex parallel tool-call wire + result ordering |
+| [i0008](i0008_mid-session-model-switch.md) | `0017` | Safe native reasoning replay across model/provider switches |
 
 ## Conventions
 

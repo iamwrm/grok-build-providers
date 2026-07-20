@@ -1,102 +1,541 @@
-From c61985f018855d67bc368c416c385d3ba751f969 Mon Sep 17 00:00:00 2001
+From 67b450b18eaf980b73a6af874f09419c1fe96153 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
-Date: Mon, 20 Jul 2026 21:03:02 +0800
-Subject: [PATCH] Fold foreign reasoning into assistant text on model switch
+Date: Mon, 20 Jul 2026 22:17:03 +0800
+Subject: [PATCH] Gate native reasoning replay by route, API, and model
 
-Stripping encrypted_content alone left rs_* ids on the wire; with
-store:false Codex returns 404 "Item not found". Drop typed foreign
-reasoning entirely and fold visible CoT into the following assistant
-(pi-style), same-model path unchanged.
+Persist non-secret inference provenance on assistant turns and replay opaque reasoning only when route, backend, and wire model all match. Convert visible foreign reasoning to portable assistant text and drop opaque-only state across Responses, Messages, and Chat Completions, leaving saved history intact for exact-origin switch-back.
 ---
- .../src/conversation.rs                       | 173 +++++++++++++-----
- 1 file changed, 123 insertions(+), 50 deletions(-)
+ .../src/actor/request_builder.rs              |   1 +
+ .../codegen/xai-chat-state/src/actor/tests.rs |   6 +
+ .../src/compaction_transcript.rs              |   1 +
+ .../xai-chat-state/src/compaction_utils.rs    |  10 +
+ .../src/actor/request_task.rs                 |  21 +-
+ crates/codegen/xai-grok-sampler/src/client.rs |  31 +-
+ crates/codegen/xai-grok-sampler/src/config.rs |  23 +
+ .../src/stream/chat_completions.rs            |   1 +
+ .../xai-grok-sampler/src/stream/messages.rs   |   1 +
+ .../src/conversation.rs                       | 599 +++++++++++++++++-
+ .../xai-grok-sampling-types/src/types.rs      |  13 +
+ .../src/agent/subagent/tests/mod.rs           |   2 +-
+ .../src/session/acp_session_impl/laziness.rs  |   1 +
+ .../session/acp_session_impl/sampler_turn.rs  |   1 +
+ .../laziness/laziness_debug_tests.rs          |   6 +
+ .../src/session/goal_classifier/evidence.rs   |   2 +
+ .../src/session/helpers/session_compact.rs    |   3 +
+ .../src/session/memory/hooks.rs               |   1 +
+ .../src/session/storage/jsonl/tests.rs        |  10 +-
+ .../xai-grok-shell/src/session/storage/mod.rs |   1 +
+ .../src/trace_classifier/mod.rs               |   3 +
+ 21 files changed, 721 insertions(+), 16 deletions(-)
 
+diff --git a/crates/codegen/xai-chat-state/src/actor/request_builder.rs b/crates/codegen/xai-chat-state/src/actor/request_builder.rs
+index 4a708aa..b385685 100644
+--- a/crates/codegen/xai-chat-state/src/actor/request_builder.rs
++++ b/crates/codegen/xai-chat-state/src/actor/request_builder.rs
+@@ -131,6 +131,7 @@ impl ChatStateActor {
+             hosted_tools: vec![],
+             tool_choice: None,
+             model: Some(self.state.sampling_config.model.clone()),
++            reasoning_origin: None,
+             temperature: self.state.sampling_config.temperature,
+             max_output_tokens: self.state.sampling_config.max_completion_tokens,
+             top_p: self.state.sampling_config.top_p,
+diff --git a/crates/codegen/xai-chat-state/src/actor/tests.rs b/crates/codegen/xai-chat-state/src/actor/tests.rs
+index 2bc9565..5e9c2c5 100644
+--- a/crates/codegen/xai-chat-state/src/actor/tests.rs
++++ b/crates/codegen/xai-chat-state/src/actor/tests.rs
+@@ -1488,6 +1488,7 @@ async fn parallel_tool_calls_accept_first_reject_second_skip_third() {
+                     arguments: r#"{"command":"cargo test"}"#.into(),
+                 },
+             ],
++            reasoning_origin: None,
+             model_id: Some("grok-3".to_string()),
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -1774,6 +1775,7 @@ async fn dangling_tool_calls_after_crash_are_repaired_on_load() {
+                     arguments: r#"{"command":"cargo test"}"#.into(),
+                 },
+             ],
++            reasoning_origin: None,
+             model_id: Some("grok-3".to_string()),
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -3406,6 +3408,7 @@ async fn get_last_model_metadata_returns_both_fields() {
+         ConversationItem::Assistant(xai_grok_sampling_types::AssistantItem {
+             content: "hello".into(),
+             tool_calls: vec![],
++            reasoning_origin: None,
+             model_id: Some("grok-4.5".into()),
+             model_fingerprint: Some("fp_abc123".into()),
+             reasoning_effort: None,
+@@ -3455,6 +3458,7 @@ async fn sampling_config_survives_compaction_replacement() {
+             ConversationItem::Assistant(xai_grok_sampling_types::AssistantItem {
+                 content: "I'll fix it.".into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: Some("grok-4.5".into()),
+                 model_fingerprint: Some("fp_abc123".into()),
+                 reasoning_effort: None,
+@@ -3538,6 +3542,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
+             ConversationItem::Assistant(xai_grok_sampling_types::AssistantItem {
+                 content: "done".into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: Some("grok-4.5".into()),
+                 model_fingerprint: Some("fp_acd3142484d3ad6f".into()),
+                 reasoning_effort: None,
+@@ -3573,6 +3578,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
+             xai_grok_sampling_types::AssistantItem {
+                 content: "working on it".into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: Some("grok-4.5".into()),
+                 model_fingerprint: Some("fp_acd3142484d3ad6f".into()),
+                 reasoning_effort: None,
+diff --git a/crates/codegen/xai-chat-state/src/compaction_transcript.rs b/crates/codegen/xai-chat-state/src/compaction_transcript.rs
+index c12420b..0ea271c 100644
+--- a/crates/codegen/xai-chat-state/src/compaction_transcript.rs
++++ b/crates/codegen/xai-chat-state/src/compaction_transcript.rs
+@@ -776,6 +776,7 @@ mod tests {
+                     tc("read_file", r#"{"target_file":"src/b.py"}"#),
+                     tc("grep", r#"{"pattern":"x","path":"src/"}"#),
+                 ],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+diff --git a/crates/codegen/xai-chat-state/src/compaction_utils.rs b/crates/codegen/xai-chat-state/src/compaction_utils.rs
+index ca75479..74d06d4 100644
+--- a/crates/codegen/xai-chat-state/src/compaction_utils.rs
++++ b/crates/codegen/xai-chat-state/src/compaction_utils.rs
+@@ -2681,6 +2681,7 @@ actual user question";
+                         arguments: r#"{"target_file":"src/lib.rs"}"#.into(),
+                     },
+                 ],
++                reasoning_origin: None,
+                 model_id: Some("grok-3".to_string()),
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -2714,6 +2715,7 @@ actual user question";
+                         arguments: r#"{"command":"cargo test"}"#.into(),
+                     },
+                 ],
++                reasoning_origin: None,
+                 model_id: Some("grok-3".to_string()),
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -2973,6 +2975,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+             ConversationItem::Assistant(AssistantItem {
+                 content: "response".into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -2997,6 +3000,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+             ConversationItem::Assistant(AssistantItem {
+                 content: "response".into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -3047,6 +3051,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+                     name: "grep".into(),
+                     arguments: "{}".into(),
+                 }],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -3090,6 +3095,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+             ConversationItem::Assistant(AssistantItem {
+                 content: "plain text response".into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -3126,6 +3132,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+                     name: "grep".into(),
+                     arguments: "{}".into(),
+                 }],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -3136,6 +3143,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+             ConversationItem::Assistant(AssistantItem {
+                 content: "thinking only".into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -3145,6 +3153,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+             ConversationItem::Assistant(AssistantItem {
+                 content: "plain reply".into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -3214,6 +3223,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+                     name: "ls".into(),
+                     arguments: "{}".into(),
+                 }],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+diff --git a/crates/codegen/xai-grok-sampler/src/actor/request_task.rs b/crates/codegen/xai-grok-sampler/src/actor/request_task.rs
+index 66665af..d257c1f 100644
+--- a/crates/codegen/xai-grok-sampler/src/actor/request_task.rs
++++ b/crates/codegen/xai-grok-sampler/src/actor/request_task.rs
+@@ -15,8 +15,8 @@ use tokio_util::sync::CancellationToken;
+ use tracing::Instrument;
+ 
+ use xai_grok_sampling_types::{
+-    ConversationRequest, ConversationResponse, EmptyResponseContext, SamplingError,
+-    error::Result as SamplingResult,
++    ConversationRequest, ConversationResponse, EmptyResponseContext, ReasoningOrigin,
++    SamplingError, error::Result as SamplingResult,
+ };
+ 
+ use crate::client::{ApiBackend, SamplingClient};
+@@ -113,7 +113,19 @@ pub(crate) async fn run_request_task(
+         sampling_span.record("reasoning_effort", eff.as_str());
+     }
+ 
++    let reasoning_origin = ReasoningOrigin {
++        route: crate::config::reasoning_route(&config.base_url),
++        api_backend: config.api_backend.clone(),
++        model: request
++            .model
++            .clone()
++            .unwrap_or_else(|| config.model.clone()),
++    };
+     let mut request = request;
++    // Always override any stale/ad-hoc request identity with the actual client
++    // route used for this task. Request builders then have one authoritative
++    // destination for their wire-time reasoning transform.
++    request.reasoning_origin = Some(reasoning_origin.clone());
+     let mut retry_count: u32 = 0;
+     // Doom-loop recovery keeps its own resample budget, independent of the
+     // transport/empty budget above.
+@@ -144,9 +156,12 @@ pub(crate) async fn run_request_task(
+ 
+         match outcome {
+             AttemptOutcome::Completed {
+-                response,
++                mut response,
+                 mut metrics,
+             } => {
++                if let Some(assistant) = response.assistant_mut() {
++                    assistant.reasoning_origin = Some(reasoning_origin.clone());
++                }
+                 metrics.attempts = retry_count + doom_retry_count + 1;
+                 if let Some(policy) = doom_policy {
+                     let confident = policy.confident_triggers(&response.doom_loop_signals);
+diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
+index ed577ca..e80d216 100644
+--- a/crates/codegen/xai-grok-sampler/src/client.rs
++++ b/crates/codegen/xai-grok-sampler/src/client.rs
+@@ -1997,6 +1997,19 @@ impl SamplingClient {
+             request.max_output_tokens = self.defaults.max_completion_tokens;
+         }
+ 
++        // This is the common request-boundary choke point for every backend.
++        // Replace any caller-supplied value with the actual client route/API
++        // and resolved wire model so foreign opaque reasoning cannot bypass
++        // sanitization through a direct conversation_* call.
++        request.reasoning_origin = Some(xai_grok_sampling_types::ReasoningOrigin {
++            route: crate::config::reasoning_route(&self.base_url),
++            api_backend: self.api_backend(),
++            model: request
++                .model
++                .clone()
++                .expect("conversation model is filled above"),
++        });
++
+         Ok(())
+     }
+ 
+@@ -2193,8 +2206,17 @@ impl SamplingClient {
+     /// Backend-aware streaming call that collects the full response.
+     pub async fn conversation_collect(
+         &self,
+-        request: ConversationRequest,
++        mut request: ConversationRequest,
+     ) -> Result<ConversationResponse> {
++        let origin = xai_grok_sampling_types::ReasoningOrigin {
++            route: crate::config::reasoning_route(&self.base_url),
++            api_backend: self.api_backend(),
++            model: request
++                .model
++                .clone()
++                .unwrap_or_else(|| self.defaults.model.clone()),
++        };
++        request.reasoning_origin = Some(origin.clone());
+         let request_id = crate::types::RequestId::random();
+         let idle_timeout = std::time::Duration::from_secs(300);
+         let result = match self.api_backend() {
+@@ -2217,7 +2239,12 @@ impl SamplingClient {
+             }
+         };
+         result
+-            .map(|(response, _metrics)| response)
++            .map(|(mut response, _metrics)| {
++                if let Some(assistant) = response.assistant_mut() {
++                    assistant.reasoning_origin = Some(origin);
++                }
++                response
++            })
+             .map_err(|info| SamplingError::Api {
+                 status: info
+                     .status_code
+diff --git a/crates/codegen/xai-grok-sampler/src/config.rs b/crates/codegen/xai-grok-sampler/src/config.rs
+index fb3143d..da48698 100644
+--- a/crates/codegen/xai-grok-sampler/src/config.rs
++++ b/crates/codegen/xai-grok-sampler/src/config.rs
+@@ -12,6 +12,20 @@ use xai_grok_sampling_types::{
+     ApiBackend, CompactionAtTokens, CompactionsRemaining, DoomLoopRecoveryPolicy, ReasoningEffort,
+ };
+ 
++/// Normalize an inference route before persisting it as reasoning provenance.
++/// Strip credentials, query, fragment, and trailing slashes: none affects the
++/// provider identity, and none should be copied into chat history.
++pub(crate) fn reasoning_route(base_url: &str) -> String {
++    let Ok(mut url) = reqwest::Url::parse(base_url) else {
++        return base_url.trim_end_matches('/').to_owned();
++    };
++    let _ = url.set_username("");
++    let _ = url.set_password(None);
++    url.set_query(None);
++    url.set_fragment(None);
++    url.as_str().trim_end_matches('/').to_owned()
++}
++
+ use crate::attribution::SharedAttributionCallback;
+ use crate::retry::{DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD};
+ 
+@@ -224,6 +238,15 @@ pub struct OriginClientInfo {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn reasoning_route_strips_secrets_query_fragment_and_trailing_slash() {
++        assert_eq!(
++            reasoning_route("https://user:pass@example.test/v1/?token=secret#frag"),
++            "https://example.test/v1"
++        );
++        assert_eq!(reasoning_route("not-a-url///"), "not-a-url");
++    }
++
+     #[test]
+     fn retry_policy_defaults() {
+         let policy = RetryPolicy::default();
+diff --git a/crates/codegen/xai-grok-sampler/src/stream/chat_completions.rs b/crates/codegen/xai-grok-sampler/src/stream/chat_completions.rs
+index 6218f81..752985b 100644
+--- a/crates/codegen/xai-grok-sampler/src/stream/chat_completions.rs
++++ b/crates/codegen/xai-grok-sampler/src/stream/chat_completions.rs
+@@ -271,6 +271,7 @@ pub fn stream_chat_completions<'a>(
+             items.push(ConversationItem::Assistant(AssistantItem {
+                 content: std::sync::Arc::<str>::from(content_acc),
+                 tool_calls,
++                reasoning_origin: None,
+                 model_id: Some(model),
+                 model_fingerprint,
+                 // Chat Completions does not echo the applied reasoning effort.
+diff --git a/crates/codegen/xai-grok-sampler/src/stream/messages.rs b/crates/codegen/xai-grok-sampler/src/stream/messages.rs
+index 75e9ef7..eb730a4 100644
+--- a/crates/codegen/xai-grok-sampler/src/stream/messages.rs
++++ b/crates/codegen/xai-grok-sampler/src/stream/messages.rs
+@@ -491,6 +491,7 @@ pub fn stream_messages<'a>(
+         let assistant_item = ConversationItem::Assistant(AssistantItem {
+             content: std::sync::Arc::<str>::from(assistant_text),
+             tool_calls: assistant_tool_calls,
++            reasoning_origin: None,
+             model_id: Some(model_id),
+             model_fingerprint: None,
+             // The Messages API does not echo the applied reasoning effort.
 diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-index 62d7807..4309dea 100644
+index b7af318..0134fc8 100644
 --- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
 +++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-@@ -2252,9 +2252,10 @@ impl From<&ConversationRequest> for rs::CreateResponse {
+@@ -240,6 +240,10 @@ pub struct AssistantItem {
+     /// Tool calls made by the assistant (client must execute these locally)
+     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+     pub tool_calls: Vec<ToolCall>,
++    /// Exact non-secret route/API/model provenance for native reasoning replay.
++    /// Old history lacks this field and is handled conservatively at wire time.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub reasoning_origin: Option<crate::ReasoningOrigin>,
+     /// The model that generated this response
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub model_id: Option<String>,
+@@ -557,6 +561,11 @@ pub struct ConversationRequest {
+     pub tool_choice: Option<ConversationToolChoice>,
+     /// Model to use (if not using client default)
+     pub model: Option<String>,
++    /// Exact non-secret destination identity for native reasoning replay.
++    /// The sampler stamps this from its configured route/API/model before
++    /// converting the request. Direct conversion helpers retain their legacy
++    /// behavior only when both source and destination omit provenance.
++    pub reasoning_origin: Option<crate::ReasoningOrigin>,
+     /// Sampling temperature
+     pub temperature: Option<f32>,
+     /// Maximum output tokens
+@@ -1113,6 +1122,7 @@ impl ConversationItem {
+         Self::Assistant(AssistantItem {
+             content: Arc::<str>::from(content.into()),
+             tool_calls: Vec::new(),
++            reasoning_origin: None,
+             model_id: None,
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -1128,6 +1138,7 @@ impl ConversationItem {
+         Self::Assistant(AssistantItem {
+             content: Arc::<str>::from(content.into()),
+             tool_calls: Vec::new(),
++            reasoning_origin: None,
+             model_id: Some(model_id.into()),
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -1139,6 +1150,7 @@ impl ConversationItem {
+         Self::Assistant(AssistantItem {
+             content: Arc::<str>::from(""),
+             tool_calls,
++            reasoning_origin: None,
+             model_id: None,
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -1650,6 +1662,7 @@ impl From<ChatRequestMessage> for ConversationItem {
+                 ConversationItem::Assistant(AssistantItem {
+                     content: Arc::<str>::from(content),
+                     tool_calls,
++                    reasoning_origin: None,
+                     model_id,
+                     model_fingerprint: None,
+                     reasoning_effort: None,
+@@ -1887,6 +1900,14 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
+ /// turn (there is intentionally no public single-item conversion, since a
+ /// lone `Reasoning` item has no chat-completions equivalent).
+ pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRequestMessage> {
++    conversation_to_chat_messages_for_origin(items, None)
++}
++
++fn conversation_to_chat_messages_for_origin(
++    items: Vec<ConversationItem>,
++    destination: Option<&crate::ReasoningOrigin>,
++) -> Vec<ChatRequestMessage> {
++    let items = sanitize_reasoning_for_origin(&items, destination);
+     let mut out: Vec<ChatRequestMessage> = Vec::with_capacity(items.len());
+     let mut pending_reasoning: Vec<String> = Vec::new();
+ 
+@@ -1961,6 +1982,7 @@ impl From<ChatResponseMessage> for ConversationItem {
+         ConversationItem::Assistant(AssistantItem {
+             content: Arc::<str>::from(content),
+             tool_calls,
++            reasoning_origin: None,
+             model_id: None,
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -2090,6 +2112,7 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
+     items.push(ConversationItem::Assistant(AssistantItem {
+         content: Arc::<str>::from(content),
+         tool_calls,
++        reasoning_origin: None,
+         model_id: Some(model_id),
+         model_fingerprint,
+         reasoning_effort,
+@@ -2109,7 +2132,8 @@ impl From<ConversationRequest> for ChatCompletionRequest {
+         // Uses the reasoning-aware helper so `Reasoning` siblings collapse
+         // into `reasoning_content` on the following assistant rather than
+         // being emitted as empty assistant messages.
+-        let messages: Vec<ChatRequestMessage> = conversation_to_chat_messages(req.items);
++        let messages: Vec<ChatRequestMessage> =
++            conversation_to_chat_messages_for_origin(req.items, req.reasoning_origin.as_ref());
+ 
+         let tools_is_empty = req.tools.is_empty();
+         let tools: Option<Vec<ToolDefinition>> = if tools_is_empty {
+@@ -2251,15 +2275,138 @@ impl From<&ConversationRequest> for rs::CreateResponse {
+ /// Reasoning items are top-level siblings (not bundled into the assistant),
  /// so they appear inline in the same order the model originally emitted —
  /// which is what lets the server-side prefix KV-cache hit on repeat turns.
- ///
--/// Foreign-model encrypted reasoning is dropped first (see
-+/// Foreign-model reasoning is scrubbed first (see
- /// [`sanitize_reasoning_for_current_model`]) so mid-session model switches
--/// do not replay `encrypted_content` the destination cannot decrypt.
-+/// do not replay `encrypted_content` or `rs_*` ids the destination cannot
-+/// resolve under `store: false`.
++///
++/// Foreign-route reasoning is scrubbed first (see
++/// [`sanitize_reasoning_for_origin`]) so mid-session model/provider switches
++/// do not replay `encrypted_content`, signatures, or `rs_*` ids that only the
++/// originating route can consume.
  fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
-     let sanitized = sanitize_reasoning_for_current_model(&req.items, req.model.as_deref());
-     let items: Vec<rs::InputItem> = sanitized
-@@ -2264,15 +2265,6 @@ fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
+-    let items: Vec<rs::InputItem> = req
+-        .items
++    let sanitized = sanitize_reasoning_for_origin(&req.items, req.reasoning_origin.as_ref());
++    let items: Vec<rs::InputItem> = sanitized
+         .iter()
+         .flat_map(conversation_item_to_input_items)
+         .collect();
      rs::InputParam::Items(items)
  }
  
--/// Whether a reasoning item still carries anything the Responses API can
--/// usefully accept after foreign encrypted blobs are removed.
--fn reasoning_item_has_replayable_payload(r: &rs::ReasoningItem) -> bool {
--    r.encrypted_content
--        .as_ref()
--        .is_some_and(|s| !s.is_empty())
--        || !reasoning_item_text(r).trim().is_empty()
--}
--
- /// Look ahead from a reasoning sibling to the assistant turn it belongs to
- /// and return that turn's `model_id`.
- ///
-@@ -2291,23 +2283,21 @@ fn source_model_for_reasoning_at(items: &[ConversationItem], idx: usize) -> Opti
-     None
- }
- 
--/// True when encrypted reasoning from `source_model` may be replayed to
-+/// True when reasoning from `source_model` may be replayed as a native
-+/// Responses `reasoning` item (with `id` / `encrypted_content`) to
- /// `current_model`. Matches pi's same-model gate: exact model id match.
- ///
--/// Unknown provenance (`source_model` / `current_model` missing) keeps
--/// encrypted content so legacy sessions and synthetic assistants without a
--/// stamped `model_id` still hit the KV-cache on the same backend.
--fn encrypted_reasoning_compatible(
--    source_model: Option<&str>,
--    current_model: Option<&str>,
--) -> bool {
-+/// Unknown provenance (`source_model` / `current_model` missing) keeps the
-+/// item intact so legacy sessions and synthetic assistants without a stamped
-+/// `model_id` still hit the KV-cache on the same backend.
-+fn reasoning_item_compatible(source_model: Option<&str>, current_model: Option<&str>) -> bool {
-     match (source_model, current_model) {
-         (Some(src), Some(cur)) => src == cur,
-         _ => true,
-     }
- }
- 
--/// Drop or scrub foreign-model encrypted reasoning for a Responses request.
-+/// Drop or scrub foreign-model reasoning for a Responses request.
- ///
- /// pi's `transformMessages` drops redacted / signed thinking unless
- /// `assistant.provider + api + model` match the target model. We only stamp
-@@ -2315,37 +2305,79 @@ fn encrypted_reasoning_compatible(
- /// enough to stop Grok `rs_*` / `encrypted_content` from being sent to
- /// Codex/OpenAI (and vice versa) after a mid-session `/model` switch.
- ///
-+/// When models differ we must not emit a native `reasoning` item at all:
-+/// 1. `encrypted_content` — foreign blobs fail decryption (HTTP 400)
-+/// 2. `id` (`rs_…`) — with `store: false` the destination looks up the id
-+///    and returns 404 "Item … not found. Items are not persisted"
++/// Look ahead from a reasoning sibling to the assistant turn it belongs to.
++/// Reasoning / backend-tool-call siblings sit immediately before their
++/// assistant; a user/system/tool-result boundary makes it orphaned.
++fn source_assistant_for_reasoning_at(
++    items: &[ConversationItem],
++    idx: usize,
++) -> Option<&AssistantItem> {
++    for item in items.iter().skip(idx + 1) {
++        match item {
++            ConversationItem::Assistant(a) => return Some(a),
++            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => continue,
++            ConversationItem::System(_)
++            | ConversationItem::User(_)
++            | ConversationItem::ToolResult(_) => return None,
++        }
++    }
++    None
++}
++
++/// Native reasoning may be replayed only when the persisted source and actual
++/// destination agree on route, API backend, and wire model. Real sampler
++/// requests always stamp the destination, so missing source provenance fails
++/// closed. The `(None, None)` case remains only for legacy pure conversions.
++fn reasoning_item_compatible(
++    source: Option<&crate::ReasoningOrigin>,
++    destination: Option<&crate::ReasoningOrigin>,
++) -> bool {
++    match (source, destination) {
++        (Some(src), Some(dst)) => src == dst,
++        // Pure conversion helpers and old unit fixtures have neither side;
++        // preserve their historical shape. Real sampler requests always stamp
++        // a destination, so legacy history (`None` source) still fails closed.
++        (None, None) => true,
++        _ => false,
++    }
++}
++
++/// Drop or scrub reasoning that did not originate from the exact destination.
 +///
-+/// Visible summary/content is folded into the following assistant text
-+/// (pi converts foreign thinking blocks to plain `text`). Encrypted-only
-+/// foreign items are dropped.
++/// This matches pi's `provider + api + model` gate. Here `route` is the
++/// normalized inference base URL; together with `ApiBackend` and the wire model
++/// it distinguishes custom providers/proxies that expose the same model slug.
 +///
- /// Wire-time only: the on-disk / in-memory chat history is left intact so
--/// switching *back* to the original model can still replay its encrypted
--/// blobs.
-+/// switching *back* to the original model can still replay its blobs.
- fn sanitize_reasoning_for_current_model(
-     items: &[ConversationItem],
-     current_model: Option<&str>,
- ) -> Vec<ConversationItem> {
-     let mut out = Vec::with_capacity(items.len());
++/// Foreign/legacy reasoning must not emit native provider state:
++/// 1. encrypted/signature blobs fail verification on another route;
++/// 2. Responses `rs_…` ids under `store: false` produce 404 lookups;
++/// 3. Anthropic thinking signatures are valid only for their origin.
++///
++/// Visible summary/content is folded into the following assistant text (pi
++/// converts foreign thinking to plain text). Opaque-only items are dropped.
++/// This is wire-time only: history remains unchanged, so switching back to the
++/// exact original origin restores native replay.
++fn sanitize_reasoning_for_origin(
++    items: &[ConversationItem],
++    destination: Option<&crate::ReasoningOrigin>,
++) -> Vec<ConversationItem> {
++    let mut out = Vec::with_capacity(items.len());
 +    let mut pending_foreign_text: Vec<String> = Vec::new();
 +
 +    let flush_foreign_text = |pending: &mut Vec<String>, assistant: &mut AssistantItem| {
@@ -113,33 +552,22 @@ index 62d7807..4309dea 100644
 +        }
 +    };
 +
-     for (idx, item) in items.iter().enumerate() {
-         match item {
-             ConversationItem::Reasoning(r) => {
-                 let source = source_model_for_reasoning_at(items, idx);
--                if encrypted_reasoning_compatible(source, current_model)
--                    || r.encrypted_content.is_none()
--                {
-+                if reasoning_item_compatible(source, current_model) {
-                     out.push(item.clone());
-                     continue;
-                 }
--                // Foreign encrypted blob: strip it (like pi drops redacted
--                // thinking). Keep summary/content text when present so the
--                // destination still sees visible chain-of-thought; drop the
--                // item entirely when only the opaque blob remained.
--                let mut scrubbed = r.clone();
--                scrubbed.encrypted_content = None;
--                if reasoning_item_has_replayable_payload(&scrubbed) {
--                    out.push(ConversationItem::Reasoning(scrubbed));
++    for (idx, item) in items.iter().enumerate() {
++        match item {
++            ConversationItem::Reasoning(r) => {
++                let source = source_assistant_for_reasoning_at(items, idx)
++                    .and_then(|assistant| assistant.reasoning_origin.as_ref());
++                if reasoning_item_compatible(source, destination) {
++                    out.push(item.clone());
++                    continue;
++                }
 +                // Foreign: never emit typed reasoning. Keep visible CoT as
 +                // text to prepend onto the following assistant (pi-style).
 +                let text = reasoning_item_text(r);
 +                if !text.trim().is_empty() {
 +                    pending_foreign_text.push(text);
-                 }
-             }
--            other => out.push(other.clone()),
++                }
++            }
 +            ConversationItem::Assistant(a) => {
 +                let mut a = a.clone();
 +                flush_foreign_text(&mut pending_foreign_text, &mut a);
@@ -160,36 +588,324 @@ index 62d7807..4309dea 100644
 +                }
 +                out.push(other.clone());
 +            }
-         }
-     }
++        }
++    }
 +    if !pending_foreign_text.is_empty() {
 +        let text = pending_foreign_text.join("\n");
 +        out.push(ConversationItem::assistant(text));
 +    }
-     out
- }
++    out
++}
++
+ /// Walk a serialized Responses API request body and inject the
+ /// `type: "reasoning_text"` discriminator that the API requires on
+ /// `reasoning.content[*]` items.
+@@ -3136,6 +3283,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+         ToolResultContent,
+     };
  
-@@ -9551,9 +9583,9 @@ mod tests {
++    let sanitized_items = sanitize_reasoning_for_origin(&req.items, req.reasoning_origin.as_ref());
+     let mut system_blocks: Vec<TextBlock> = Vec::new();
+     let mut messages: Vec<Message> = Vec::new();
+     let mut pending_assistant: Vec<ContentBlock> = Vec::new();
+@@ -3227,8 +3375,10 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+         }
+     };
+ 
+-    // Process all conversation items
+-    for item in &req.items {
++    // Process the wire-time clone. Foreign/legacy reasoning has already been
++    // converted to ordinary assistant text or dropped; only exact-origin
++    // reasoning can reach the native Anthropic Thinking arm below.
++    for item in &sanitized_items {
+         match item {
+             ConversationItem::System(s) => {
+                 flush_assistant(&mut pending_assistant, &mut messages);
+@@ -3479,6 +3629,7 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
+         ConversationItem::Assistant(AssistantItem {
+             content: Arc::<str>::from(content),
+             tool_calls,
++            reasoning_origin: None,
+             model_id: Some(resp.model),
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -3613,6 +3764,34 @@ mod tests {
+     use super::*;
+     use assert_matches::assert_matches;
+ 
++    #[test]
++    fn assistant_reasoning_origin_serde_is_backward_compatible() {
++        let legacy = r#"{"type":"assistant","content":"hello"}"#;
++        let item: ConversationItem = serde_json::from_str(legacy).unwrap();
++        let ConversationItem::Assistant(assistant) = item else {
++            panic!("expected assistant");
++        };
++        assert!(assistant.reasoning_origin.is_none());
++
++        let mut current = ConversationItem::assistant_with_model("hello", "model-a");
++        if let ConversationItem::Assistant(assistant) = &mut current {
++            assistant.reasoning_origin = Some(crate::ReasoningOrigin {
++                route: "https://provider.example/v1".into(),
++                api_backend: crate::ApiBackend::Messages,
++                model: "model-a".into(),
++            });
++        }
++        let json = serde_json::to_string(&current).unwrap();
++        let round_trip: ConversationItem = serde_json::from_str(&json).unwrap();
++        let ConversationItem::Assistant(assistant) = round_trip else {
++            panic!("expected assistant");
++        };
++        assert_eq!(
++            assistant.reasoning_origin.unwrap().route,
++            "https://provider.example/v1"
++        );
++    }
++
+     #[test]
+     fn prior_turn_interrupt_serde_round_trip_and_unknown_fallback() {
+         for (variant, wire) in [
+@@ -4354,6 +4533,7 @@ mod tests {
+                 name: "read_file".to_string(),
+                 arguments: r#"{"path": "/test.txt"}"#.into(),
+             }],
++            reasoning_origin: None,
+             model_id: Some("grok-3".to_string()),
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -4809,6 +4989,7 @@ mod tests {
+         let assistant_item = ConversationItem::Assistant(AssistantItem {
+             content: "The answer is 42.".into(),
+             tool_calls: vec![],
++            reasoning_origin: None,
+             model_id: Some("grok-3".to_string()),
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -4841,6 +5022,7 @@ mod tests {
+             ConversationItem::Assistant(AssistantItem {
+                 content: "The answer is 4.".into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: Some("grok-3".to_string()),
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -4901,6 +5083,7 @@ mod tests {
+             ConversationItem::Assistant(AssistantItem {
+                 content: "Hi!".into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -5540,6 +5723,7 @@ mod tests {
+         let with_reasoning = ConversationItem::Assistant(AssistantItem {
+             content: "Here is the answer.".into(),
+             tool_calls: vec![],
++            reasoning_origin: None,
+             model_id: Some("messages-compatible-model".into()),
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -5736,6 +5920,7 @@ mod tests {
+             ConversationItem::Assistant(AssistantItem {
+                 content: "I'll look at the code.".into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: Some("messages-compatible-model".into()),
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -5748,6 +5933,7 @@ mod tests {
+                     name: "read_file".to_string(),
+                     arguments: r#"{"path":"src/main.rs"}"#.into(),
+                 }],
++                reasoning_origin: None,
+                 model_id: Some("messages-compatible-model".into()),
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -5756,6 +5942,7 @@ mod tests {
+             ConversationItem::Assistant(AssistantItem {
+                 content: "I see the issue.".into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: Some("messages-compatible-model".into()),
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -5768,6 +5955,7 @@ mod tests {
+                     name: "search_replace".to_string(),
+                     arguments: "{}".into(),
+                 }],
++                reasoning_origin: None,
+                 model_id: Some("messages-compatible-model".into()),
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -6503,6 +6691,7 @@ mod tests {
+                     ).into(),
+                 },
+             ],
++            reasoning_origin: None,
+             model_id: None,
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -6569,6 +6758,7 @@ mod tests {
+             ConversationItem::Assistant(AssistantItem {
+                 content: format!("I edited {worktree}/src/main.rs").into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: Some("grok-3".to_string()),
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -6626,6 +6816,7 @@ mod tests {
+                         r#"{{"file_path":"{worktree}/src/main.rs","old_string":"fn main() {{}}","new_string":"fn main() {{\n    println!(\"Hello\");\n}}"}}"#
+                     ).into(),
+                 }],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -6677,6 +6868,7 @@ mod tests {
+                     name: "read_file".to_string(),
+                     arguments: format!(r#"{{"target_file":"{root}/src/main.rs"}}"#).into(),
+                 }],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -6785,6 +6977,7 @@ mod tests {
+                 name: "run_terminal_cmd".to_string(),
+                 arguments: r#"{"command":"echo hello"}"#.into(),
+             }],
++            reasoning_origin: None,
+             model_id: None,
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -6900,6 +7093,7 @@ mod tests {
+             items: vec![ConversationItem::Assistant(AssistantItem {
+                 content: String::new().into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: Some("test-model".to_string()),
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -6921,6 +7115,7 @@ mod tests {
+             items: vec![ConversationItem::Assistant(AssistantItem {
+                 content: "Here is my answer.".into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -6946,6 +7141,7 @@ mod tests {
+                     name: "read_file".to_string(),
+                     arguments: "{}".into(),
+                 }],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -7143,6 +7339,7 @@ mod tests {
+         let item = AssistantItem {
+             content: "Hello".into(),
+             tool_calls: vec![],
++            reasoning_origin: None,
+             model_id: None,
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -7232,6 +7429,7 @@ mod tests {
+                     arguments: "{}".into(),
+                 })
+                 .collect(),
++            reasoning_origin: None,
+             model_id: None,
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -7934,6 +8132,7 @@ mod tests {
+                     name: "read_file".to_string(),
+                     arguments: "{}".into(),
+                 }],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -8444,6 +8643,7 @@ mod tests {
+                 ConversationItem::Assistant(AssistantItem {
+                     content: String::new().into(),
+                     tool_calls: Vec::new(),
++                    reasoning_origin: None,
+                     model_id: None,
+                     model_fingerprint: None,
+                     reasoning_effort: None,
+@@ -9277,6 +9477,42 @@ mod tests {
+         })
+     }
+ 
++    fn test_origin(
++        route: &str,
++        api_backend: crate::ApiBackend,
++        model: &str,
++    ) -> crate::ReasoningOrigin {
++        crate::ReasoningOrigin {
++            route: route.to_string(),
++            api_backend,
++            model: model.to_string(),
++        }
++    }
++
++    fn assistant_with_origin(
++        content: &str,
++        route: &str,
++        api_backend: crate::ApiBackend,
++        model: &str,
++    ) -> ConversationItem {
++        let mut item = ConversationItem::assistant_with_model(content, model);
++        if let ConversationItem::Assistant(assistant) = &mut item {
++            assistant.reasoning_origin = Some(test_origin(route, api_backend, model));
++        }
++        item
++    }
++
++    fn request_with_origin(
++        items: Vec<ConversationItem>,
++        route: &str,
++        api_backend: crate::ApiBackend,
++        model: &str,
++    ) -> ConversationRequest {
++        let mut request = ConversationRequest::from_items(items).with_model(model);
++        request.reasoning_origin = Some(test_origin(route, api_backend, model));
++        request
++    }
++
+     /// Helper: serialise the wire `input` array to a Vec of JSON values.
+     fn input_items_json(req: &ConversationRequest) -> Vec<serde_json::Value> {
+         let cr: rs::CreateResponse = req.into();
+@@ -9462,6 +9698,358 @@ mod tests {
          assert_eq!(enc_seen, vec!["enc1", "enc2", "enc3"]);
      }
  
--    /// Mid-session model switch (e.g. Grok → Codex): encrypted reasoning
--    /// from the prior model must not be replayed. Matches pi's
--    /// `transformMessages` same-model gate for redacted/signed thinking.
-+    /// Mid-session model switch (e.g. Grok → Codex): foreign reasoning must
-+    /// not appear as typed `reasoning` items (encrypted → 400; `rs_*` id
++    /// Mid-session route/model switch (e.g. Grok → Codex): foreign reasoning
++    /// must not appear as typed `reasoning` items (encrypted → 400; `rs_*` id
 +    /// with `store: false` → 404). Visible CoT folds into assistant text.
-     #[test]
-     fn build_responses_input_strips_foreign_encrypted_reasoning_on_model_switch() {
-         let items = vec![
-@@ -9565,24 +9597,65 @@ mod tests {
-         let req = ConversationRequest::from_items(items).with_model("gpt-5.6-sol");
-         let input = input_items_json(&req);
- 
--        let reasoning: Vec<&serde_json::Value> = input
++    #[test]
++    fn build_responses_input_strips_foreign_encrypted_reasoning_on_model_switch() {
++        let items = vec![
++            ConversationItem::user("hi"),
++            reasoning_sibling("rs_grok_1", "visible summary", Some("enc_from_grok")),
++            assistant_with_origin(
++                "answer",
++                "https://api.x.ai/v1",
++                crate::ApiBackend::Responses,
++                "grok-4.5",
++            ),
++            ConversationItem::user("switch models and continue"),
++        ];
++        let req = request_with_origin(
++            items,
++            "https://chatgpt.com/backend-api/codex",
++            crate::ApiBackend::Responses,
++            "gpt-5.6-sol",
++        );
++        let input = input_items_json(&req);
++
 +        let reasoning_count = input
-             .iter()
-             .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
++            .iter()
++            .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
 +            .count();
 +        assert_eq!(
 +            reasoning_count, 0,
@@ -205,29 +921,15 @@ index 62d7807..4309dea 100644
 +                    None
 +                }
 +            })
-             .collect();
--        assert_eq!(reasoning.len(), 1, "summary-bearing foreign reasoning kept");
-         assert!(
--            reasoning[0].get("encrypted_content").is_none()
--                || reasoning[0]
--                    .get("encrypted_content")
--                    .is_some_and(|v| v.is_null()),
--            "foreign encrypted_content must be stripped, got: {}",
--            reasoning[0]
++            .collect();
++        assert!(
 +            assistant_texts
 +                .iter()
 +                .any(|t| t.contains("visible summary") && t.contains("answer")),
 +            "foreign CoT text must fold into assistant content, got {assistant_texts:?}"
-         );
--        // Visible summary survives so the new model still sees CoT text.
--        let summary_text = reasoning[0]
--            .pointer("/summary/0/text")
--            .and_then(|v| v.as_str());
--        assert_eq!(summary_text, Some("visible summary"));
++        );
 +        assert!(
-+            !serde_json::to_string(&input)
-+                .unwrap()
-+                .contains("rs_grok_1"),
++            !serde_json::to_string(&input).unwrap().contains("rs_grok_1"),
 +            "foreign rs_* id must not appear on the wire"
 +        );
 +        assert!(
@@ -245,10 +947,20 @@ index 62d7807..4309dea 100644
 +        let items = vec![
 +            ConversationItem::user("hi"),
 +            reasoning_sibling("rs_foreign_summary_only", "just a summary", None),
-+            ConversationItem::assistant_with_model("answer", "grok-4.5"),
++            assistant_with_origin(
++                "answer",
++                "https://api.x.ai/v1",
++                crate::ApiBackend::Responses,
++                "grok-4.5",
++            ),
 +            ConversationItem::user("continue on gpt"),
 +        ];
-+        let req = ConversationRequest::from_items(items).with_model("gpt-5.6-sol");
++        let req = request_with_origin(
++            items,
++            "https://chatgpt.com/backend-api/codex",
++            crate::ApiBackend::Responses,
++            "gpt-5.6-sol",
++        );
 +        let input = input_items_json(&req);
 +        let reasoning_count = input
 +            .iter()
@@ -258,9 +970,540 @@ index 62d7807..4309dea 100644
 +        let body = serde_json::to_string(&input).unwrap();
 +        assert!(!body.contains("rs_foreign_summary_only"));
 +        assert!(body.contains("just a summary"));
++    }
++
++    /// Encrypted-only foreign reasoning (no user-visible summary) is dropped
++    /// entirely — replaying an empty shell with a foreign `rs_*` id is
++    /// useless and risks further pairing validation failures.
++    #[test]
++    fn build_responses_input_drops_encrypted_only_foreign_reasoning() {
++        let items = vec![
++            ConversationItem::user("hi"),
++            ConversationItem::Reasoning(rs::ReasoningItem {
++                id: "rs_foreign_enc_only".into(),
++                summary: vec![],
++                content: None,
++                encrypted_content: Some("enc_only_blob".into()),
++                status: None,
++            }),
++            assistant_with_origin(
++                "answer",
++                "https://api.x.ai/v1",
++                crate::ApiBackend::Responses,
++                "grok-4.5",
++            ),
++            ConversationItem::user("continue on gpt"),
++        ];
++        let req = request_with_origin(
++            items,
++            "https://chatgpt.com/backend-api/codex",
++            crate::ApiBackend::Responses,
++            "gpt-5.6-sol",
++        );
++        let input = input_items_json(&req);
++        let reasoning_count = input
++            .iter()
++            .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
++            .count();
++        assert_eq!(
++            reasoning_count, 0,
++            "encrypted-only foreign reasoning must be dropped"
++        );
++    }
++
++    /// Exact same route/API/model keeps encrypted_content byte-stable.
++    #[test]
++    fn build_responses_input_keeps_same_model_encrypted_reasoning() {
++        let route = "https://chatgpt.com/backend-api/codex";
++        let items = vec![
++            ConversationItem::user("hi"),
++            reasoning_sibling("rs_same", "think", Some("enc_keep")),
++            assistant_with_origin("answer", route, crate::ApiBackend::Responses, "gpt-5.6-sol"),
++            ConversationItem::user("again"),
++        ];
++        let req = request_with_origin(items, route, crate::ApiBackend::Responses, "gpt-5.6-sol");
++        let input = input_items_json(&req);
++        let enc = input
++            .iter()
++            .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
++            .and_then(|v| v.get("encrypted_content"))
++            .and_then(|v| v.as_str());
++        assert_eq!(enc, Some("enc_keep"));
++    }
++
++    #[test]
++    fn responses_same_model_different_route_strips_native_reasoning() {
++        let items = vec![
++            ConversationItem::user("hi"),
++            reasoning_sibling("rs_proxy_a", "portable plan", Some("proxy_a_secret")),
++            assistant_with_origin(
++                "answer",
++                "https://provider-a.example/v1",
++                crate::ApiBackend::Responses,
++                "shared-model",
++            ),
++            ConversationItem::user("continue"),
++        ];
++        let req = request_with_origin(
++            items,
++            "https://provider-b.example/v1",
++            crate::ApiBackend::Responses,
++            "shared-model",
++        );
++        let body = serde_json::to_string(&input_items_json(&req)).unwrap();
++        assert!(!body.contains("rs_proxy_a"));
++        assert!(!body.contains("proxy_a_secret"));
++        assert!(body.contains("portable plan"));
++    }
++
++    #[test]
++    fn responses_same_route_model_different_api_strips_native_reasoning() {
++        let route = "https://provider.example/v1";
++        let items = vec![
++            ConversationItem::user("hi"),
++            reasoning_sibling("rs_messages", "portable plan", Some("messages_secret")),
++            assistant_with_origin("answer", route, crate::ApiBackend::Messages, "shared-model"),
++            ConversationItem::user("continue"),
++        ];
++        let req = request_with_origin(items, route, crate::ApiBackend::Responses, "shared-model");
++        let body = serde_json::to_string(&input_items_json(&req)).unwrap();
++        assert!(!body.contains("rs_messages"));
++        assert!(!body.contains("messages_secret"));
++        assert!(body.contains("portable plan"));
++    }
++
++    #[test]
++    fn responses_legacy_unknown_origin_fails_closed_when_destination_is_known() {
++        let items = vec![
++            ConversationItem::user("hi"),
++            reasoning_sibling("rs_legacy", "legacy visible plan", Some("legacy_secret")),
++            ConversationItem::assistant_with_model("answer", "shared-model"),
++            ConversationItem::user("continue"),
++        ];
++        let req = request_with_origin(
++            items,
++            "https://provider.example/v1",
++            crate::ApiBackend::Responses,
++            "shared-model",
++        );
++        let body = serde_json::to_string(&input_items_json(&req)).unwrap();
++        assert!(!body.contains("rs_legacy"));
++        assert!(!body.contains("legacy_secret"));
++        assert!(body.contains("legacy visible plan"));
++    }
++
++    #[test]
++    fn chat_completions_strips_foreign_reasoning_content() {
++        let items = vec![
++            ConversationItem::user("hi"),
++            reasoning_sibling("rs_grok", "grok visible plan", Some("grok_secret")),
++            assistant_with_origin(
++                "answer",
++                "https://api.x.ai/v1",
++                crate::ApiBackend::Responses,
++                "grok-4.5",
++            ),
++            ConversationItem::user("continue"),
++        ];
++        let req = request_with_origin(
++            items,
++            "https://chat.example/v1",
++            crate::ApiBackend::ChatCompletions,
++            "chat-model",
++        );
++        let chat: ChatCompletionRequest = req.into();
++        let assistant = chat
++            .messages
++            .iter()
++            .find(|message| message.role == Role::Assistant && !message.text_content().is_empty())
++            .expect("assistant message");
++        assert!(assistant.reasoning_content.is_none());
++        assert!(assistant.text_content().contains("grok visible plan"));
++        assert!(assistant.text_content().contains("answer"));
++    }
++
++    #[test]
++    fn messages_preserve_same_origin_thinking_signature() {
++        let route = "https://api.anthropic.com/v1";
++        let items = vec![
++            ConversationItem::user("hi"),
++            reasoning_sibling("", "claude plan", Some("claude_signature")),
++            assistant_with_origin(
++                "answer",
++                route,
++                crate::ApiBackend::Messages,
++                "claude-opus-4-8",
++            ),
++            ConversationItem::user("again"),
++        ];
++        let req = request_with_origin(items, route, crate::ApiBackend::Messages, "claude-opus-4-8");
++        let body = serde_json::to_value(build_messages_request(&req)).unwrap();
++        let wire = serde_json::to_string(&body).unwrap();
++        assert!(wire.contains("claude_signature"));
++        assert!(wire.contains("\"type\":\"thinking\""));
++    }
++
++    #[test]
++    fn messages_strip_foreign_responses_reasoning_and_keep_visible_text() {
++        let items = vec![
++            ConversationItem::user("hi"),
++            reasoning_sibling("rs_grok", "grok visible plan", Some("grok_secret")),
++            assistant_with_origin(
++                "answer",
++                "https://api.x.ai/v1",
++                crate::ApiBackend::Responses,
++                "grok-4.5",
++            ),
++            ConversationItem::user("continue on claude"),
++        ];
++        let req = request_with_origin(
++            items,
++            "https://api.anthropic.com/v1",
++            crate::ApiBackend::Messages,
++            "claude-opus-4-8",
++        );
++        let wire = serde_json::to_string(&build_messages_request(&req)).unwrap();
++        assert!(!wire.contains("rs_grok"));
++        assert!(!wire.contains("grok_secret"));
++        assert!(!wire.contains("\"type\":\"thinking\""));
++        assert!(wire.contains("grok visible plan"));
++        assert!(wire.contains("answer"));
++    }
++
++    #[test]
++    fn messages_same_model_different_route_strips_signature() {
++        let items = vec![
++            ConversationItem::user("hi"),
++            reasoning_sibling("", "portable claude plan", Some("route_a_signature")),
++            assistant_with_origin(
++                "answer",
++                "https://route-a.example/v1",
++                crate::ApiBackend::Messages,
++                "claude-opus-4-8",
++            ),
++            ConversationItem::user("continue"),
++        ];
++        let req = request_with_origin(
++            items,
++            "https://route-b.example/v1",
++            crate::ApiBackend::Messages,
++            "claude-opus-4-8",
++        );
++        let wire = serde_json::to_string(&build_messages_request(&req)).unwrap();
++        assert!(!wire.contains("route_a_signature"));
++        assert!(!wire.contains("\"type\":\"thinking\""));
++        assert!(wire.contains("portable claude plan"));
++    }
++
++    #[test]
++    fn wire_transform_does_not_mutate_history_and_switch_back_restores_signature() {
++        let route = "https://api.anthropic.com/v1";
++        let items = vec![
++            ConversationItem::user("hi"),
++            reasoning_sibling("", "claude plan", Some("restore_me")),
++            assistant_with_origin(
++                "answer",
++                route,
++                crate::ApiBackend::Messages,
++                "claude-opus-4-8",
++            ),
++            ConversationItem::user("continue"),
++        ];
++        let original = serde_json::to_string(&items).unwrap();
++        let foreign = request_with_origin(
++            items.clone(),
++            "https://api.x.ai/v1",
++            crate::ApiBackend::Responses,
++            "grok-4.5",
++        );
++        let foreign_wire = serde_json::to_string(&input_items_json(&foreign)).unwrap();
++        assert!(!foreign_wire.contains("restore_me"));
++        assert_eq!(serde_json::to_string(&items).unwrap(), original);
++
++        let back = request_with_origin(
++            items.clone(),
++            route,
++            crate::ApiBackend::Messages,
++            "claude-opus-4-8",
++        );
++        let back_wire = serde_json::to_string(&build_messages_request(&back)).unwrap();
++        assert!(back_wire.contains("restore_me"));
++        assert_eq!(serde_json::to_string(&items).unwrap(), original);
++    }
++
+     /// INVARIANT: prefix stability across turns without reasoning.
+     /// Context and instructions must be prefixed once and consistently
+     /// across requests.
+@@ -9677,6 +10265,7 @@ mod tests {
+                     name: "read_file".to_string(),
+                     arguments: Arc::<str>::from("{}"),
+                 }],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+diff --git a/crates/codegen/xai-grok-sampling-types/src/types.rs b/crates/codegen/xai-grok-sampling-types/src/types.rs
+index 94725f6..c6d8cb4 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/types.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/types.rs
+@@ -1054,6 +1054,19 @@ impl ApiBackend {
      }
+ }
  
-     /// Encrypted-only foreign reasoning (no user-visible summary) is dropped
++/// Non-secret identity of the inference route that produced (or will consume)
++/// native reasoning state. Opaque reasoning is replayable only when every
++/// field matches; model names alone are not unique across providers and APIs.
++#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++pub struct ReasoningOrigin {
++    /// Normalized inference base URL. Credentials and query strings must never
++    /// be included; sampler routes store only their configured endpoint.
++    pub route: String,
++    pub api_backend: ApiBackend,
++    /// Wire model slug sent to the provider.
++    pub model: String,
++}
++
+ /// Sampling client configuration (API key excluded — that stays in the client).
+ #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct SamplingConfig {
+diff --git a/crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs b/crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs
+index f21c5a3..a4152ce 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs
+@@ -1942,7 +1942,7 @@ fn verbatim_fork_falls_back_to_summary_on_incomplete_tail() {
+         ConversationItem::assistant("a1"), ConversationItem::user("q2"),
+         ConversationItem::Assistant(AssistantItem { content : String::new().into(),
+         tool_calls : vec![ToolCall { id : "tc1".into(), name : "bash".into(), arguments :
+-        "{}".into(), }], model_id : None, model_fingerprint : None, reasoning_effort :
++        "{}".into(), }], reasoning_origin : None, model_id : None, model_fingerprint : None, reasoning_effort :
+         None, }),
+     ];
+     let ctx = verbatim_or_normalize_fork(items, 256_000);
+diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/laziness.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/laziness.rs
+index 42e60e1..8cfef2b 100644
+--- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/laziness.rs
++++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/laziness.rs
+@@ -547,6 +547,7 @@ impl SessionActor {
+             hosted_tools: vec![],
+             tool_choice: None,
+             model: Some(model_id.clone()),
++            reasoning_origin: None,
+             temperature: Some(0.0),
+             max_output_tokens: Some(LAZINESS_MAX_OUTPUT_TOKENS),
+             // Don't pass `reasoning_effort` — `grok-4.5` (and
+diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
+index 27c6fda..6e1242f 100644
+--- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
++++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
+@@ -443,6 +443,7 @@ impl SessionActor {
+                         hosted_tools: vec![],
+                         tool_choice: None,
+                         model: Some(model),
++                        reasoning_origin: None,
+                         temperature: None,
+                         max_output_tokens: None,
+                         json_schema: Some(
+diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_tests/laziness/laziness_debug_tests.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_tests/laziness/laziness_debug_tests.rs
+index be4e3e7..d953cbd 100644
+--- a/crates/codegen/xai-grok-shell/src/session/acp_session_tests/laziness/laziness_debug_tests.rs
++++ b/crates/codegen/xai-grok-shell/src/session/acp_session_tests/laziness/laziness_debug_tests.rs
+@@ -28,6 +28,7 @@ fn assistant_text(text: &str) -> ConversationItem {
+     ConversationItem::Assistant(AssistantItem {
+         content: text.into(),
+         tool_calls: vec![],
++        reasoning_origin: None,
+         model_id: None,
+         model_fingerprint: None,
+         reasoning_effort: None,
+@@ -42,6 +43,7 @@ fn assistant_with_tool_call(text: &str, name: &str, args: &str) -> ConversationI
+             name: name.to_string(),
+             arguments: args.into(),
+         }],
++        reasoning_origin: None,
+         model_id: None,
+         model_fingerprint: None,
+         reasoning_effort: None,
+@@ -83,6 +85,7 @@ fn assistant_with_reasoning_items(
+     out.push(ConversationItem::Assistant(AssistantItem {
+         content: content.into(),
+         tool_calls,
++        reasoning_origin: None,
+         model_id: None,
+         model_fingerprint: None,
+         reasoning_effort: None,
+@@ -202,6 +205,7 @@ fn flatten_skips_reasoning_when_encrypted_only() {
+         ConversationItem::Assistant(AssistantItem {
+             content: "ok".into(),
+             tool_calls: vec![],
++            reasoning_origin: None,
+             model_id: None,
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -234,6 +238,7 @@ fn flatten_skips_reasoning_when_text_is_empty() {
+         ConversationItem::Assistant(AssistantItem {
+             content: "ok".into(),
+             tool_calls: vec![],
++            reasoning_origin: None,
+             model_id: None,
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -539,6 +544,7 @@ fn window_assistant_text_pin_skips_empty_assistant_turns() {
+             name: "read_file".into(),
+             arguments: "{}".into(),
+         }],
++        reasoning_origin: None,
+         model_id: None,
+         model_fingerprint: None,
+         reasoning_effort: None,
+diff --git a/crates/codegen/xai-grok-shell/src/session/goal_classifier/evidence.rs b/crates/codegen/xai-grok-shell/src/session/goal_classifier/evidence.rs
+index 272d5f6..9cac58d 100644
+--- a/crates/codegen/xai-grok-shell/src/session/goal_classifier/evidence.rs
++++ b/crates/codegen/xai-grok-shell/src/session/goal_classifier/evidence.rs
+@@ -1151,6 +1151,7 @@ mod tests {
+         ConversationItem::Assistant(AssistantItem {
+             content: text.into(),
+             tool_calls: Vec::new(),
++            reasoning_origin: None,
+             model_id: None,
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -1168,6 +1169,7 @@ mod tests {
+                 name: "update_goal".to_string(),
+                 arguments: "{\"completed\":true}".into(),
+             }],
++            reasoning_origin: None,
+             model_id: None,
+             model_fingerprint: None,
+             reasoning_effort: None,
+diff --git a/crates/codegen/xai-grok-shell/src/session/helpers/session_compact.rs b/crates/codegen/xai-grok-shell/src/session/helpers/session_compact.rs
+index cd21d8b..2622fa0 100644
+--- a/crates/codegen/xai-grok-shell/src/session/helpers/session_compact.rs
++++ b/crates/codegen/xai-grok-shell/src/session/helpers/session_compact.rs
+@@ -982,6 +982,7 @@ mod compacted_history_shape_tests {
+                     name: "read_file".into(),
+                     arguments: r#"{"target_file": "src/auth.rs"}"#.into(),
+                 }],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -993,6 +994,7 @@ mod compacted_history_shape_tests {
+             "tc2".into(), name : "search_replace".into(), arguments :
+             r#"{"file_path": "src/auth.rs", "old_string": "buggy", "new_string": "fixed"}"#
+             .into(), }],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -1158,6 +1160,7 @@ mod compacted_history_shape_tests {
+                     name: "read_file".into(),
+                     arguments: r#"{"target_file": "src/auth.rs"}"#.into(),
+                 }],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+diff --git a/crates/codegen/xai-grok-shell/src/session/memory/hooks.rs b/crates/codegen/xai-grok-shell/src/session/memory/hooks.rs
+index 4649b9c..3dd9a14 100644
+--- a/crates/codegen/xai-grok-shell/src/session/memory/hooks.rs
++++ b/crates/codegen/xai-grok-shell/src/session/memory/hooks.rs
+@@ -226,6 +226,7 @@ mod tests {
+         ConversationItem::Assistant(AssistantItem {
+             content: text.into(),
+             tool_calls: vec![],
++            reasoning_origin: None,
+             model_id: None,
+             model_fingerprint: None,
+             reasoning_effort: None,
+diff --git a/crates/codegen/xai-grok-shell/src/session/storage/jsonl/tests.rs b/crates/codegen/xai-grok-shell/src/session/storage/jsonl/tests.rs
+index 2e33ee2..a15f5b5 100644
+--- a/crates/codegen/xai-grok-shell/src/session/storage/jsonl/tests.rs
++++ b/crates/codegen/xai-grok-shell/src/session/storage/jsonl/tests.rs
+@@ -1582,7 +1582,7 @@ fn fork_filter_consecutive_users_with_tool_calls() {
+         ConversationItem::system("sys"), ConversationItem::user("prefix"),
+         ConversationItem::user("query"), ConversationItem::Assistant(AssistantItem {
+         content : String::new().into(), tool_calls : vec![ToolCall { id : "tc1".into(),
+-        name : "bash".into(), arguments : "{}".into(), }], model_id : None,
++        name : "bash".into(), arguments : "{}".into(), }], reasoning_origin : None, model_id : None,
+         model_fingerprint : None, reasoning_effort : None, }),
+         ConversationItem::tool_result("tc1", "output"),
+         ConversationItem::user("follow-up"),
+@@ -1599,7 +1599,7 @@ fn fork_filter_preserves_complete_tool_turn() {
+     let mut items = vec![
+         ConversationItem::user("q"), ConversationItem::Assistant(AssistantItem { content
+         : String::new().into(), tool_calls : vec![ToolCall { id : "tc1".into(), name :
+-        "bash".into(), arguments : "{}".into(), }], model_id : None, model_fingerprint :
++        "bash".into(), arguments : "{}".into(), }], reasoning_origin : None, model_id : None, model_fingerprint :
+         None, reasoning_effort : None, }), ConversationItem::tool_result("tc1",
+         "output"),
+     ];
+@@ -1613,7 +1613,7 @@ fn fork_filter_strips_incomplete_tool_turn() {
+         ConversationItem::user("q1"), ConversationItem::assistant("a1"),
+         ConversationItem::user("q2"), ConversationItem::Assistant(AssistantItem { content
+         : String::new().into(), tool_calls : vec![ToolCall { id : "tc1".into(), name :
+-        "bash".into(), arguments : "{}".into(), }], model_id : None, model_fingerprint :
++        "bash".into(), arguments : "{}".into(), }], reasoning_origin : None, model_id : None, model_fingerprint :
+         None, reasoning_effort : None, }),
+     ];
+     super::fork_filter_chat(&mut items);
+@@ -1722,7 +1722,7 @@ fn fork_filter_keeps_multi_tool_cycle_turn_with_reasoning() {
+         ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item("plan",)),
+         ConversationItem::Assistant(AssistantItem { content : String::new().into(),
+         tool_calls : vec![ToolCall { id : "tc1".into(), name : "bash".into(), arguments :
+-        "{}".into(), }], model_id : None, model_fingerprint : None, reasoning_effort :
++        "{}".into(), }], reasoning_origin : None, model_id : None, model_fingerprint : None, reasoning_effort :
+         None, }), ConversationItem::tool_result("tc1", "output"),
+         ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item("reflect",)),
+         ConversationItem::assistant("final text"),
+@@ -1748,7 +1748,7 @@ fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
+         ConversationItem::Assistant(AssistantItem { content : String::new().into(),
+         tool_calls : vec![ToolCall { id : "tc1".into(), name : "bash".into(), arguments :
+         "{}".into(), }, ToolCall { id : "tc2".into(), name : "grep".into(), arguments :
+-        "{}".into(), },], model_id : None, model_fingerprint : None, reasoning_effort :
++        "{}".into(), },], reasoning_origin : None, model_id : None, model_fingerprint : None, reasoning_effort :
+         None, }), ConversationItem::tool_result("tc1", "out1"),
+         ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item("mid")),
+         ConversationItem::tool_result("tc2", "out2"),
+diff --git a/crates/codegen/xai-grok-shell/src/session/storage/mod.rs b/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
+index 05ed6ae..be4598b 100644
+--- a/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
++++ b/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
+@@ -355,6 +355,7 @@ pub(crate) mod chat_rebuild {
+             let item = ConversationItem::Assistant(AssistantItem {
+                 content: std::sync::Arc::<str>::from(std::mem::take(&mut self.agent_text)),
+                 tool_calls: std::mem::take(&mut self.agent_tool_calls),
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+diff --git a/crates/codegen/xai-grok-shell/src/trace_classifier/mod.rs b/crates/codegen/xai-grok-shell/src/trace_classifier/mod.rs
+index 3e4d9ba..ac20302 100644
+--- a/crates/codegen/xai-grok-shell/src/trace_classifier/mod.rs
++++ b/crates/codegen/xai-grok-shell/src/trace_classifier/mod.rs
+@@ -1368,6 +1368,7 @@ mod tests {
+         ConversationItem::Assistant(AssistantItem {
+             content: String::new().into(),
+             tool_calls,
++            reasoning_origin: None,
+             model_id: None,
+             model_fingerprint: None,
+             reasoning_effort: None,
+@@ -1923,6 +1924,7 @@ mod tests {
+             hist.push(ConversationItem::Assistant(AssistantItem {
+                 content: format!("a{i}").into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
+@@ -2520,6 +2522,7 @@ mod tests {
+             hist.push(ConversationItem::Assistant(AssistantItem {
+                 content: format!("a{i}").into(),
+                 tool_calls: vec![],
++                reasoning_origin: None,
+                 model_id: None,
+                 model_fingerprint: None,
+                 reasoning_effort: None,
 -- 
 2.50.1 (Apple Git-155)
 
