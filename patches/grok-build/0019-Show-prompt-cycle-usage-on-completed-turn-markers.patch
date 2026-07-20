@@ -1,0 +1,1144 @@
+From 01ad5eddab2eb54142abdc0e05168cafb198e293 Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 14:38:09 +0800
+Subject: [PATCH] Show prompt-cycle usage on completed-turn markers
+
+Carry aggregate PromptUsage on both durable and legacy terminal rails, consume
+it on driver, viewer, and lost-RPC reconciliation paths, and enrich the
+existing display-only 'Worked for ...' scrollback marker with compact prompt
+cycle metrics: uncached input/output, TPS, cache read/write, cache hit ratio,
+context start:end, and trusted complete cost.
+
+Capture context at each local/viewer turn boundary and pair it with the final
+streamed context value. Costs fail closed when usage is partial or incomplete;
+old shells and marker types retain the original text via optional stats.
+Parked, bash, subagent, cancelled, and failed markers remain unchanged.
+---
+ .../xai-grok-pager/src/app/acp_handler/mod.rs |   2 +
+ .../src/app/acp_handler/queue.rs              |   5 +
+ .../app/acp_handler/session_notification.rs   |   3 +-
+ .../src/app/acp_handler/tests/mod.rs          |   1 +
+ .../acp_handler/tests/queue_and_adoption.rs   |   1 +
+ .../xai-grok-pager/src/app/agent_view/mod.rs  |   6 +
+ .../src/app/agent_view/queue.rs               |   1 +
+ .../src/app/agent_view/session.rs             |   3 +
+ .../xai-grok-pager/src/app/app_view.rs        |   1 +
+ .../xai-grok-pager/src/app/dispatch/prompt.rs |  14 ++
+ .../xai-grok-pager/src/app/dispatch/queue.rs  |   1 +
+ .../src/app/dispatch/tests/mod.rs             |   1 +
+ .../xai-grok-pager/src/app/dispatch/turn.rs   |   7 +
+ .../xai-grok-pager/src/app/subagent.rs        |   1 +
+ .../xai-grok-pager/src/app/turn_completion.rs |  56 ++++-
+ .../src/app/turn_completion/tests.rs          | 209 +++++++++++++++---
+ .../src/scrollback/blocks/mod.rs              |   2 +-
+ .../src/scrollback/blocks/session_event.rs    | 157 ++++++++++++-
+ .../src/scrollback/state/mod.rs               |   7 +
+ .../src/agent/mvp_agent/acp_agent.rs          |  11 +
+ 20 files changed, 455 insertions(+), 34 deletions(-)
+
+diff --git a/crates/codegen/xai-grok-pager/src/app/acp_handler/mod.rs b/crates/codegen/xai-grok-pager/src/app/acp_handler/mod.rs
+index 74e8ab0..47ae9ac 100644
+--- a/crates/codegen/xai-grok-pager/src/app/acp_handler/mod.rs
++++ b/crates/codegen/xai-grok-pager/src/app/acp_handler/mod.rs
+@@ -487,6 +487,8 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
+                                 .is_some_and(should_adopt_running_prompt)
+                             && !matches!(agent.session.state, AgentState::TurnRunning)
+                         {
++                            agent.turn_context_start_tokens =
++                                agent.context_state.as_ref().map(|context| context.used);
+                             agent.session.state = AgentState::TurnRunning;
+                             // Back-date from the authoritative `turnStartMs` so a
+                             // viewer's elapsed matches the driver's instead of
+diff --git a/crates/codegen/xai-grok-pager/src/app/acp_handler/queue.rs b/crates/codegen/xai-grok-pager/src/app/acp_handler/queue.rs
+index f2f4649..8d6cd8b 100644
+--- a/crates/codegen/xai-grok-pager/src/app/acp_handler/queue.rs
++++ b/crates/codegen/xai-grok-pager/src/app/acp_handler/queue.rs
+@@ -37,6 +37,9 @@ pub(super) struct PromptCompletePayload {
+     pub(super) prompt_id: Option<String>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub(super) agent_result: Option<String>,
++    /// Aggregate prompt-cycle usage. Optional for old shells.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub(super) usage: Option<xai_grok_shell::extensions::notification::PromptUsage>,
+     /// What triggered a cancelled turn's cancel (`"send_now"` suppresses the
+     /// "Turn cancelled" marker); stamped top-level, absent on older shells.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -402,6 +405,7 @@ pub(super) fn handle_prompt_complete(notif: &acp::ExtNotification, app: &mut App
+     // Finalize on the agent, then map the outcome to the return bool in the one
+     // shared place both terminal rails use (returns it directly — arming reports
+     // a change unconditionally so a background tab still wakes the reconcile tick).
++    let usage = payload.usage.clone();
+     let outcome = super::super::turn_completion::finalize_turn_from_terminal(
+         agent,
+         session_id,
+@@ -409,6 +413,7 @@ pub(super) fn handle_prompt_complete(notif: &acp::ExtNotification, app: &mut App
+         payload.stop_reason.as_deref(),
+         payload.agent_result.as_deref(),
+         payload.cancel_trigger(),
++        usage,
+     );
+     super::super::turn_completion::apply_terminal_outcome(outcome, app, id, is_active)
+ }
+diff --git a/crates/codegen/xai-grok-pager/src/app/acp_handler/session_notification.rs b/crates/codegen/xai-grok-pager/src/app/acp_handler/session_notification.rs
+index 49cb7ed..1629e10 100644
+--- a/crates/codegen/xai-grok-pager/src/app/acp_handler/session_notification.rs
++++ b/crates/codegen/xai-grok-pager/src/app/acp_handler/session_notification.rs
+@@ -211,7 +211,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
+             prompt_id,
+             stop_reason,
+             agent_result,
+-            ..
++            usage,
+         } => {
+             if agent.session.loading_replay {
+                 agent.replayed_terminal_prompts.insert(prompt_id);
+@@ -237,6 +237,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
+                         Some(&stop_reason),
+                         agent_result.as_deref(),
+                         cancel_trigger,
++                        usage,
+                     ));
+                 false
+             }
+diff --git a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/mod.rs b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/mod.rs
+index f271ec2..417d538 100644
+--- a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/mod.rs
++++ b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/mod.rs
+@@ -863,6 +863,7 @@ pub(super) fn prompt_complete_ext_with_prompt_id(
+                 stop_reason: Some(stop_reason.to_string()),
+                 prompt_id: Some(prompt_id.to_string()),
+                 agent_result: None,
++                usage: None,
+                 cancel_trigger: None,
+                 meta: None,
+             },
+diff --git a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/queue_and_adoption.rs b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/queue_and_adoption.rs
+index 4b4ef31..693ad67 100644
+--- a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/queue_and_adoption.rs
++++ b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/queue_and_adoption.rs
+@@ -2279,6 +2279,7 @@
+         match last_session_event(&agent.scrollback) {
+             Some(SessionEvent::TurnCompleted {
+                 elapsed: Some(elapsed),
++                stats: None,
+             }) => assert!(
+                 elapsed.as_secs() >= 4,
+                 "completion marker must reflect the back-dated start, got {elapsed:?}"
+diff --git a/crates/codegen/xai-grok-pager/src/app/agent_view/mod.rs b/crates/codegen/xai-grok-pager/src/app/agent_view/mod.rs
+index 54c92c4..f4151a1 100644
+--- a/crates/codegen/xai-grok-pager/src/app/agent_view/mod.rs
++++ b/crates/codegen/xai-grok-pager/src/app/agent_view/mod.rs
+@@ -512,6 +512,9 @@ pub(crate) struct PendingTurnEnd {
+     /// cancel-and-send whose "Turn cancelled" marker is suppressed). `None`
+     /// on older shells / non-cancel ends.
+     pub cancel_trigger: Option<String>,
++    /// Aggregate prompt-cycle usage from the durable terminal rail. Legacy
++    /// `prompt_complete` broadcasts and old shells leave this `None`.
++    pub usage: Option<xai_grok_shell::extensions::notification::PromptUsage>,
+     /// When the broadcast arrived; the reconcile fires after
+     /// [`super::dispatch::TURN_END_RECONCILE_GRACE`].
+     pub received_at: std::time::Instant,
+@@ -869,6 +872,9 @@ pub struct AgentView {
+     /// Set by `maybe_drain_queue` when a prompt is sent. Used to compute
+     /// elapsed time for "Worked for Xm Ys" system messages.
+     pub turn_started_at: Option<Instant>,
++    /// Context tokens in effect immediately before the current prompt cycle.
++    /// Captured at the turn boundary for the completed-turn CTX start:end stat.
++    pub turn_context_start_tokens: Option<u64>,
+     /// Turn-start anchor a `turn.first_activity` log was already emitted for (fire-once-per-turn guard).
+     pub first_activity_logged_for: Option<Instant>,
+     /// Accumulated duration the turn timer was paused (while the user was
+diff --git a/crates/codegen/xai-grok-pager/src/app/agent_view/queue.rs b/crates/codegen/xai-grok-pager/src/app/agent_view/queue.rs
+index a8cdafd..217fff0 100644
+--- a/crates/codegen/xai-grok-pager/src/app/agent_view/queue.rs
++++ b/crates/codegen/xai-grok-pager/src/app/agent_view/queue.rs
+@@ -238,6 +238,7 @@ impl AgentView {
+                 // falling back to `None`'s bare "Turn completed." — the park
+                 // boundary should read like every other turn marker.
+                 elapsed: Some(self.turn_elapsed().unwrap_or_default()),
++                stats: None,
+             },
+         );
+         block.parked = true;
+diff --git a/crates/codegen/xai-grok-pager/src/app/agent_view/session.rs b/crates/codegen/xai-grok-pager/src/app/agent_view/session.rs
+index 85da3e1..0ffbc5d 100644
+--- a/crates/codegen/xai-grok-pager/src/app/agent_view/session.rs
++++ b/crates/codegen/xai-grok-pager/src/app/agent_view/session.rs
+@@ -109,6 +109,7 @@ impl AgentView {
+             show_goal_detail: false,
+             turn_start_ms: None,
+             turn_started_at: None,
++            turn_context_start_tokens: None,
+             first_activity_logged_for: None,
+             turn_paused_duration: std::time::Duration::ZERO,
+             self_interjection_ids: std::collections::HashSet::new(),
+@@ -314,6 +315,7 @@ impl AgentView {
+     /// across `dispatch.rs` and `event_loop.rs`.
+     pub fn mark_turn_finished(&mut self) {
+         self.turn_started_at = None;
++        self.turn_context_start_tokens = None;
+         self.turn_paused_duration = std::time::Duration::ZERO;
+         self.last_active_at = Some(Instant::now());
+     }
+@@ -412,6 +414,7 @@ impl AgentView {
+         {
+             self.expect_send_now_cancel = None;
+         }
++        self.turn_context_start_tokens = self.context_state.as_ref().map(|context| context.used);
+         self.session.start_turn(&mut self.scrollback);
+     }
+     /// Adopt the in-flight turn another client is driving, conveyed by the
+diff --git a/crates/codegen/xai-grok-pager/src/app/app_view.rs b/crates/codegen/xai-grok-pager/src/app/app_view.rs
+index 8d29c5f..baa2be1 100644
+--- a/crates/codegen/xai-grok-pager/src/app/app_view.rs
++++ b/crates/codegen/xai-grok-pager/src/app/app_view.rs
+@@ -6347,6 +6347,7 @@ pub(crate) mod tests {
+                 stop_reason: Some("end_turn".into()),
+                 agent_result: None,
+                 cancel_trigger: None,
++                usage: None,
+                 received_at: std::time::Instant::now()
+                     - (TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1)),
+             });
+diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs
+index 85308ee..4c045c7 100644
+--- a/crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs
++++ b/crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs
+@@ -1123,6 +1123,19 @@ pub(super) fn handle_prompt_response(
+                     .err()
+                     .is_some_and(|e| e.contains("Unauthorized (401)")));
+         let elapsed = agent.turn_elapsed();
++        let prompt_usage = result.as_ref().ok().and_then(|response| {
++            response
++                .meta
++                .as_ref()
++                .and_then(|meta| meta.get("usage"))
++                .and_then(|value| serde_json::from_value(value.clone()).ok())
++        });
++        let turn_stats = crate::app::turn_completion::turn_usage_stats(
++            prompt_usage.as_ref(),
++            agent.turn_context_start_tokens,
++            agent.context_state.as_ref().map(|context| context.used),
++            agent.session.models.get_context_window(),
++        );
+ 
+         {
+             let sid = agent.session.session_id.as_ref().map(|s| s.0.as_ref());
+@@ -1193,6 +1206,7 @@ pub(super) fn handle_prompt_response(
+                 // Legacy copy on purpose: unknown elapsed keeps the "in 0.0s"
+                 // form here — only wake markers use the honest `None` form.
+                 elapsed: Some(elapsed.unwrap_or_default()),
++                stats: turn_stats,
+             }),
+             (Err(_), _)
+                 if rate_limited
+diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/queue.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/queue.rs
+index 8b37cbe..c159b99 100644
+--- a/crates/codegen/xai-grok-pager/src/app/dispatch/queue.rs
++++ b/crates/codegen/xai-grok-pager/src/app/dispatch/queue.rs
+@@ -1590,6 +1590,7 @@ mod tests {
+         agent.scrollback.push_block(RenderBlock::session_event(
+             crate::scrollback::blocks::SessionEvent::TurnCompleted {
+                 elapsed: Some(std::time::Duration::from_secs(2)),
++                stats: None,
+             },
+         ));
+         agent
+diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/tests/mod.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/tests/mod.rs
+index ff2a066..4178563 100644
+--- a/crates/codegen/xai-grok-pager/src/app/dispatch/tests/mod.rs
++++ b/crates/codegen/xai-grok-pager/src/app/dispatch/tests/mod.rs
+@@ -464,6 +464,7 @@ fn arm_reconcile_with_trigger(
+             stop_reason: Some(stop_reason.into()),
+             agent_result: None,
+             cancel_trigger: cancel_trigger.map(str::to_string),
++            usage: None,
+             received_at: std::time::Instant::now() - age,
+         });
+ }
+diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/turn.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/turn.rs
+index 4552acc..fe76c24 100644
+--- a/crates/codegen/xai-grok-pager/src/app/dispatch/turn.rs
++++ b/crates/codegen/xai-grok-pager/src/app/dispatch/turn.rs
+@@ -354,6 +354,12 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
+                 None => expected_send_now.is_some(),
+             };
+         let elapsed = agent.turn_elapsed().unwrap_or_default();
++        let turn_stats = crate::app::turn_completion::turn_usage_stats(
++            pending.usage.as_ref(),
++            agent.turn_context_start_tokens,
++            agent.context_state.as_ref().map(|context| context.used),
++            agent.session.models.get_context_window(),
++        );
+         crate::unified_log::warn(
+             "turn.end_reconciled_from_broadcast",
+             agent.session.session_id.as_ref().map(|s| s.0.as_ref()),
+@@ -384,6 +390,7 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
+                 }),
+                 _ => Some(SessionEvent::TurnCompleted {
+                     elapsed: Some(elapsed),
++                    stats: turn_stats,
+                 }),
+             }
+         };
+diff --git a/crates/codegen/xai-grok-pager/src/app/subagent.rs b/crates/codegen/xai-grok-pager/src/app/subagent.rs
+index cac6022..7108295 100644
+--- a/crates/codegen/xai-grok-pager/src/app/subagent.rs
++++ b/crates/codegen/xai-grok-pager/src/app/subagent.rs
+@@ -304,6 +304,7 @@ pub(crate) fn finalize_finished_child_view(
+         .push_block(crate::scrollback::block::RenderBlock::session_event(
+             crate::scrollback::blocks::SessionEvent::TurnCompleted {
+                 elapsed: Some(elapsed),
++                stats: None,
+             },
+         ));
+ }
+diff --git a/crates/codegen/xai-grok-pager/src/app/turn_completion.rs b/crates/codegen/xai-grok-pager/src/app/turn_completion.rs
+index ae4085f..d635e5b 100644
+--- a/crates/codegen/xai-grok-pager/src/app/turn_completion.rs
++++ b/crates/codegen/xai-grok-pager/src/app/turn_completion.rs
+@@ -8,7 +8,45 @@
+ //! place — and so a viewer that re-attaches mid-turn can finalize the turn from
+ //! replay instead of staying stuck on "Waiting…".
+ 
+-use crate::scrollback::blocks::SessionEvent;
++use crate::scrollback::blocks::{SessionEvent, TurnUsageStats};
++
++/// Convert the shell's aggregate prompt usage into the compact TUI stats
++/// payload. The shell keeps full prompt input (uncached + read + write); the
++/// display's ↑ value is the uncached remainder so R/W are not double-counted.
++pub(super) fn turn_usage_stats(
++    usage: Option<&xai_grok_shell::extensions::notification::PromptUsage>,
++    context_start_tokens: Option<u64>,
++    context_end_tokens: Option<u64>,
++    context_window_tokens: Option<u64>,
++) -> Option<TurnUsageStats> {
++    let usage = usage?;
++    let totals = &usage.totals;
++    if totals.model_calls == 0
++        && totals.input_tokens == 0
++        && totals.output_tokens == 0
++        && totals.cached_read_tokens == 0
++        && totals.cached_write_tokens == 0
++    {
++        return None;
++    }
++    let cost_usd_ticks = (!usage.usage_is_incomplete && !totals.cost_is_partial)
++        .then_some(totals.cost_usd_ticks)
++        .flatten();
++    Some(TurnUsageStats {
++        input_tokens: totals
++            .input_tokens
++            .saturating_sub(totals.cached_read_tokens)
++            .saturating_sub(totals.cached_write_tokens),
++        output_tokens: totals.output_tokens,
++        cache_read_tokens: totals.cached_read_tokens,
++        cache_write_tokens: totals.cached_write_tokens,
++        api_duration_ms: totals.api_duration_ms,
++        cost_usd_ticks,
++        context_start_tokens,
++        context_end_tokens,
++        context_window_tokens,
++    })
++}
+ 
+ use super::agent::AgentId;
+ use super::agent_view::AgentView;
+@@ -98,6 +136,7 @@ fn arm_driver_turn_end_reconcile(
+     stop_reason: Option<&str>,
+     agent_result: Option<&str>,
+     cancel_trigger: Option<&str>,
++    usage: Option<xai_grok_shell::extensions::notification::PromptUsage>,
+ ) -> bool {
+     if agent.session.loading_replay {
+         return false;
+@@ -132,11 +171,16 @@ fn arm_driver_turn_end_reconcile(
+         }
+         // Same pid already armed — keep earliest received_at; refresh outcome.
+         let received_at = pending.received_at;
++        // The durable terminal carries usage; the legacy prompt_complete rail
++        // may refresh the same reconcile without it. Never let that downgrade
++        // an already-captured aggregate.
++        let usage = usage.or_else(|| pending.usage.clone());
+         agent.pending_turn_end_reconcile = Some(super::agent_view::PendingTurnEnd {
+             prompt_id: arm_pid.clone(),
+             stop_reason: stop_reason.map(str::to_string),
+             agent_result: agent_result.map(str::to_string),
+             cancel_trigger: cancel_trigger.map(str::to_string),
++            usage,
+             received_at,
+         });
+         crate::unified_log::info(
+@@ -168,6 +212,7 @@ fn arm_driver_turn_end_reconcile(
+         stop_reason: stop_reason.map(str::to_string),
+         agent_result: agent_result.map(str::to_string),
+         cancel_trigger: cancel_trigger.map(str::to_string),
++        usage,
+         received_at: std::time::Instant::now(),
+     });
+     true
+@@ -217,6 +262,7 @@ pub(super) fn finalize_turn_from_terminal(
+     stop_reason: Option<&str>,
+     agent_result: Option<&str>,
+     cancel_trigger: Option<&str>,
++    usage: Option<xai_grok_shell::extensions::notification::PromptUsage>,
+ ) -> TerminalApply {
+     if !agent.attached_as_viewer {
+         if arm_driver_turn_end_reconcile(
+@@ -226,6 +272,7 @@ pub(super) fn finalize_turn_from_terminal(
+             stop_reason,
+             agent_result,
+             cancel_trigger,
++            usage,
+         ) {
+             return TerminalApply::ReconcileArmed;
+         }
+@@ -243,6 +290,12 @@ pub(super) fn finalize_turn_from_terminal(
+     // anchor was back-dated from the authoritative `turnStartMs` on adoption, so
+     // this reads the same wall-clock duration the driver shows.
+     let elapsed = agent.turn_elapsed().unwrap_or_default();
++    let stats = turn_usage_stats(
++        usage.as_ref(),
++        agent.turn_context_start_tokens,
++        agent.context_state.as_ref().map(|context| context.used),
++        agent.session.models.get_context_window(),
++    );
+     // Read before `finish_turn()` clears it; keys the pending stop-hook stash.
+     let ending_prompt_id = agent
+         .session
+@@ -281,6 +334,7 @@ pub(super) fn finalize_turn_from_terminal(
+         // end_turn / max_tokens / max_turn_requests / refusal / unknown → done.
+         _ => Some(SessionEvent::TurnCompleted {
+             elapsed: Some(elapsed),
++            stats,
+         }),
+     };
+     push_turn_terminal_marker(agent, event, ending_prompt_id.as_deref());
+diff --git a/crates/codegen/xai-grok-pager/src/app/turn_completion/tests.rs b/crates/codegen/xai-grok-pager/src/app/turn_completion/tests.rs
+index 16616ab..3a36e15 100644
+--- a/crates/codegen/xai-grok-pager/src/app/turn_completion/tests.rs
++++ b/crates/codegen/xai-grok-pager/src/app/turn_completion/tests.rs
+@@ -41,16 +41,80 @@ fn running_driver(prompt_id: &str) -> AgentView {
+ #[test]
+ fn viewer_finalize_idles_and_pushes_completed_marker() {
+     let mut agent = running_viewer("p1");
+-    let outcome =
+-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
++    let usage = xai_grok_shell::extensions::notification::PromptUsage {
++        totals: xai_grok_shell::extensions::notification::PromptUsageModel {
++            input_tokens: 1_000,
++            output_tokens: 20,
++            cached_read_tokens: 800,
++            cached_write_tokens: 100,
++            api_duration_ms: 1_000,
++            model_calls: 1,
++            ..Default::default()
++        },
++        model_usage: Default::default(),
++        num_turns: 1,
++        usage_is_incomplete: false,
++    };
++    let outcome = finalize_turn_from_terminal(
++        &mut agent,
++        "s1",
++        Some("p1"),
++        Some("end_turn"),
++        None,
++        None,
++        Some(usage),
++    );
+     assert!(matches!(outcome, TerminalApply::ViewerFinalized));
+     assert!(agent.session.state.is_idle());
+     assert!(agent.session.current_prompt_id.is_none());
+     assert!(agent.turn_started_at.is_none());
+-    assert!(matches!(
+-        last_session_event(&agent.scrollback),
+-        Some(SessionEvent::TurnCompleted { .. })
+-    ));
++    match last_session_event(&agent.scrollback) {
++        Some(SessionEvent::TurnCompleted {
++            stats: Some(stats), ..
++        }) => {
++            assert_eq!(stats.input_tokens, 100);
++            assert_eq!(stats.cache_read_tokens, 800);
++            assert_eq!(stats.cache_write_tokens, 100);
++        }
++        other => panic!("expected completed marker with usage stats, got {other:?}"),
++    }
++}
++
++#[test]
++fn prompt_usage_converts_to_display_stats_and_scrubs_partial_cost() {
++    use xai_grok_shell::extensions::notification::{PromptUsage, PromptUsageModel};
++
++    let usage = PromptUsage {
++        totals: PromptUsageModel {
++            input_tokens: 1_000,
++            output_tokens: 40,
++            cached_read_tokens: 600,
++            cached_write_tokens: 300,
++            api_duration_ms: 2_000,
++            model_calls: 2,
++            cost_usd_ticks: Some(5_000_000_000),
++            ..Default::default()
++        },
++        model_usage: Default::default(),
++        num_turns: 2,
++        usage_is_incomplete: false,
++    };
++    let stats = turn_usage_stats(Some(&usage), Some(20_000), Some(30_000), Some(100_000))
++        .expect("non-empty usage");
++    assert_eq!(stats.input_tokens, 100);
++    assert_eq!(stats.cache_read_tokens, 600);
++    assert_eq!(stats.cache_write_tokens, 300);
++    assert_eq!(stats.cost_usd_ticks, Some(5_000_000_000));
++    assert_eq!(stats.context_start_tokens, Some(20_000));
++
++    let mut partial = usage;
++    partial.totals.cost_is_partial = true;
++    assert_eq!(
++        turn_usage_stats(Some(&partial), None, None, None)
++            .unwrap()
++            .cost_usd_ticks,
++        None
++    );
+ }
+ 
+ fn one_stop_group() -> Vec<(String, Vec<crate::scrollback::blocks::tool::HookRunEntry>)> {
+@@ -101,6 +165,7 @@ fn marker_push_consumes_matching_stop_hook_stash() {
+         &mut agent,
+         Some(SessionEvent::TurnCompleted {
+             elapsed: Some(std::time::Duration::from_secs(2)),
++            stats: None,
+         }),
+         Some("p1"),
+     );
+@@ -128,6 +193,7 @@ fn marker_push_flushes_stale_stash_standalone() {
+         &mut agent,
+         Some(SessionEvent::TurnCompleted {
+             elapsed: Some(std::time::Duration::from_secs(2)),
++            stats: None,
+         }),
+         Some("p2"),
+     );
+@@ -156,6 +222,7 @@ fn marker_without_ending_pid_flushes_stamped_stash_standalone() {
+         &mut agent,
+         Some(SessionEvent::TurnCompleted {
+             elapsed: Some(std::time::Duration::from_secs(2)),
++            stats: None,
+         }),
+         None,
+     );
+@@ -195,7 +262,15 @@ fn viewer_finalize_consumes_stop_hook_stash() {
+         groups: one_stop_group(),
+     });
+ 
+-    let _ = finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
++    let _ = finalize_turn_from_terminal(
++        &mut agent,
++        "s1",
++        Some("p1"),
++        Some("end_turn"),
++        None,
++        None,
++        None,
++    );
+ 
+     assert_eq!(last_marker_groups(&agent.scrollback), Some(1));
+     assert!(agent.pending_stop_hooks.is_none());
+@@ -204,12 +279,27 @@ fn viewer_finalize_consumes_stop_hook_stash() {
+ #[test]
+ fn viewer_finalize_duplicate_terminal_is_noop() {
+     let mut agent = running_viewer("p1");
+-    let _ = finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
++    let _ = finalize_turn_from_terminal(
++        &mut agent,
++        "s1",
++        Some("p1"),
++        Some("end_turn"),
++        None,
++        None,
++        None,
++    );
+     let len_after_first = agent.scrollback.len();
+ 
+     // A duplicate/stale terminal for the now-finished turn does nothing.
+-    let outcome =
+-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
++    let outcome = finalize_turn_from_terminal(
++        &mut agent,
++        "s1",
++        Some("p1"),
++        Some("end_turn"),
++        None,
++        None,
++        None,
++    );
+     assert!(matches!(outcome, TerminalApply::Ignored));
+     assert!(agent.session.state.is_idle());
+     assert_eq!(
+@@ -223,8 +313,15 @@ fn viewer_finalize_duplicate_terminal_is_noop() {
+ fn viewer_finalize_stop_reason_to_marker_mapping() {
+     // cancelled → Turn cancelled.
+     let mut agent = running_viewer("p1");
+-    let _ =
+-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("cancelled"), None, None);
++    let _ = finalize_turn_from_terminal(
++        &mut agent,
++        "s1",
++        Some("p1"),
++        Some("cancelled"),
++        None,
++        None,
++        None,
++    );
+     assert!(matches!(
+         last_session_event(&agent.scrollback),
+         Some(SessionEvent::TurnCancelled { .. })
+@@ -239,6 +336,7 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
+         Some("error"),
+         Some("boom"),
+         None,
++        None,
+     );
+     match last_session_event(&agent.scrollback) {
+         Some(SessionEvent::TurnFailed { error, .. }) => assert_eq!(error, "boom"),
+@@ -247,8 +345,15 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
+ 
+     // rate_limit → finished, but no marker (not actionable from a viewer).
+     let mut agent = running_viewer("p1");
+-    let _ =
+-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("rate_limit"), None, None);
++    let _ = finalize_turn_from_terminal(
++        &mut agent,
++        "s1",
++        Some("p1"),
++        Some("rate_limit"),
++        None,
++        None,
++        None,
++    );
+     assert!(agent.session.state.is_idle());
+     assert!(
+         last_session_event(&agent.scrollback).is_none(),
+@@ -257,8 +362,15 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
+ 
+     // unknown/other reason → Turn completed (the catch-all).
+     let mut agent = running_viewer("p1");
+-    let _ =
+-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("max_tokens"), None, None);
++    let _ = finalize_turn_from_terminal(
++        &mut agent,
++        "s1",
++        Some("p1"),
++        Some("max_tokens"),
++        None,
++        None,
++        None,
++    );
+     assert!(matches!(
+         last_session_event(&agent.scrollback),
+         Some(SessionEvent::TurnCompleted { .. })
+@@ -268,8 +380,15 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
+ #[test]
+ fn driver_arms_reconcile_and_does_not_finish() {
+     let mut agent = running_driver("p1");
+-    let outcome =
+-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("cancelled"), None, None);
++    let outcome = finalize_turn_from_terminal(
++        &mut agent,
++        "s1",
++        Some("p1"),
++        Some("cancelled"),
++        None,
++        None,
++        None,
++    );
+     assert!(matches!(outcome, TerminalApply::ReconcileArmed));
+     assert!(
+         matches!(agent.session.state, AgentState::TurnRunning),
+@@ -294,6 +413,7 @@ fn driver_mismatched_prompt_id_does_not_arm() {
+         Some("end_turn"),
+         None,
+         None,
++        None,
+     );
+     assert!(matches!(outcome, TerminalApply::Ignored));
+     assert!(agent.pending_turn_end_reconcile.is_none());
+@@ -303,7 +423,8 @@ fn driver_mismatched_prompt_id_does_not_arm() {
+ #[test]
+ fn driver_missing_prompt_id_arms_against_current_when_idle_in_turn() {
+     let mut agent = running_driver("p1");
+-    let outcome = finalize_turn_from_terminal(&mut agent, "s1", None, Some("end_turn"), None, None);
++    let outcome =
++        finalize_turn_from_terminal(&mut agent, "s1", None, Some("end_turn"), None, None, None);
+     assert!(matches!(outcome, TerminalApply::ReconcileArmed));
+     assert_eq!(
+         agent.pending_turn_end_reconcile.as_ref().unwrap().prompt_id,
+@@ -330,7 +451,8 @@ fn stream_agent_text(agent: &mut AgentView, text: &str) {
+ fn repro_terminal_without_prompt_id_arms_reconcile_for_lost_pr() {
+     let mut agent = running_driver("p1");
+     stream_agent_text(&mut agent, "done");
+-    let outcome = finalize_turn_from_terminal(&mut agent, "s1", None, Some("end_turn"), None, None);
++    let outcome =
++        finalize_turn_from_terminal(&mut agent, "s1", None, Some("end_turn"), None, None, None);
+     assert!(matches!(outcome, TerminalApply::ReconcileArmed));
+     assert!(agent.pending_turn_end_reconcile.is_some());
+     assert!(
+@@ -349,8 +471,15 @@ fn recovery_mode_matching_turn_completed_arms_reconcile_for_lost_pr() {
+     let mut agent = running_driver("p1");
+     stream_agent_text(&mut agent, "done");
+ 
+-    let outcome =
+-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
++    let outcome = finalize_turn_from_terminal(
++        &mut agent,
++        "s1",
++        Some("p1"),
++        Some("end_turn"),
++        None,
++        None,
++        None,
++    );
+     assert!(matches!(outcome, TerminalApply::ReconcileArmed));
+     assert!(matches!(agent.session.state, AgentState::TurnRunning));
+     assert!(agent.pending_turn_end_reconcile.is_some());
+@@ -360,14 +489,30 @@ fn recovery_mode_matching_turn_completed_arms_reconcile_for_lost_pr() {
+ #[test]
+ fn driver_rearm_same_pid_preserves_received_at() {
+     let mut agent = running_driver("p1");
+-    let _ = finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
++    let _ = finalize_turn_from_terminal(
++        &mut agent,
++        "s1",
++        Some("p1"),
++        Some("end_turn"),
++        None,
++        None,
++        None,
++    );
+     let first = agent
+         .pending_turn_end_reconcile
+         .as_ref()
+         .unwrap()
+         .received_at;
+     std::thread::sleep(std::time::Duration::from_millis(5));
+-    let _ = finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
++    let _ = finalize_turn_from_terminal(
++        &mut agent,
++        "s1",
++        Some("p1"),
++        Some("end_turn"),
++        None,
++        None,
++        None,
++    );
+     let second = agent
+         .pending_turn_end_reconcile
+         .as_ref()
+@@ -428,6 +573,7 @@ fn real_end_marker_stays_plain_with_running_work() {
+         &mut agent,
+         Some(SessionEvent::TurnCompleted {
+             elapsed: Some(std::time::Duration::from_secs(2)),
++            stats: None,
+         }),
+         Some("p1"),
+     );
+@@ -451,6 +597,7 @@ fn workless_marker_renders_legacy_text() {
+         &mut agent,
+         Some(SessionEvent::TurnCompleted {
+             elapsed: Some(std::time::Duration::from_secs(2)),
++            stats: None,
+         }),
+         Some("p1"),
+     );
+@@ -472,6 +619,7 @@ fn viewer_finalize_suppresses_send_now_cancel_marker() {
+         Some("cancelled"),
+         None,
+         Some("send_now"),
++        None,
+     );
+     assert!(matches!(outcome, TerminalApply::ViewerFinalized));
+     assert!(agent.session.state.is_idle(), "the turn still finishes");
+@@ -490,6 +638,7 @@ fn viewer_finalize_suppresses_send_now_cancel_marker() {
+         Some("cancelled"),
+         None,
+         Some("ctrl_c"),
++        None,
+     );
+     assert!(matches!(
+         last_session_event(&agent.scrollback),
+@@ -499,8 +648,15 @@ fn viewer_finalize_suppresses_send_now_cancel_marker() {
+     // Older shell (no meta): the armed expectation is the fallback.
+     let mut agent = running_viewer("p1");
+     agent.expect_send_now_cancel = Some("p-mine".into());
+-    let _ =
+-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("cancelled"), None, None);
++    let _ = finalize_turn_from_terminal(
++        &mut agent,
++        "s1",
++        Some("p1"),
++        Some("cancelled"),
++        None,
++        None,
++        None,
++    );
+     assert!(
+         last_session_event(&agent.scrollback).is_none(),
+         "the armed expectation suppresses the marker without wire meta"
+@@ -522,6 +678,7 @@ fn driver_arm_records_cancel_trigger_for_reconcile() {
+         Some("cancelled"),
+         None,
+         Some("send_now"),
++        None,
+     );
+     assert!(matches!(outcome, TerminalApply::ReconcileArmed));
+     assert_eq!(
+diff --git a/crates/codegen/xai-grok-pager/src/scrollback/blocks/mod.rs b/crates/codegen/xai-grok-pager/src/scrollback/blocks/mod.rs
+index c5647bc..036d305 100644
+--- a/crates/codegen/xai-grok-pager/src/scrollback/blocks/mod.rs
++++ b/crates/codegen/xai-grok-pager/src/scrollback/blocks/mod.rs
+@@ -22,7 +22,7 @@ pub use bg_task::{BgTaskBlock, BgTaskKind};
+ pub use btw::BtwBlock;
+ pub use context_info::ContextInfoBlock;
+ pub use credit_limit::{CreditLimitBlock, CreditLimitCardAction};
+-pub use session_event::{SessionEvent, SessionEventBlock};
++pub use session_event::{SessionEvent, SessionEventBlock, TurnUsageStats};
+ pub use subagent::{SubagentBlock, SubagentBlockKind};
+ pub use system::SystemMessageBlock;
+ pub use thinking::ThinkingBlock;
+diff --git a/crates/codegen/xai-grok-pager/src/scrollback/blocks/session_event.rs b/crates/codegen/xai-grok-pager/src/scrollback/blocks/session_event.rs
+index b084633..8234844 100644
+--- a/crates/codegen/xai-grok-pager/src/scrollback/blocks/session_event.rs
++++ b/crates/codegen/xai-grok-pager/src/scrollback/blocks/session_event.rs
+@@ -27,6 +27,23 @@ const RECAP_BODY_RANGE: u16 = 0;
+ /// Each variant carries the information needed to render a concise,
+ /// informational message in the scrollback. These are non-interactive:
+ /// unselectable, unfoldable, no accent.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct TurnUsageStats {
++    /// Uncached prompt input tokens (full input minus cache read/write subsets).
++    pub input_tokens: u64,
++    pub output_tokens: u64,
++    pub cache_read_tokens: u64,
++    pub cache_write_tokens: u64,
++    /// Sum of provider/API response durations; excludes tool execution.
++    pub api_duration_ms: u64,
++    /// Trusted complete cost only (1e10 ticks = $1); `None` when partial.
++    pub cost_usd_ticks: Option<i64>,
++    /// Context at prompt-cycle start/end and the model context window.
++    pub context_start_tokens: Option<u64>,
++    pub context_end_tokens: Option<u64>,
++    pub context_window_tokens: Option<u64>,
++}
++
+ #[derive(Debug, Clone)]
+ pub enum SessionEvent {
+     /// Agent turn completed normally.
+@@ -35,6 +52,9 @@ pub enum SessionEvent {
+         /// wake turn whose deltas carried no `turnStartMs` (old shells)
+         /// renders without a duration rather than lying with "0.0s".
+         elapsed: Option<Duration>,
++        /// Aggregate model usage for this prompt cycle. `None` for old shells,
++        /// parked markers, bash/subagent markers, and non-success outcomes.
++        stats: Option<TurnUsageStats>,
+     },
+     /// Agent turn was cancelled by the user.
+     TurnCancelled {
+@@ -145,10 +165,29 @@ impl SessionEvent {
+             // Deliberately period-less — don't re-punctuate.
+             SessionEvent::TurnCompleted {
+                 elapsed: Some(elapsed),
++                stats,
+             } => {
+-                format!("Worked for {}", format_duration(*elapsed))
++                let mut message = format!("Worked for {}", format_duration(*elapsed));
++                if let Some(stats) = stats {
++                    let detail = format_turn_usage(stats);
++                    if !detail.is_empty() {
++                        message.push_str(" · ");
++                        message.push_str(&detail);
++                    }
++                }
++                message
++            }
++            SessionEvent::TurnCompleted {
++                elapsed: None,
++                stats,
++            } => {
++                let detail = stats.as_ref().map(format_turn_usage).unwrap_or_default();
++                if detail.is_empty() {
++                    "Turn completed.".to_string()
++                } else {
++                    format!("Turn completed · {detail}")
++                }
+             }
+-            SessionEvent::TurnCompleted { elapsed: None } => "Turn completed.".to_string(),
+             SessionEvent::TurnCancelled { elapsed } => {
+                 format!("Turn cancelled by user in {}.", format_duration(*elapsed))
+             }
+@@ -286,15 +325,73 @@ impl SessionEvent {
+     }
+ }
+ 
+-/// Format a token count with "k" suffix for thousands.
++/// Format the compact prompt-cycle usage suffix shown on completed turns.
++fn format_turn_usage(stats: &TurnUsageStats) -> String {
++    let mut parts = Vec::new();
++    if stats.input_tokens > 0 {
++        parts.push(format!("↑{}", format_usage_tokens(stats.input_tokens)));
++    }
++    if stats.output_tokens > 0 {
++        parts.push(format!("↓{}", format_usage_tokens(stats.output_tokens)));
++    }
++    if stats.output_tokens > 0 && stats.api_duration_ms > 0 {
++        let tps = stats.output_tokens as f64 / (stats.api_duration_ms as f64 / 1000.0);
++        parts.push(format!("TPS={tps:.1}"));
++    }
++    if stats.cache_read_tokens > 0 {
++        parts.push(format!("R{}", format_usage_tokens(stats.cache_read_tokens)));
++    }
++    if stats.cache_write_tokens > 0 {
++        parts.push(format!("W{}", format_usage_tokens(stats.cache_write_tokens)));
++    }
++    let prompt_tokens = stats
++        .input_tokens
++        .saturating_add(stats.cache_read_tokens)
++        .saturating_add(stats.cache_write_tokens);
++    if prompt_tokens > 0 && (stats.cache_read_tokens > 0 || stats.cache_write_tokens > 0) {
++        let hit = stats.cache_read_tokens as f64 / prompt_tokens as f64 * 100.0;
++        parts.push(format!("CH{hit:.1}%"));
++    }
++    if let (Some(end), Some(window)) = (stats.context_end_tokens, stats.context_window_tokens)
++        && window > 0
++    {
++        let pct = |tokens: u64| tokens.saturating_mul(100).saturating_add(window / 2) / window;
++        let start = stats
++            .context_start_tokens
++            .map(|tokens| pct(tokens).to_string())
++            .unwrap_or_else(|| "?".to_string());
++        parts.push(format!("CTX{start}:{}", pct(end)));
++    }
++    if let Some(ticks) = stats.cost_usd_ticks.filter(|ticks| *ticks > 0) {
++        parts.push(format!("${:.3}", ticks as f64 / 10_000_000_000.0));
++    }
++    parts.join(" ")
++}
++
++/// Legacy compaction token formatter (kept stable for existing transcript copy).
+ fn format_tokens(tokens: u64) -> String {
+-    if tokens >= 1000 {
+-        format!("{:.1}k", tokens as f64 / 1000.0)
++    if tokens >= 1_000 {
++        format!("{:.1}k", tokens as f64 / 1_000.0)
+     } else {
+         tokens.to_string()
+     }
+ }
+ 
++/// Same thresholds as pi's built-in footer token formatter.
++fn format_usage_tokens(tokens: u64) -> String {
++    if tokens < 1_000 {
++        tokens.to_string()
++    } else if tokens < 10_000 {
++        format!("{:.1}k", tokens as f64 / 1_000.0)
++    } else if tokens < 1_000_000 {
++        format!("{}k", (tokens + 500) / 1_000)
++    } else if tokens < 10_000_000 {
++        format!("{:.1}M", tokens as f64 / 1_000_000.0)
++    } else {
++        format!("{}M", (tokens + 500_000) / 1_000_000)
++    }
++}
++
+ /// Block that renders a [`SessionEvent`] in scrollback.
+ ///
+ /// Visually identical to [`super::SystemMessageBlock`] (muted text, compact,
+@@ -667,10 +764,55 @@ mod tests {
+     fn turn_completed_message() {
+         let event = SessionEvent::TurnCompleted {
+             elapsed: Some(Duration::from_secs(125)),
++            stats: None,
+         };
+         assert_eq!(event.message(), "Worked for 2m5s");
+     }
+ 
++    #[test]
++    fn turn_completed_message_with_prompt_cycle_stats() {
++        let event = SessionEvent::TurnCompleted {
++            elapsed: Some(Duration::from_secs(72)),
++            stats: Some(TurnUsageStats {
++                input_tokens: 14,
++                output_tokens: 3_700,
++                cache_read_tokens: 154_000,
++                cache_write_tokens: 39_000,
++                api_duration_ms: 86_850,
++                cost_usd_ticks: Some(8_230_000_000),
++                context_start_tokens: Some(66_000),
++                context_end_tokens: Some(88_000),
++                context_window_tokens: Some(200_000),
++            }),
++        };
++        assert_eq!(
++            event.message(),
++            "Worked for 1m12s · ↑14 ↓3.7k TPS=42.6 R154k W39k CH79.8% CTX33:44 $0.823"
++        );
++    }
++
++    #[test]
++    fn turn_completed_stats_hide_partial_cost_and_unknown_context_start() {
++        let event = SessionEvent::TurnCompleted {
++            elapsed: None,
++            stats: Some(TurnUsageStats {
++                input_tokens: 100,
++                output_tokens: 10,
++                cache_read_tokens: 900,
++                cache_write_tokens: 0,
++                api_duration_ms: 2_000,
++                cost_usd_ticks: None,
++                context_start_tokens: None,
++                context_end_tokens: Some(50_000),
++                context_window_tokens: Some(100_000),
++            }),
++        };
++        assert_eq!(
++            event.message(),
++            "Turn completed · ↑100 ↓10 TPS=5.0 R900 CH90.0% CTX?:50"
++        );
++    }
++
+     #[test]
+     fn turn_cancelled_message() {
+         let event = SessionEvent::TurnCancelled {
+@@ -1128,6 +1270,7 @@ mod tests {
+     fn non_recap_events_stay_non_interactive() {
+         let block = SessionEventBlock::new(SessionEvent::TurnCompleted {
+             elapsed: Some(Duration::from_secs(5)),
++            stats: None,
+         });
+         assert!(!block.is_foldable());
+         assert!(!block.is_selectable());
+@@ -1153,6 +1296,7 @@ mod tests {
+         SessionEventBlock::with_stop_hooks(
+             SessionEvent::TurnCompleted {
+                 elapsed: Some(Duration::from_secs(5)),
++                stats: None,
+             },
+             vec![stop_group("stop")],
+             None,
+@@ -1290,6 +1434,7 @@ mod tests {
+         let skipped = SessionEventBlock::with_stop_hooks(
+             SessionEvent::TurnCompleted {
+                 elapsed: Some(Duration::from_secs(5)),
++                stats: None,
+             },
+             vec![(
+                 "stop".into(),
+@@ -1348,6 +1493,7 @@ mod tests {
+         SessionEventBlock {
+             event: SessionEvent::TurnCompleted {
+                 elapsed: Some(Duration::from_secs(24)),
++                stats: None,
+             },
+             stop_hooks: Vec::new(),
+             prompt_id: None,
+@@ -1364,6 +1510,7 @@ mod tests {
+         // The real terminal marker accepts.
+         let settled = SessionEventBlock::new(SessionEvent::TurnCompleted {
+             elapsed: Some(Duration::from_secs(24)),
++            stats: None,
+         });
+         assert!(settled.accepts_stop_hooks());
+         // Non-terminal events never accept, parked or not.
+diff --git a/crates/codegen/xai-grok-pager/src/scrollback/state/mod.rs b/crates/codegen/xai-grok-pager/src/scrollback/state/mod.rs
+index 08dbccf..eb86df6 100644
+--- a/crates/codegen/xai-grok-pager/src/scrollback/state/mod.rs
++++ b/crates/codegen/xai-grok-pager/src/scrollback/state/mod.rs
+@@ -2211,6 +2211,7 @@ mod tests {
+         let mut parked_block =
+             crate::scrollback::blocks::SessionEventBlock::new(SessionEvent::TurnCompleted {
+                 elapsed: Some(std::time::Duration::from_secs(1)),
++                stats: None,
+             });
+         parked_block.parked = true;
+         let parked = state.push_block(RenderBlock::SessionEvent(parked_block));
+@@ -2219,6 +2220,7 @@ mod tests {
+ 
+         let marker = state.push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
+             elapsed: Some(std::time::Duration::from_secs(2)),
++            stats: None,
+         }));
+         // An unstamped marker can't confirm a stamped batch — refused; an
+         // unstamped batch keeps the tail-only heuristic.
+@@ -2265,6 +2267,7 @@ mod tests {
+             SessionEventBlock::with_stop_hooks(
+                 SessionEvent::TurnCompleted {
+                     elapsed: Some(std::time::Duration::from_secs(2)),
++                    stats: None,
+                 },
+                 Vec::new(),
+                 Some("pid-new".into()),
+@@ -2309,6 +2312,7 @@ mod tests {
+             SessionEventBlock::with_stop_hooks(
+                 SessionEvent::TurnCompleted {
+                     elapsed: Some(std::time::Duration::from_secs(2)),
++                    stats: None,
+                 },
+                 Vec::new(),
+                 Some("pid-new".into()),
+@@ -2343,6 +2347,7 @@ mod tests {
+             SessionEventBlock::with_stop_hooks(
+                 SessionEvent::TurnCompleted {
+                     elapsed: Some(std::time::Duration::from_secs(3)),
++                    stats: None,
+                 },
+                 Vec::new(),
+                 Some("pid-newer".into()),
+@@ -2375,6 +2380,7 @@ mod tests {
+             SessionEventBlock::with_stop_hooks(
+                 SessionEvent::TurnCompleted {
+                     elapsed: Some(std::time::Duration::from_secs(2)),
++                    stats: None,
+                 },
+                 Vec::new(),
+                 Some("pid-a".into()),
+@@ -2382,6 +2388,7 @@ mod tests {
+         ));
+         let mut parked_block = SessionEventBlock::new(SessionEvent::TurnCompleted {
+             elapsed: Some(std::time::Duration::from_secs(1)),
++            stats: None,
+         });
+         parked_block.parked = true;
+         parked_block.prompt_id = Some("pid-b".into());
+diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
+index c1660ed..29e6589 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
+@@ -2357,6 +2357,10 @@ impl acp::Agent for MvpAgent {
+                     ),
+             );
+         }
++        let prompt_usage_for_terminal = stop_result
++            .as_ref()
++            .ok()
++            .and_then(|ok| ok.usage.as_ref());
+         let cancel_trigger: Option<String> = stop_result
+             .as_ref()
+             .ok()
+@@ -2388,6 +2392,13 @@ impl acp::Agent for MvpAgent {
+             if let Some(tid) = turn_id {
+                 payload["turnId"] = serde_json::json!(tid);
+             }
++            // Compatibility terminal rail: viewers can receive this before
++            // the durable TurnCompleted update, so carry the same aggregate
++            // usage instead of finalizing a stats-less marker first.
++            if let Some(usage) = prompt_usage_for_terminal {
++                payload["usage"] = serde_json::to_value(usage)
++                    .expect("PromptUsage is always serializable");
++            }
+             if let Some(ref t) = cancel_trigger {
+                 payload["cancelTrigger"] = serde_json::json!(t);
+             }
+-- 
+2.50.1 (Apple Git-155)
+

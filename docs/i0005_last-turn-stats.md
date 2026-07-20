@@ -1,6 +1,6 @@
 # i0005: Last-prompt stats at turn end (cache read/write, TPS, cost)
 
-**Status:** in progress — patches 0016–0018 implemented; raw-wire grounding complete; TUI patch 0019 in progress
+**Status:** implemented through patch 0019; raw-wire grounding and targeted verification complete; user-guide patch deferred
 **Upstreams:** `checkouts/pi` + `../piagent-config/packages/ren-public-package/0012-last-turn.ts` (reference), `checkouts/grok-build` (patch target)
 **Deliverable:** patch series `patches/grok-build/0016..`, continuing the i0001–i0004 stack
 **Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `ba76b0a` (stack tip after i0004: `d76cf1c`)
@@ -140,12 +140,32 @@ does not model it. The sampler now absorbs only the exact
 proxy compatibility); all other unknown events remain fail-closed. Full
 sampler suite: 162/162.
 
-### Planned next
+### Patch 0019 — show prompt-cycle usage on completed-turn markers
 
-1. **Patch 0019 — TUI stats line:** consume `usage` in the pager's
-   turn-completed handlers; extend the "Worked for …" marker with aggregate
-   usage stats (display-only render block; CTX from pager-side state).
-2. **Patch 0020 — docs.**
+- Carries aggregate `PromptUsage` on both terminal rails: durable
+  `TurnCompleted` and legacy `x.ai/session/prompt_complete` (important because
+  either can reach a viewer first).
+- Driver `PromptResponse`, viewer finalization, and lost-RPC reconciliation all
+  converge on the same optional `TurnUsageStats`; old shells and marker types
+  keep the legacy text.
+- Extends the display-only completed marker to:
+
+  ```text
+  Worked for 1m12s · ↑14 ↓3.7k TPS=42.6 R154k W39k CH79.8% CTX33:44 $0.823
+  ```
+
+  `↑` is the uncached remainder (`full − read − write`) to avoid double
+  counting; TPS uses aggregate API duration (excludes tools); CH is
+  `read/(uncached+read+write)`; costs appear only when complete/trusted.
+- Captures context tokens at local and viewer turn boundaries; final context
+  comes from the latest streamed context state. Unknown starts render `?`.
+- Parked, bash, subagent, cancelled, failed, and replacement-UX markers remain
+  unchanged.
+
+### Deferred
+
+- Patch 0020 / upstream user-guide documentation for the marker and raw-wire
+  privacy warning. The durable initiative doc covers the patch stack for now.
 
 ## Non-goals
 
@@ -167,3 +187,7 @@ sampler suite: 162/162.
 - Patch 0017: sampler 161/161; chat-state 340/340; focused shell
   `PromptResponseMeta` and headless projection tests pass; final
   `cargo check -p xai-grok-shell --all-targets` clean.
+- Patch 0018: sampler 162/162 including exact-name / JSON-type
+  `response.metadata` absorption.
+- Patch 0019: `cargo check -p xai-grok-pager --all-targets` clean; pager
+  session-event tests 41/41; turn-completion tests 19/19.
