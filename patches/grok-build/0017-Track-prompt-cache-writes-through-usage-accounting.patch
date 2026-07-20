@@ -1,0 +1,645 @@
+From 1770b6d4629473c0eaa9911fc3459027a35a71bd Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 13:54:23 +0800
+Subject: [PATCH] Track prompt cache writes through usage accounting
+
+Promote provider cache-write tokens to a first-class normalized usage field
+and carry them through per-prompt/per-model ledgers, PromptUsage ACP payloads,
+last-call response metadata, and headless result projections.
+
+Anthropic Messages maps cache_creation_input_tokens directly. OpenAI
+Responses also exposes input_tokens_details.cache_write_tokens, which the
+current async-openai type omits; preserve it from the raw terminal event via
+the same process-local metadata side channel used for cost ticks. Chat
+Completions has no equivalent and reports zero.
+
+The new serde fields default to zero, so old shells/clients remain compatible.
+Existing headless input-token semantics stay frozen: input_tokens subtracts
+cache reads only, while cache_creation_input_tokens reports the write subset
+without changing the prior token identity.
+---
+ .../codegen/xai-chat-state/src/actor/tests.rs |  3 +
+ crates/codegen/xai-chat-state/src/usage.rs    | 31 +++++++++
+ crates/codegen/xai-grok-sampler/src/client.rs | 64 ++++++++++++++++++-
+ .../xai-grok-sampler/src/stream/messages.rs   |  1 +
+ .../src/stream/messages_tests.rs              |  3 +
+ .../xai-grok-sampler/src/stream/responses.rs  |  7 ++
+ .../src/conversation.rs                       | 17 ++++-
+ .../xai-grok-shell/src/agent/mvp_agent/mod.rs |  3 +
+ .../mvp_agent/prompt_response_meta_tests.rs   |  6 ++
+ .../src/extensions/notification.rs            | 28 +++++++-
+ .../xai-grok-shell/src/sampling/error.rs      |  1 +
+ .../record_response_token_usage_tests.rs      |  1 +
+ .../subagent_usage_fold_tests.rs              |  9 +++
+ 13 files changed, 169 insertions(+), 5 deletions(-)
+
+diff --git a/crates/codegen/xai-chat-state/src/actor/tests.rs b/crates/codegen/xai-chat-state/src/actor/tests.rs
+index 156a27e..2bc9565 100644
+--- a/crates/codegen/xai-chat-state/src/actor/tests.rs
++++ b/crates/codegen/xai-chat-state/src/actor/tests.rs
+@@ -210,6 +210,7 @@ async fn record_last_turn_usage_round_trip() {
+         total_tokens: 1290,
+         reasoning_tokens: 0,
+         cached_prompt_tokens: 800,
++        cache_creation_prompt_tokens: 0,
+     };
+     h.handle.record_last_turn_usage(usage.clone());
+ 
+@@ -225,6 +226,7 @@ async fn record_last_turn_usage_round_trip() {
+         total_tokens: 10000,
+         reasoning_tokens: 0,
+         cached_prompt_tokens: 0,
++        cache_creation_prompt_tokens: 0,
+     };
+     h.handle.record_last_turn_usage(next);
+     let got2 = h
+@@ -246,6 +248,7 @@ async fn prompt_usage_ledger_via_handle_resets_and_clears() {
+         total_tokens: 12,
+         reasoning_tokens: 0,
+         cached_prompt_tokens: 0,
++        cache_creation_prompt_tokens: 0,
+     };
+ 
+     let h = TestHarness::new();
+diff --git a/crates/codegen/xai-chat-state/src/usage.rs b/crates/codegen/xai-chat-state/src/usage.rs
+index 17db0fe..9dd3990 100644
+--- a/crates/codegen/xai-chat-state/src/usage.rs
++++ b/crates/codegen/xai-chat-state/src/usage.rs
+@@ -33,6 +33,11 @@ pub struct UsageTotals {
+     pub input_tokens: u64,
+     pub output_tokens: u64,
+     pub cached_read_tokens: u64,
++    /// Prompt tokens written to the provider prompt cache (Anthropic
++    /// `cache_creation_input_tokens` or Responses `cache_write_tokens`; 0
++    /// on backends without the stat).
++    /// Like `cached_read_tokens`, a subset of `input_tokens`, not additive.
++    pub cached_write_tokens: u64,
+     pub reasoning_tokens: u64,
+     pub model_calls: u64,
+     pub api_duration_ms: u64,
+@@ -52,6 +57,7 @@ impl UsageTotals {
+             input_tokens: u64::from(usage.prompt_tokens),
+             output_tokens: u64::from(usage.completion_tokens),
+             cached_read_tokens: u64::from(usage.cached_prompt_tokens),
++            cached_write_tokens: u64::from(usage.cache_creation_prompt_tokens),
+             reasoning_tokens: u64::from(usage.reasoning_tokens),
+             model_calls: 1,
+             api_duration_ms: api_duration_ms.unwrap_or(0),
+@@ -73,6 +79,7 @@ impl UsageTotals {
+             input_tokens,
+             output_tokens,
+             cached_read_tokens,
++            cached_write_tokens,
+             reasoning_tokens,
+             model_calls,
+             api_duration_ms,
+@@ -82,6 +89,9 @@ impl UsageTotals {
+         self.input_tokens = self.input_tokens.saturating_add(*input_tokens);
+         self.output_tokens = self.output_tokens.saturating_add(*output_tokens);
+         self.cached_read_tokens = self.cached_read_tokens.saturating_add(*cached_read_tokens);
++        self.cached_write_tokens = self
++            .cached_write_tokens
++            .saturating_add(*cached_write_tokens);
+         self.reasoning_tokens = self.reasoning_tokens.saturating_add(*reasoning_tokens);
+         self.model_calls = self.model_calls.saturating_add(*model_calls);
+         self.api_duration_ms = self.api_duration_ms.saturating_add(*api_duration_ms);
+@@ -157,9 +167,30 @@ mod tests {
+             total_tokens: 999_999,
+             reasoning_tokens: 0,
+             cached_prompt_tokens: 0,
++            cache_creation_prompt_tokens: 0,
+         }
+     }
+ 
++    #[test]
++    fn ledger_folds_cache_reads_and_writes() {
++        let mut first = tu(100, 10);
++        first.cached_prompt_tokens = 60;
++        first.cache_creation_prompt_tokens = 30;
++        let mut second = tu(120, 5);
++        second.cached_prompt_tokens = 100;
++        second.cache_creation_prompt_tokens = 0;
++
++        let mut ledger = UsageLedger::default();
++        ledger.record_main_loop_call("m", &first, Some(50), None);
++        ledger.record_main_loop_call("m", &second, Some(25), None);
++
++        assert_eq!(ledger.totals.input_tokens, 220);
++        assert_eq!(ledger.totals.cached_read_tokens, 160);
++        assert_eq!(ledger.totals.cached_write_tokens, 30);
++        assert_eq!(ledger.by_model["m"].cached_read_tokens, 160);
++        assert_eq!(ledger.by_model["m"].cached_write_tokens, 30);
++    }
++
+     #[test]
+     fn ledger_sums_partial_subagent_and_zero_cost() {
+         let mut ledger = UsageLedger::default();
+diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
+index 71795f1..2cae275 100644
+--- a/crates/codegen/xai-grok-sampler/src/client.rs
++++ b/crates/codegen/xai-grok-sampler/src/client.rs
+@@ -167,7 +167,8 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
+     let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+         return;
+     };
+-    // Stash cost ticks in metadata for stream_responses.
++    // Stash fields omitted by async-openai's typed ResponseUsage in metadata
++    // for stream_responses. Both are read from the same raw terminal event.
+     if let Some(ticks) = xai_grok_sampling_types::reported_cost_ticks(
+         value
+             .pointer("/response/usage/cost_in_usd_ticks")
+@@ -178,6 +179,15 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
+             .get_or_insert_with(Default::default)
+             .insert(COST_USD_TICKS_METADATA_KEY.to_owned(), ticks.to_string());
+     }
++    if let Some(tokens) = extract_cache_write_tokens(&value) {
++        response
++            .metadata
++            .get_or_insert_with(Default::default)
++            .insert(
++                CACHE_WRITE_TOKENS_METADATA_KEY.to_owned(),
++                tokens.to_string(),
++            );
++    }
+     let Some(usage) = response.usage.as_mut() else {
+         return;
+     };
+@@ -187,8 +197,24 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
+     usage.total_tokens = total;
+ }
+ 
+-/// Metadata key for cost ticks past typed Response events.
++/// Metadata keys carrying raw usage fields omitted by async-openai's typed
++/// Response events into `stream_responses`. They are process-local and removed
++/// before the normalized response leaves the sampler.
+ pub(crate) const COST_USD_TICKS_METADATA_KEY: &str = "xai.cost_usd_ticks";
++pub(crate) const CACHE_WRITE_TOKENS_METADATA_KEY: &str = "xai.cache_write_tokens";
++
++/// Read `response.usage.input_tokens_details.cache_write_tokens` from a raw
++/// terminal Responses event. OpenAI currently reports 0 (automatic prompt
++/// cache writes are not separately billed), but preserving the wire field
++/// keeps the normalized accounting provider-neutral.
++fn extract_cache_write_tokens(value: &serde_json::Value) -> Option<u32> {
++    u32::try_from(
++        value
++            .pointer("/response/usage/input_tokens_details/cache_write_tokens")?
++            .as_u64()?,
++    )
++    .ok()
++}
+ 
+ /// Read `response.usage.context_details.{input_tokens, output_tokens}`
+ /// from the parsed terminal-event JSON and return their sum. Returns `None`
+@@ -2787,6 +2813,40 @@ mod tests {
+         assert_eq!(usage.total_tokens, 5_593);
+     }
+ 
++    #[test]
++    fn deserialize_response_event_stashes_cache_write_tokens_in_metadata() {
++        let sse = r#"{
++            "type": "response.completed",
++            "sequence_number": 0,
++            "response": {
++                "id": "resp_1", "object": "response", "created_at": 0,
++                "model": "gpt-5.5", "status": "completed", "output": [],
++                "usage": {
++                    "input_tokens": 11039,
++                    "input_tokens_details": {
++                        "cached_tokens": 10752,
++                        "cache_write_tokens": 321
++                    },
++                    "output_tokens": 43,
++                    "output_tokens_details": { "reasoning_tokens": 0 },
++                    "total_tokens": 11082
++                }
++            }
++        }"#;
++        let event = deserialize_response_event(sse).expect("parse");
++        let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
++            panic!("expected ResponseCompleted");
++        };
++        assert_eq!(
++            e.response
++                .metadata
++                .as_ref()
++                .and_then(|m| m.get(CACHE_WRITE_TOKENS_METADATA_KEY))
++                .map(String::as_str),
++            Some("321")
++        );
++    }
++
+     #[test]
+     fn deserialize_response_event_stashes_cost_in_metadata() {
+         let make = |ticks: i64| {
+diff --git a/crates/codegen/xai-grok-sampler/src/stream/messages.rs b/crates/codegen/xai-grok-sampler/src/stream/messages.rs
+index f153eac..75e9ef7 100644
+--- a/crates/codegen/xai-grok-sampler/src/stream/messages.rs
++++ b/crates/codegen/xai-grok-sampler/src/stream/messages.rs
+@@ -474,6 +474,7 @@ pub fn stream_messages<'a>(
+                 total_tokens: total_prompt_tokens.saturating_add(final_output_tokens),
+                 reasoning_tokens: 0,
+                 cached_prompt_tokens: final_cache_read_input_tokens,
++                cache_creation_prompt_tokens: final_cache_creation_input_tokens,
+             })
+         } else {
+             None
+diff --git a/crates/codegen/xai-grok-sampler/src/stream/messages_tests.rs b/crates/codegen/xai-grok-sampler/src/stream/messages_tests.rs
+index b70eb72..4deec75 100644
+--- a/crates/codegen/xai-grok-sampler/src/stream/messages_tests.rs
++++ b/crates/codegen/xai-grok-sampler/src/stream/messages_tests.rs
+@@ -618,6 +618,7 @@ async fn prompt_tokens_sums_all_three_anthropic_buckets() {
+ 
+     assert_eq!(usage.prompt_tokens, 100 + 5000 + 200);
+     assert_eq!(usage.cached_prompt_tokens, 5000);
++    assert_eq!(usage.cache_creation_prompt_tokens, 200);
+     assert_eq!(usage.completion_tokens, 7);
+     assert_eq!(usage.total_tokens, 100 + 5000 + 200 + 7);
+ }
+@@ -635,6 +636,7 @@ async fn message_delta_cache_fields_override_message_start() {
+ 
+     assert_eq!(usage.prompt_tokens, 10 + 900 + 50);
+     assert_eq!(usage.cached_prompt_tokens, 900);
++    assert_eq!(usage.cache_creation_prompt_tokens, 50);
+     assert_eq!(usage.completion_tokens, 4);
+ }
+ 
+@@ -651,5 +653,6 @@ async fn pure_cache_hit_with_zero_uncached_still_emits_usage() {
+ 
+     assert_eq!(usage.prompt_tokens, 2500);
+     assert_eq!(usage.cached_prompt_tokens, 2500);
++    assert_eq!(usage.cache_creation_prompt_tokens, 0);
+     assert_eq!(usage.total_tokens, 2501);
+ }
+diff --git a/crates/codegen/xai-grok-sampler/src/stream/responses.rs b/crates/codegen/xai-grok-sampler/src/stream/responses.rs
+index 36dc738..ec5a650 100644
+--- a/crates/codegen/xai-grok-sampler/src/stream/responses.rs
++++ b/crates/codegen/xai-grok-sampler/src/stream/responses.rs
+@@ -518,12 +518,19 @@ pub fn stream_responses<'a>(
+         // `u.total_tokens` to `context_details.input + output` when
+         // the backend emits it; on older deployments the wire
+         // value passes through unchanged.
++        let cache_creation_prompt_tokens = response
++            .metadata
++            .as_mut()
++            .and_then(|m| m.remove(crate::client::CACHE_WRITE_TOKENS_METADATA_KEY))
++            .and_then(|s| s.parse::<u32>().ok())
++            .unwrap_or(0);
+         let usage = response.usage.as_ref().map(|u| TokenUsage {
+             prompt_tokens: u.input_tokens,
+             completion_tokens: u.output_tokens,
+             total_tokens: u.total_tokens,
+             reasoning_tokens: u.output_tokens_details.reasoning_tokens,
+             cached_prompt_tokens: u.input_tokens_details.cached_tokens,
++            cache_creation_prompt_tokens,
+         });
+ 
+         let cost_usd_ticks = response
+diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
+index 32ac83e..ac4fb43 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
+@@ -653,10 +653,17 @@ pub struct TokenUsage {
+     /// Prompt tokens served from cache.
+     /// - OpenAI: `prompt_tokens_details.cached_tokens` / `input_tokens_details.cached_tokens`.
+     /// - Anthropic Messages: `usage.cache_read_input_tokens`. Cache writes
+-    ///   (`cache_creation_input_tokens`, billed at ~1.25x) are NOT counted here; they are folded
+-    ///   into `prompt_tokens` instead.
++    ///   are NOT counted here; see `cache_creation_prompt_tokens`.
+     #[serde(default)]
+     pub cached_prompt_tokens: u32,
++    /// Prompt tokens written to the provider prompt cache.
++    /// - Anthropic Messages: `usage.cache_creation_input_tokens` (the flat
++    ///   field; also counted inside `prompt_tokens`, billed at ~1.25x).
++    /// - OpenAI Responses: `input_tokens_details.cache_write_tokens` (usually
++    ///   0 today because automatic prompt-cache writes are not billed).
++    /// - Chat Completions exposes no cache-write stat; always 0 there.
++    #[serde(default)]
++    pub cache_creation_prompt_tokens: u32,
+ }
+ 
+ impl TokenUsage {
+@@ -665,6 +672,10 @@ impl TokenUsage {
+         span.record("completion_tokens", self.completion_tokens);
+         span.record("reasoning_tokens", self.reasoning_tokens);
+         span.record("cached_prompt_tokens", self.cached_prompt_tokens);
++        span.record(
++            "cache_creation_prompt_tokens",
++            self.cache_creation_prompt_tokens,
++        );
+     }
+ }
+ 
+@@ -683,6 +694,8 @@ impl From<Usage> for TokenUsage {
+                 .as_ref()
+                 .map_or(0, |d| d.reasoning_tokens),
+             cached_prompt_tokens,
++            // Chat Completions has no cache-write stat (see field doc).
++            cache_creation_prompt_tokens: 0,
+         }
+     }
+ }
+diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
+index efe40ea..b005aed 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
+@@ -404,6 +404,8 @@ pub(crate) struct PromptResponseMeta {
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub cached_read_tokens: Option<u32>,
+     #[serde(skip_serializing_if = "Option::is_none")]
++    pub cached_write_tokens: Option<u32>,
++    #[serde(skip_serializing_if = "Option::is_none")]
+     pub reasoning_tokens: Option<u32>,
+     /// Whole-prompt billing (sibling token fields are last call only).
+     #[serde(skip_serializing_if = "Option::is_none")]
+@@ -470,6 +472,7 @@ pub(crate) fn build_prompt_response_meta(
+         input_tokens: last_turn_usage.map(|u| u.prompt_tokens),
+         output_tokens: last_turn_usage.map(|u| u.completion_tokens),
+         cached_read_tokens: last_turn_usage.map(|u| u.cached_prompt_tokens),
++        cached_write_tokens: last_turn_usage.map(|u| u.cache_creation_prompt_tokens),
+         reasoning_tokens: last_turn_usage.map(|u| u.reasoning_tokens),
+         usage: prompt_usage,
+         cancellation_category,
+diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/prompt_response_meta_tests.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/prompt_response_meta_tests.rs
+index eebc108..1e0b597 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/prompt_response_meta_tests.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/prompt_response_meta_tests.rs
+@@ -33,6 +33,7 @@ fn includes_baseline_keys_without_usage() {
+     assert!(meta.get("inputTokens").is_none());
+     assert!(meta.get("outputTokens").is_none());
+     assert!(meta.get("cachedReadTokens").is_none());
++    assert!(meta.get("cachedWriteTokens").is_none());
+ }
+ 
+ #[test]
+@@ -43,6 +44,7 @@ fn enriches_meta_with_camelcase_token_keys() {
+         total_tokens: 1700,
+         reasoning_tokens: 75,
+         cached_prompt_tokens: 1000,
++        cache_creation_prompt_tokens: 250,
+     };
+     let meta = build_prompt_response_meta(PromptResponseMetaArgs {
+         last_turn_usage: Some(&usage),
+@@ -52,6 +54,7 @@ fn enriches_meta_with_camelcase_token_keys() {
+     assert_eq!(meta["inputTokens"], 1500);
+     assert_eq!(meta["outputTokens"], 200);
+     assert_eq!(meta["cachedReadTokens"], 1000);
++    assert_eq!(meta["cachedWriteTokens"], 250);
+     // Reasoning tokens carried through for diagnostic visibility.
+     assert_eq!(meta["reasoningTokens"], 75);
+ }
+@@ -68,12 +71,14 @@ fn preserves_zero_token_values() {
+         total_tokens: 110,
+         reasoning_tokens: 0,
+         cached_prompt_tokens: 0,
++        cache_creation_prompt_tokens: 0,
+     };
+     let meta = build_prompt_response_meta(PromptResponseMetaArgs {
+         last_turn_usage: Some(&usage),
+         ..args("s", "p", 110, "m")
+     });
+     assert_eq!(meta["cachedReadTokens"], 0);
++    assert_eq!(meta["cachedWriteTokens"], 0);
+     assert_eq!(meta["reasoningTokens"], 0);
+ }
+ 
+@@ -88,6 +93,7 @@ fn usage_object_lands_on_meta() {
+             total_tokens: 999_999,
+             reasoning_tokens: 0,
+             cached_prompt_tokens: 0,
++            cache_creation_prompt_tokens: 0,
+         },
+         None,
+         None,
+diff --git a/crates/codegen/xai-grok-shell/src/extensions/notification.rs b/crates/codegen/xai-grok-shell/src/extensions/notification.rs
+index 85253a8..fb7fc75 100644
+--- a/crates/codegen/xai-grok-shell/src/extensions/notification.rs
++++ b/crates/codegen/xai-grok-shell/src/extensions/notification.rs
+@@ -129,6 +129,7 @@ impl PromptUsage {
+             output_tokens,
+             total_tokens: _, // derived from input + output
+             cached_read_tokens,
++            cached_write_tokens,
+             reasoning_tokens: _, // subset of output_tokens
+             model_calls,
+             api_duration_ms: _, // timing, not tokens
+@@ -140,6 +141,7 @@ impl PromptUsage {
+             && input_tokens == 0
+             && output_tokens == 0
+             && cached_read_tokens == 0
++            && cached_write_tokens == 0
+             && self.model_usage.is_empty()
+     }
+ }
+@@ -157,6 +159,13 @@ pub struct PromptUsageModel {
+     pub total_tokens: u64,
+     #[serde(default)]
+     pub cached_read_tokens: u64,
++    /// Prompt tokens written to the provider prompt cache (Anthropic
++    /// `cache_creation_input_tokens` or Responses `cache_write_tokens`; 0
++    /// when unavailable). Subset of `input_tokens`, like `cached_read_tokens`.
++    /// Additive on the wire: old shells omit it (parses as 0), old clients
++    /// ignore it.
++    #[serde(default)]
++    pub cached_write_tokens: u64,
+     #[serde(default)]
+     pub reasoning_tokens: u64,
+     #[serde(default)]
+@@ -189,6 +198,7 @@ impl From<&xai_chat_state::UsageTotals> for PromptUsageModel {
+             input_tokens,
+             output_tokens,
+             cached_read_tokens,
++            cached_write_tokens,
+             reasoning_tokens,
+             model_calls,
+             api_duration_ms,
+@@ -200,6 +210,7 @@ impl From<&xai_chat_state::UsageTotals> for PromptUsageModel {
+             output_tokens,
+             total_tokens: t.total_tokens(),
+             cached_read_tokens,
++            cached_write_tokens,
+             reasoning_tokens,
+             model_calls,
+             api_duration_ms,
+@@ -260,6 +271,7 @@ pub fn project_result_usage(result: &mut serde_json::Value, usage: &PromptUsage)
+         output_tokens,
+         total_tokens,
+         cached_read_tokens,
++        cached_write_tokens,
+         reasoning_tokens,
+         model_calls: _,     // totals-level; headless carries num_turns instead
+         api_duration_ms: _, // dropped: not part of the frozen headless shape
+@@ -268,8 +280,12 @@ pub fn project_result_usage(result: &mut serde_json::Value, usage: &PromptUsage)
+         cost_missing_calls: _, // internal partiality count; the flag suffices
+     } = usage.totals;
+     result["usage"] = serde_json::json!({
++        // Cache writes stay inside `input_tokens` (frozen shape: only cache
++        // reads are subtracted); `cache_creation_input_tokens` reports the
++        // written subset without changing the existing identity.
+         "input_tokens": uncached_input_tokens(input_tokens, cached_read_tokens),
+         "cache_read_input_tokens": cached_read_tokens,
++        "cache_creation_input_tokens": cached_write_tokens,
+         "output_tokens": output_tokens,
+         "reasoning_tokens": reasoning_tokens,
+         "total_tokens": total_tokens,
+@@ -297,6 +313,7 @@ pub fn project_result_usage(result: &mut serde_json::Value, usage: &PromptUsage)
+                 output_tokens,
+                 total_tokens: _, // derivable per row
+                 cached_read_tokens,
++                cached_write_tokens,
+                 reasoning_tokens: _, // dropped: reduced per-model schema
+                 model_calls,
+                 api_duration_ms: _, // dropped: reduced per-model schema
+@@ -308,6 +325,7 @@ pub fn project_result_usage(result: &mut serde_json::Value, usage: &PromptUsage)
+                 "inputTokens": uncached_input_tokens(input_tokens, cached_read_tokens),
+                 "outputTokens": output_tokens,
+                 "cacheReadInputTokens": cached_read_tokens,
++                "cacheCreationInputTokens": cached_write_tokens,
+                 "modelCalls": model_calls,
+             });
+             if !hide_costs
+@@ -2271,6 +2289,7 @@ mod tests {
+             PromptUsageModel {
+                 input_tokens: 100,
+                 cached_read_tokens: 40,
++                cached_write_tokens: 20,
+                 output_tokens: 10,
+                 total_tokens: 110,
+                 model_calls: 1,
+@@ -2282,6 +2301,7 @@ mod tests {
+             totals: PromptUsageModel {
+                 input_tokens: 100,
+                 cached_read_tokens: 40,
++                cached_write_tokens: 20,
+                 output_tokens: 10,
+                 total_tokens: 110,
+                 model_calls: 1,
+@@ -2296,19 +2316,25 @@ mod tests {
+         project_result_usage(&mut result, &usage);
+         let uncached = result["usage"]["input_tokens"].as_u64().unwrap();
+         let cache = result["usage"]["cache_read_input_tokens"].as_u64().unwrap();
++        let cache_write = result["usage"]["cache_creation_input_tokens"]
++            .as_u64()
++            .unwrap();
+         let output = result["usage"]["output_tokens"].as_u64().unwrap();
+         let total = result["usage"]["total_tokens"].as_u64().unwrap();
+-        assert_eq!(uncached, 60);
++        assert_eq!(uncached, 60); // includes the cache-write subset
+         assert_eq!(cache, 40);
++        assert_eq!(cache_write, 20);
+         assert_eq!(output, 10);
+         assert_eq!(total, uncached + cache + output);
+         // ACP serde keeps full input_tokens; headless identity differs.
+         let acp = serde_json::to_value(&usage).unwrap();
+         assert_eq!(acp["inputTokens"], 100);
+         assert_eq!(acp["cachedReadTokens"], 40);
++        assert_eq!(acp["cachedWriteTokens"], 20);
+         assert_ne!(acp["inputTokens"], result["usage"]["input_tokens"]);
+         assert_eq!(result["modelUsage"]["m"]["inputTokens"], 60);
+         assert_eq!(result["modelUsage"]["m"]["cacheReadInputTokens"], 40);
++        assert_eq!(result["modelUsage"]["m"]["cacheCreationInputTokens"], 20);
+         assert_eq!(result["total_cost_usd"], 0.2);
+         // Exact ticks accompany the float for tick-exact reconciliation.
+         assert_eq!(result["total_cost_usd_ticks"], 2_000_000_000_i64);
+diff --git a/crates/codegen/xai-grok-shell/src/sampling/error.rs b/crates/codegen/xai-grok-shell/src/sampling/error.rs
+index a6725dc..ea30d51 100644
+--- a/crates/codegen/xai-grok-shell/src/sampling/error.rs
++++ b/crates/codegen/xai-grok-shell/src/sampling/error.rs
+@@ -321,6 +321,7 @@ mod tests {
+                 total_tokens: 4,
+                 reasoning_tokens: 0,
+                 cached_prompt_tokens: 0,
++                cache_creation_prompt_tokens: 0,
+             },
+             None,
+             Some(10),
+diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_tests/record_response_token_usage_tests.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_tests/record_response_token_usage_tests.rs
+index b35d95c..6f11b39 100644
+--- a/crates/codegen/xai-grok-shell/src/session/acp_session_tests/record_response_token_usage_tests.rs
++++ b/crates/codegen/xai-grok-shell/src/session/acp_session_tests/record_response_token_usage_tests.rs
+@@ -13,6 +13,7 @@ fn response_with_usage(total_tokens: u32) -> ConversationResponse {
+ 
+             reasoning_tokens: 0,
+             cached_prompt_tokens: 0,
++            cache_creation_prompt_tokens: 0,
+         }),
+         cost_usd_ticks: None,
+         message_chunks_emitted: 1,
+diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_tests/subagent_usage_fold_tests.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_tests/subagent_usage_fold_tests.rs
+index 89b6957..56e76a2 100644
+--- a/crates/codegen/xai-grok-shell/src/session/acp_session_tests/subagent_usage_fold_tests.rs
++++ b/crates/codegen/xai-grok-shell/src/session/acp_session_tests/subagent_usage_fold_tests.rs
+@@ -162,6 +162,7 @@ fn project_from_ledger_never_drops_incomplete_flag() {
+             total_tokens: 4,
+             reasoning_tokens: 0,
+             cached_prompt_tokens: 0,
++            cache_creation_prompt_tokens: 0,
+         },
+         None,
+         None,
+@@ -226,6 +227,7 @@ fn for_error_path_shared_policy() {
+             total_tokens: 6,
+             reasoning_tokens: 0,
+             cached_prompt_tokens: 0,
++            cache_creation_prompt_tokens: 0,
+         },
+         None,
+         None,
+@@ -258,6 +260,7 @@ async fn error_path_marks_incomplete_when_ledger_open() {
+                     total_tokens: 12,
+                     reasoning_tokens: 0,
+                     cached_prompt_tokens: 0,
++                    cache_creation_prompt_tokens: 0,
+                 },
+                 None,
+                 None,
+@@ -284,6 +287,7 @@ async fn session_only_incomplete_does_not_stain_live_open_prompt() {
+                     total_tokens: 8,
+                     reasoning_tokens: 0,
+                     cached_prompt_tokens: 0,
++                    cache_creation_prompt_tokens: 0,
+                 },
+                 None,
+                 None,
+@@ -461,6 +465,7 @@ async fn finalize_background_only_flags_report_not_ledgers() {
+                     total_tokens: 5,
+                     reasoning_tokens: 0,
+                     cached_prompt_tokens: 0,
++                    cache_creation_prompt_tokens: 0,
+                 },
+                 None,
+                 None,
+@@ -513,6 +518,7 @@ async fn apply_miss_mismatched_pin_does_not_stain_live_prompt() {
+                     total_tokens: 12,
+                     reasoning_tokens: 0,
+                     cached_prompt_tokens: 0,
++                    cache_creation_prompt_tokens: 0,
+                 },
+                 None,
+                 None,
+@@ -556,6 +562,7 @@ async fn apply_miss_matching_pin_stains_prompt_and_session() {
+                     total_tokens: 4,
+                     reasoning_tokens: 0,
+                     cached_prompt_tokens: 0,
++                    cache_creation_prompt_tokens: 0,
+                 },
+                 None,
+                 None,
+@@ -597,6 +604,7 @@ async fn freeze_sticky_only_flags_report_not_ledgers() {
+                     total_tokens: 10,
+                     reasoning_tokens: 0,
+                     cached_prompt_tokens: 0,
++                    cache_creation_prompt_tokens: 0,
+                 },
+                 None,
+                 None,
+@@ -651,6 +659,7 @@ async fn freeze_completes_when_fold_lands_mid_drain() {
+                     total_tokens: 12,
+                     reasoning_tokens: 0,
+                     cached_prompt_tokens: 0,
++                    cache_creation_prompt_tokens: 0,
+                 },
+                 None,
+                 None,
+-- 
+2.50.1 (Apple Git-155)
+

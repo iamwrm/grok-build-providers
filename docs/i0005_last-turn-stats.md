@@ -1,6 +1,6 @@
 # i0005: Last-prompt stats at turn end (cache read/write, TPS, cost)
 
-**Status:** in progress — patch 0016 implemented and live-verified; grounding complete; patches 0017–0019 not started
+**Status:** in progress — patches 0016–0017 implemented; raw-wire grounding complete; TUI patch 0018 in progress
 **Upstreams:** `checkouts/pi` + `../piagent-config/packages/ren-public-package/0012-last-turn.ts` (reference), `checkouts/grok-build` (patch target)
 **Deliverable:** patch series `patches/grok-build/0016..`, continuing the i0001–i0004 stack
 **Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `ba76b0a` (stack tip after i0004: `d76cf1c`)
@@ -98,15 +98,44 @@ with `GROK_LOG_SAMPLING=true`; raw payloads from `sampling.jsonl`:
   place a `cache_control` marker on the trailing message. The planned
   W-per-cycle stat will make this cost visible.
 
+### Patch 0017 — track prompt cache writes through usage accounting
+
+- Added serde-compatible `TokenUsage.cache_creation_prompt_tokens` and
+  populated it from Anthropic `cache_creation_input_tokens`.
+- A live Codex check found that OpenAI Responses also emits
+  `input_tokens_details.cache_write_tokens`, although the pinned
+  `async-openai` type drops it. Patch 0017 preserves it from the raw terminal
+  event through the existing process-local response-metadata side channel.
+- Added `UsageTotals.cached_write_tokens`, folded per prompt and per model,
+  then projected it as ACP `cachedWriteTokens`, last-call
+  `_meta.cachedWriteTokens`, and headless `cache_creation_input_tokens` /
+  `cacheCreationInputTokens`. All new serde fields default to zero.
+- Kept the frozen headless token identity unchanged: headless `input_tokens`
+  subtracts cache reads only, so cache writes are a reported subset rather
+  than a second subtraction.
+
+### OpenAI Codex cache grounding (2026-07-20, live)
+
+Two identical `openai-codex/gpt-5.5:low` tool-using cycles showed automatic
+prefix caching works without explicit request cache markers:
+
+| Cycle/call | input | cached | cache write |
+|---|---:|---:|---:|
+| first / initial | 11,039 | 0 | 0 |
+| first / tool follow-up | 11,108 | 0 | 0 |
+| repeat / initial | 11,039 | 10,752 | 0 |
+| repeat / tool follow-up | 11,108 | 10,752 | 0 |
+
+The zero write count is a real wire value (automatic OpenAI cache population
+is not separately billed), not an absent field. This is unlike Anthropic's
+explicit, billed cache creation.
+
 ### Planned next
 
-1. **Patch 0017 — cache-write plumbing:** `TokenUsage.cache_creation_prompt_tokens`
-   → `UsageTotals.cached_write_tokens` → `PromptUsageModel.cachedWriteTokens`
-   (+ headless `cache_creation_input_tokens` / `cacheCreationInputTokens`).
-2. **Patch 0018 — TUI stats line:** stop dropping `usage` in the pager's
+1. **Patch 0018 — TUI stats line:** stop dropping `usage` in the pager's
    turn-completed handlers; extend the "Worked for …" marker with the stats
    line (display-only render block; CTX from pager-side `context_state`).
-3. **Patch 0019 — docs.**
+2. **Patch 0019 — docs.**
 
 ## Non-goals
 
@@ -125,3 +154,6 @@ with `GROK_LOG_SAMPLING=true`; raw payloads from `sampling.jsonl`:
   1 with `GROK_LOG_SAMPLING=true`; `sampling.jsonl` contained 3
   `request_body` events (one per LLM call, plus a `responses`-backend
   auxiliary call) alongside the existing `sse_chunk` stream.
+- Patch 0017: sampler 161/161; chat-state 340/340; focused shell
+  `PromptResponseMeta` and headless projection tests pass; final
+  `cargo check -p xai-grok-shell --all-targets` clean.
