@@ -1,7 +1,7 @@
-From 67b450b18eaf980b73a6af874f09419c1fe96153 Mon Sep 17 00:00:00 2001
+From aff7451583a7a18c54f7e44a858485483a26109a Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 22:17:03 +0800
-Subject: [PATCH] Gate native reasoning replay by route, API, and model
+Subject: [PATCH 16/16] Gate native reasoning replay by route, API, and model
 
 Persist non-secret inference provenance on assistant turns and replay opaque reasoning only when route, backend, and wire model all match. Convert visible foreign reasoning to portable assistant text and drop opaque-only state across Responses, Messages, and Chat Completions, leaving saved history intact for exact-origin switch-back.
 ---

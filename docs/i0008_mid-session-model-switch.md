@@ -1,9 +1,9 @@
 # i0008: Safe mid-session model and provider switching
 
-**Status:** implemented in patch `0017`; release-profile tests verified
+**Status:** implemented in patch `0016` (numbered `0017` before the former sampling-panic fix was folded into patch `0011`); release-profile tests verified
 
 **Upstream:** `checkouts/grok-build`  
-**Deliverable:** `patches/grok-build/0017-Strip-foreign-encrypted-reasoning-on-model-switch.patch`  
+**Deliverable:** `patches/grok-build/0016-Gate-native-reasoning-replay-by-route-API-and-model.patch`  
 **Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc`
 
 ## Problem

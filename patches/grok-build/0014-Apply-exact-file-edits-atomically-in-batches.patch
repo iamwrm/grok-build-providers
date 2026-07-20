@@ -1,7 +1,7 @@
-From ec11661ffc1d4c3f664df0932a7ca8b7dd514307 Mon Sep 17 00:00:00 2001
+From ded1da09426266239ad3a069805fdd993d687b37 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 18:01:00 +0800
-Subject: [PATCH 14/14] Apply exact file edits atomically in batches
+Subject: [PATCH 14/16] Apply exact file edits atomically in batches
 
 Let search_replace accept an ordered edits array for multiple exact changes to one file. Validate every replacement against evolving in-memory content and write only once after the complete batch succeeds, so a late miss or ambiguity leaves the file untouched. Preserve the legacy single-edit wire shape, exact matching, CRLF handling, Unicode fallback, concise output, and one FileWritten notification.
 ---

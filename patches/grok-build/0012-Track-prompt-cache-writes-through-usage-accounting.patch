@@ -1,7 +1,7 @@
-From 9721937e1809acb4b5acc9b36b910e66c28f2938 Mon Sep 17 00:00:00 2001
+From 8f72eadbb4c45ce91b48cb1e6e6c8f36ee4447f8 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
-Subject: [PATCH 12/14] Track prompt cache writes through usage accounting
+Subject: [PATCH 12/16] Track prompt cache writes through usage accounting
 
 Promote provider cache-write tokens to a normalized usage field and carry them through ledgers, ACP PromptUsage, response metadata, and headless projections. Map Anthropic cache creation directly and preserve OpenAI Responses cache_write_tokens from raw terminal metadata while retaining backward-compatible token identities.
 ---

@@ -1,7 +1,7 @@
-From 0b54014bdbbbf2332d0cdd3b65a9f7a3e01651f3 Mon Sep 17 00:00:00 2001
+From f54cd38e1dff75a91eb12c6f598934c474e4c605 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
-Subject: [PATCH 09/14] Make protoc dependency hints portable to Windows
+Subject: [PATCH 09/16] Make protoc dependency hints portable to Windows
 
 Skip the optional Unix-device-based protoc dependency-hint helper on Windows, where protoc.exe cannot open /dev/stdout or /dev/null. Preserve normal proto generation and dependency hints on Unix.
 ---

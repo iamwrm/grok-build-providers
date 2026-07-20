@@ -1,7 +1,7 @@
-From c22947dcbb61831bd052b2f3928f52c223f08bdf Mon Sep 17 00:00:00 2001
+From 26b005a32a5358b6463081f8c6cda2378983df07 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
-Subject: [PATCH 07/14] Integrate Anthropic OAuth Messages transport
+Subject: [PATCH 07/16] Integrate Anthropic OAuth Messages transport
 
 Add anthropic_oauth bearer resolution, Claude Code identity headers, mandatory identity system block, consumer-OAuth request shaping, and safe sampling-parameter removal during extended thinking. Keep OAuth credentials isolated from API-key and xAI fallback paths.
 ---

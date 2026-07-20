@@ -1,7 +1,7 @@
-From eeae1e3570c8ed8e761bd2657e2fb3b448a159a2 Mon Sep 17 00:00:00 2001
+From f4e9102bd3575b0704cb6a2cda183f27b5a074ab Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:00 +0800
-Subject: [PATCH 02/14] Integrate ChatGPT Codex Responses transport
+Subject: [PATCH 02/16] Integrate ChatGPT Codex Responses transport
 
 Add the chatgpt_oauth auth scheme, live bearer/account-header resolution, and the complete Codex request and SSE response contract. Normalize assistant history and preserve streamed text, reasoning summaries, and function calls when terminal output is incomplete. Tolerate the deployed informational response.metadata and keepalive events while keeping all other unknown events fail-closed.
 ---

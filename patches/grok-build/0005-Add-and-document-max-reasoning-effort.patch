@@ -1,7 +1,7 @@
-From cd9de4e07bcc588290d9cf7a48a118fa29fe893f Mon Sep 17 00:00:00 2001
+From e8ef62e2b964e0704884bb65d2e476b213bb3540 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
-Subject: [PATCH 05/14] Add and document max reasoning effort
+Subject: [PATCH 05/16] Add and document max reasoning effort
 
 Make max a distinct canonical reasoning-effort level above xhigh. Work around the pinned async-openai type at the JSON request/response seams, gate true max by model capability, preserve compatible max-to-xhigh fallback behavior, and document the resulting model and CLI semantics.
 ---

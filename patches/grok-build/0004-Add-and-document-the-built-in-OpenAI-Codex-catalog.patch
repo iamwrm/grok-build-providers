@@ -1,7 +1,7 @@
-From 307705ba365c1fe79fcb03aa9cd10d4055332339 Mon Sep 17 00:00:00 2001
+From 5c4252b43df03dd139938f798378f8e61505c32d Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
-Subject: [PATCH 04/14] Add and document the built-in OpenAI Codex catalog
+Subject: [PATCH 04/16] Add and document the built-in OpenAI Codex catalog
 
 Register credential-gated openai-codex/* entries backed by the ChatGPT Codex endpoint. Keep user overrides authoritative, expose supported effort ranges without config edits, and document login, credential isolation, catalog behavior, and provider/model:effort selection.
 ---

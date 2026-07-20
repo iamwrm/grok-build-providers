@@ -1,7 +1,7 @@
-From 745fe029598bd57e4ab477bd3bd8539dc95dbe31 Mon Sep 17 00:00:00 2001
+From 30710cabbcbf9da375b247dd9cf2add577ed9256 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 19:13:11 +0800
-Subject: [PATCH] Improve Codex parallel tool-call handling
+Subject: [PATCH 15/16] Improve Codex parallel tool-call handling
 
 Force parallel_tool_calls on Responses/Codex requests, preserve
 Responses function-call item ids as call_id|fc_id for history replay,

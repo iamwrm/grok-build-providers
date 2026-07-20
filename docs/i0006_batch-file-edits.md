@@ -132,7 +132,9 @@ not asserted as current test totals after later patches.
 
 ### Integrated 17-patch verification record (2026-07-20)
 
-- Patch `0014` remains part of the `0001–0017` durable series.
+- Patch `0014` remains part of the durable series — now `0001–0016` after the
+  former patch `0016` panic fix was folded into patch `0011`; that fold does
+  not change the tree hash below.
 - All 17 patches clean-room applied to the pinned base and produced tree
   `dd6c4ce1ead5b4a91aae81f5f0699d0fa65dee7c`.
 - Recorded commands:

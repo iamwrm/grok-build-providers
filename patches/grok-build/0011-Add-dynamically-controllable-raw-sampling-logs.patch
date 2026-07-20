@@ -1,22 +1,24 @@
-From 48584c209c0f1b514ed89d1747cafe958870e9cd Mon Sep 17 00:00:00 2001
+From f1c9a7fb6dbcadd731fb7e2f0c3b304e850ba8ec Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
-Subject: [PATCH 11/14] Add dynamically controllable raw sampling logs
+Subject: [PATCH 11/16] Add dynamically controllable raw sampling logs
 
 Record fully shaped raw provider request bodies alongside response SSE chunks. Use one process-wide gate initialized by GROK_LOG_SAMPLING/--log-sampling, keep the tracing layer dynamically interested, and expose hidden /debug sampling on|off|status ACP controls with a full-payload privacy warning.
+
+The JSON fmt formatter walks every ancestor when writing the spans array and panics if any lacks FormattedFields, and sampling events almost always fire under non-sampling agent/shell parent spans. So always forward span lifecycle methods to the inner fmt layer and gate only event emission on target + runtime enable; additionally disable span list / current-span serialization so the formatter never looks up FormattedFields (hard guarantee against the tracing-subscriber panic). A regression test covers both configs.
 ---
- .../codegen/xai-grok-pager/src/app/actions.rs |  31 +++
+ .../codegen/xai-grok-pager/src/app/actions.rs |  31 ++
  .../xai-grok-pager/src/app/dispatch/router.rs |   9 +-
- .../src/app/dispatch/task_result.rs           |  27 +++
+ .../src/app/dispatch/task_result.rs           |  27 ++
  .../src/app/dispatch/tests/router.rs          |  18 ++
- .../xai-grok-pager/src/app/effects/mod.rs     |  30 +++
+ .../xai-grok-pager/src/app/effects/mod.rs     |  30 ++
  .../xai-grok-pager/src/app/event_loop.rs      |   5 +
- .../src/slash/commands/debug.rs               |  68 ++++++-
+ .../src/slash/commands/debug.rs               |  68 +++-
  crates/codegen/xai-grok-sampler/src/client.rs |  10 +
- .../xai-grok-sampler/src/sampling_log.rs      |  90 ++++++++-
- .../xai-grok-shell/src/extensions/debug.rs    |  68 +++++++
- .../xai-grok-telemetry/src/sampling_log.rs    | 186 +++++++++++++++++-
- 11 files changed, 523 insertions(+), 19 deletions(-)
+ .../xai-grok-sampler/src/sampling_log.rs      |  90 +++++-
+ .../xai-grok-shell/src/extensions/debug.rs    |  68 ++++
+ .../xai-grok-telemetry/src/sampling_log.rs    | 298 +++++++++++++++++-
+ 11 files changed, 634 insertions(+), 20 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager/src/app/actions.rs b/crates/codegen/xai-grok-pager/src/app/actions.rs
 index 1b9c31a..6c48501 100644
@@ -623,10 +625,10 @@ index 4196532..f8f7c37 100644
      use crate::session::feedback::{FeedbackMode, FeedbackTier};
  
 diff --git a/crates/codegen/xai-grok-telemetry/src/sampling_log.rs b/crates/codegen/xai-grok-telemetry/src/sampling_log.rs
-index e846169..1f62a7b 100644
+index e846169..53a872a 100644
 --- a/crates/codegen/xai-grok-telemetry/src/sampling_log.rs
 +++ b/crates/codegen/xai-grok-telemetry/src/sampling_log.rs
-@@ -1,32 +1,156 @@
+@@ -1,32 +1,145 @@
  //! Tracing layer for `target: "sampling_log"` → `~/.grok/logs/sampling.jsonl`.
 -//! Enable with `--log-sampling` or `GROK_LOG_SAMPLING=1`.
 +//! Enable before startup with `--log-sampling` / `GROK_LOG_SAMPLING=1`, or at
@@ -674,6 +676,14 @@ index e846169..1f62a7b 100644
 +/// events return `Interest::sometimes()` so tracing never caches the startup
 +/// state as permanently on or off. Non-sampling callsites remain globally
 +/// enabled for the other layers in the subscriber stack.
++///
++/// Span lifecycle methods are always forwarded to the inner `fmt` layer. The
++/// JSON formatter walks *every* ancestor when writing the `spans` array and
++/// panics if any lacks `FormattedFields` (see tracing-subscriber
++/// `Unable to find FormattedFields in extensions`). Sampling events almost
++/// always fire under non-`sampling_log` agent/shell parents, so filtering
++/// `on_new_span` by target crashes the ACP worker the first time a request
++/// is logged. Only event emission is gated on target + runtime enable.
 +struct RuntimeSamplingLayer<L, S> {
 +    inner: L,
 +    _subscriber: PhantomData<fn(S)>,
@@ -704,8 +714,8 @@ index e846169..1f62a7b 100644
 +            // sibling layers in the tracing subscriber stack.
 +            Interest::always()
 +        }
-+    }
-+
+     }
+ 
 +    fn enabled(&self, metadata: &tracing::Metadata<'_>, ctx: Context<'_, S>) -> bool {
 +        if metadata.target() != TARGET {
 +            return true;
@@ -722,9 +732,9 @@ index e846169..1f62a7b 100644
 +        id: &tracing::span::Id,
 +        ctx: Context<'_, S>,
 +    ) {
-+        if attrs.metadata().target() == TARGET {
-+            self.inner.on_new_span(attrs, id, ctx);
-+        }
++        // Must run for every span: JSON `spans` list requires FormattedFields
++        // on all ancestors of a sampling event, not only sampling_log spans.
++        self.inner.on_new_span(attrs, id, ctx);
 +    }
 +
 +    fn on_record(
@@ -733,12 +743,7 @@ index e846169..1f62a7b 100644
 +        values: &tracing::span::Record<'_>,
 +        ctx: Context<'_, S>,
 +    ) {
-+        if ctx
-+            .metadata(span)
-+            .is_some_and(|meta| meta.target() == TARGET)
-+        {
-+            self.inner.on_record(span, values, ctx);
-+        }
++        self.inner.on_record(span, values, ctx);
 +    }
 +
 +    fn on_follows_from(
@@ -747,12 +752,7 @@ index e846169..1f62a7b 100644
 +        follows: &tracing::span::Id,
 +        ctx: Context<'_, S>,
 +    ) {
-+        if ctx
-+            .metadata(span)
-+            .is_some_and(|meta| meta.target() == TARGET)
-+        {
-+            self.inner.on_follows_from(span, follows, ctx);
-+        }
++        self.inner.on_follows_from(span, follows, ctx);
 +    }
 +
 +    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
@@ -762,24 +762,15 @@ index e846169..1f62a7b 100644
 +    }
 +
 +    fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
-+        if ctx.metadata(id).is_some_and(|meta| meta.target() == TARGET) {
-+            self.inner.on_enter(id, ctx);
-+        }
-     }
- 
++        self.inner.on_enter(id, ctx);
++    }
++
 +    fn on_exit(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
-+        if ctx.metadata(id).is_some_and(|meta| meta.target() == TARGET) {
-+            self.inner.on_exit(id, ctx);
-+        }
++        self.inner.on_exit(id, ctx);
 +    }
 +
 +    fn on_close(&self, id: tracing::span::Id, ctx: Context<'_, S>) {
-+        if ctx
-+            .metadata(&id)
-+            .is_some_and(|meta| meta.target() == TARGET)
-+        {
-+            self.inner.on_close(id, ctx);
-+        }
++        self.inner.on_close(id, ctx);
 +    }
 +}
 +
@@ -792,7 +783,24 @@ index e846169..1f62a7b 100644
      let path = grok_home().join(crate::unified_log::LOG_DIR).join(LOG_FILE);
  
      if let Some(parent) = path.parent()
-@@ -66,5 +190,47 @@ where
+@@ -58,13 +171,176 @@ where
+         *slot = Some(guard);
+     }
+ 
++    // Hard guarantee against tracing-subscriber's
++    // `Unable to find FormattedFields in extensions` panic: the JSON
++    // formatter panics if it walks any ancestor that lacks FormattedFields
++    // for *this* layer's field type. Even with RuntimeSamplingLayer
++    // forwarding every on_new_span, other layers / interest caching /
++    // async span stacks can still leave gaps. Event fields alone carry
++    // the wire payload (request_body / sse_chunk); do not serialize spans.
+     let fmt_layer = tracing_subscriber::fmt::layer()
+         .json()
+-        .with_current_span(false) // `spans` array already carries the full ancestor list
++        .with_current_span(false)
++        .with_span_list(false)
+         .with_ansi(false)
+         .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
          .with_target(false)
          .with_writer(BoxMakeWriter::new(non_blocking));
  
@@ -802,9 +810,11 @@ index e846169..1f62a7b 100644
 +
 +#[cfg(test)]
 +mod tests {
-+    use std::sync::Arc;
++    use std::io::{self, Write};
++    use std::sync::{Arc, Mutex};
 +    use std::sync::atomic::{AtomicUsize, Ordering};
 +
++    use tracing_subscriber::fmt::MakeWriter;
 +    use tracing_subscriber::layer::SubscriberExt as _;
 +
 +    use super::*;
@@ -839,6 +849,117 @@ index e846169..1f62a7b 100644
 +
 +        set_enabled(original);
 +        assert_eq!(events.load(Ordering::Relaxed), 1);
++    }
++
++    /// Shared buffer writer so the JSON fmt layer can be exercised in tests.
++    #[derive(Clone, Default)]
++    struct Buf(Arc<Mutex<Vec<u8>>>);
++
++    impl<'a> MakeWriter<'a> for Buf {
++        type Writer = BufWriter;
++
++        fn make_writer(&'a self) -> Self::Writer {
++            BufWriter(self.0.clone())
++        }
++    }
++
++    struct BufWriter(Arc<Mutex<Vec<u8>>>);
++
++    impl Write for BufWriter {
++        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
++            self.0.lock().expect("buf").write(buf)
++        }
++
++        fn flush(&mut self) -> io::Result<()> {
++            Ok(())
++        }
++    }
++
++    /// Regression for the TUI crash:
++    /// `Unable to find FormattedFields in extensions` when a sampling event
++    /// is emitted under a non-`sampling_log` parent span (the normal ACP path).
++    ///
++    /// Two cases:
++    /// 1. Production settings: span list off → never looks up FormattedFields.
++    /// 2. Span list on without recording parent fields → would panic; with
++    ///    full span forwarding it must still succeed.
++    #[test]
++    fn json_fmt_does_not_panic_under_non_sampling_parent_spans() {
++        let original = enabled();
++        set_enabled(true);
++
++        // Case 1: production config (no span list).
++        {
++            let buf = Buf::default();
++            let fmt_layer = tracing_subscriber::fmt::layer()
++                .json()
++                .with_current_span(false)
++                .with_span_list(false)
++                .with_ansi(false)
++                .with_target(false)
++                .with_writer(buf.clone());
++            let subscriber =
++                tracing_subscriber::registry().with(RuntimeSamplingLayer::new(fmt_layer));
++
++            tracing::subscriber::with_default(subscriber, || {
++                let agent = tracing::info_span!("agent_turn", turn = 1u64);
++                let _agent = agent.enter();
++                let sampling = tracing::info_span!(
++                    target: TARGET,
++                    "sampling_request",
++                    request_id = "req-test",
++                );
++                let _sampling = sampling.enter();
++                tracing::info!(
++                    target: TARGET,
++                    event = "request_body",
++                    backend = "responses",
++                    data = "{\"ok\":true}",
++                );
++            });
++
++            let written = String::from_utf8(buf.0.lock().expect("buf").clone()).expect("utf8");
++            assert!(
++                written.contains("request_body"),
++                "expected sampling event in log, got: {written}"
++            );
++            assert!(
++                !written.contains("\"spans\""),
++                "production layer must not emit spans list, got: {written}"
++            );
++        }
++
++        // Case 2: span list enabled + non-sampling parent (the old panic path).
++        {
++            let buf = Buf::default();
++            let fmt_layer = tracing_subscriber::fmt::layer()
++                .json()
++                .with_current_span(false)
++                .with_span_list(true)
++                .with_ansi(false)
++                .with_target(false)
++                .with_writer(buf.clone());
++            let subscriber =
++                tracing_subscriber::registry().with(RuntimeSamplingLayer::new(fmt_layer));
++
++            tracing::subscriber::with_default(subscriber, || {
++                let agent = tracing::info_span!("agent_turn", turn = 1u64);
++                let _agent = agent.enter();
++                tracing::info!(
++                    target: TARGET,
++                    event = "sse_chunk",
++                    data = "data: {}",
++                );
++            });
++
++            let written = String::from_utf8(buf.0.lock().expect("buf").clone()).expect("utf8");
++            assert!(
++                written.contains("sse_chunk"),
++                "expected sampling event with span list, got: {written}"
++            );
++        }
++
++        set_enabled(original);
 +    }
  }
 -- 

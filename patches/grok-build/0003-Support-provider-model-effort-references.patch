@@ -1,7 +1,7 @@
-From cd292f272148bd35cdafaf96e6b9d0298f8f538d Mon Sep 17 00:00:00 2001
+From 8725a0fabbf4c9c16d254abe716264343dc96879 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:00 +0800
-Subject: [PATCH 03/14] Support provider/model:effort references
+Subject: [PATCH 03/16] Support provider/model:effort references
 
 Parse provider-qualified model references and optional reasoning effort in both -m and /model. Split only the last colon after first trying the exact model id, preserving model ids that contain colons and all existing syntax.
 ---

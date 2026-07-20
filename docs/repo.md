@@ -112,10 +112,10 @@ replacement series before deleting old patch files.
 | [i0002](i0002_add_max_thinking.md) | `0005` | Distinct `max` reasoning level |
 | [i0003](i0003_add_anthropic-oauth.md) | `0006–0008` | Anthropic OAuth, Claude catalog, native `xhigh` |
 | [i0004](i0004_release-ci.md) | `0009–0010` | Cross-platform release CI and Windows portability |
-| [i0005](i0005_last-turn-stats.md) | `0011–0013`, `0016` | Raw sampling diagnostics, turn-end metrics, sampling-layer panic fix |
+| [i0005](i0005_last-turn-stats.md) | `0011–0013` | Raw sampling diagnostics (incl. sampling-layer panic fix), turn-end metrics |
 | [i0006](i0006_batch-file-edits.md) | `0014` | Atomic multi-edit search/replace for one file |
 | [i0007](i0007_codex-parallel-tools.md) | `0015` | Codex parallel tool-call wire + result ordering |
-| [i0008](i0008_mid-session-model-switch.md) | `0017` | Safe native reasoning replay across model/provider switches |
+| [i0008](i0008_mid-session-model-switch.md) | `0016` | Safe native reasoning replay across model/provider switches |
 
 ## Conventions
 
@@ -124,3 +124,9 @@ replacement series before deleting old patch files.
 - Number patches (`0001-...`, `0002-...`) so apply order is explicit.
 - If a patch stops applying cleanly, fix it and commit the updated patch —
   the patch files are the source of truth, not the checkouts.
+- A bug fix for code **introduced by an existing patch** is folded into that
+  patch, not appended as a new number: clean-room apply the series, reorder
+  and `fixup` with `git rebase -i` (merging the commit messages), re-export
+  the **full** series with `git format-patch`, and verify the resulting tree
+  hash (`git rev-parse HEAD^{tree}`) is unchanged. New numbers are reserved
+  for changes with independent scope or a new initiative.

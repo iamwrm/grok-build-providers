@@ -1,9 +1,9 @@
 # i0005: Last-prompt stats at turn end (cache read/write, TPS, cost)
 
-**Status:** implemented in consolidated patches `0011–0013` plus follow-up `0016` (sampling layer panic fix); raw-wire grounding and release-profile verification complete; user-guide patch deferred
+**Status:** implemented in consolidated patches `0011–0013` (the sampling-layer panic fix, formerly follow-up patch `0016`, is folded into `0011`); raw-wire grounding and release-profile verification complete; user-guide patch deferred
 **Upstreams:** `checkouts/pi` + `../piagent-config/packages/ren-public-package/0012-last-turn.ts` (reference), `checkouts/grok-build` (patch target)
-**Deliverable:** patches `0011–0013` and `0016`, continuing the i0001–i0004 stack
-**Implementation branch:** clean-room series based on `ba76b0a`; full tip `d8c0564`, tree `0a219b73e452c3ce19ea64cd7679dde3bf1e7a89`
+**Deliverable:** patches `0011–0013`, continuing the i0001–i0004 stack
+**Implementation branch:** clean-room series based on `ba76b0a`; current 16-patch series tree `dd6c4ce1ead5b4a91aae81f5f0699d0fa65dee7c`
 
 ## Goal
 
@@ -62,7 +62,10 @@ captured. Raw **requests** were not.
   calls/results, and responses. It is off by default and enabling prints an
   explicit warning; existing size trimming applies.
 
-### Patch 0016 — sampling JSON layer must not panic under agent parents
+#### Sampling JSON layer must not panic under agent parents
+
+(Originally shipped as follow-up patch `0016`; folded into patch `0011` when the
+series was consolidated to 16 patches.)
 
 Enabling `/debug sampling on` (or `--log-sampling`) then issuing a real
 request crashed the `acp-agent-worker` with:
@@ -211,7 +214,7 @@ all other unknown events remain fail-closed.
   final runtime gate verification passed sampler 2/2, shell ACP handler 2/2,
   pager `/debug` 8/8, focused pager dispatch/status 2/2, and dynamic callsite
   gating 1/1 in release profile.
-- Patch `0016`: telemetry `sampling_log` release tests 2/2 (runtime gate +
+- Panic-fix fold (formerly patch `0016`): telemetry `sampling_log` release tests 2/2 (runtime gate +
   non-sampling parent JSON regression); `cargo build -p xai-grok-pager-bin
   --release` relinks `target/release/xai-grok-pager` (mtime check required —
   rebuilding only `-p xai-grok-pager` leaves a stale binary).
@@ -231,3 +234,8 @@ all other unknown events remain fail-closed.
   `0a219b73e452c3ce19ea64cd7679dde3bf1e7a89` exactly matches the old 20-patch
   tree, and `CARGO_INCREMENTAL=0 cargo build --release --locked
   -p xai-grok-pager-bin` passes.
+- Fold clean-room: the panic fix was folded into patch `0011` via clean-room
+  interactive rebase; the resulting 16-patch series applies to `ba76b0a` with
+  `git am` and reproduces tree `dd6c4ce1ead5b4a91aae81f5f0699d0fa65dee7c` —
+  byte-identical to the previously verified 17-patch tree, so the recorded
+  release-profile test and build results carry over unchanged.
