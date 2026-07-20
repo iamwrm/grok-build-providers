@@ -1,182 +1,250 @@
-From 1397b637c95988df494702d2f543a1ac3d1967cc Mon Sep 17 00:00:00 2001
+From c61985f018855d67bc368c416c385d3ba751f969 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
-Date: Mon, 20 Jul 2026 20:53:38 +0800
-Subject: [PATCH] Strip foreign encrypted reasoning on mid-session model switch
+Date: Mon, 20 Jul 2026 21:03:02 +0800
+Subject: [PATCH] Fold foreign reasoning into assistant text on model switch
 
-Responses encrypted_content is model-bound. Replaying Grok rs_* blobs
-to Codex/OpenAI after /model switch caused 400 "could not be verified".
-
-Wire-time sanitize (pi-style same-model gate): when the following
-assistant's model_id differs from the request model, strip
-encrypted_content and drop encrypted-only items. History is unchanged
-so switching back still works.
+Stripping encrypted_content alone left rs_* ids on the wire; with
+store:false Codex returns 404 "Item not found". Drop typed foreign
+reasoning entirely and fold visible CoT into the following assistant
+(pi-style), same-model path unchanged.
 ---
- .../src/conversation.rs                       | 175 +++++++++++++++++-
- 1 file changed, 173 insertions(+), 2 deletions(-)
+ .../src/conversation.rs                       | 173 +++++++++++++-----
+ 1 file changed, 123 insertions(+), 50 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-index b7af318..62d7807 100644
+index 62d7807..4309dea 100644
 --- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
 +++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-@@ -2251,15 +2251,104 @@ impl From<&ConversationRequest> for rs::CreateResponse {
- /// Reasoning items are top-level siblings (not bundled into the assistant),
+@@ -2252,9 +2252,10 @@ impl From<&ConversationRequest> for rs::CreateResponse {
  /// so they appear inline in the same order the model originally emitted —
  /// which is what lets the server-side prefix KV-cache hit on repeat turns.
-+///
-+/// Foreign-model encrypted reasoning is dropped first (see
-+/// [`sanitize_reasoning_for_current_model`]) so mid-session model switches
-+/// do not replay `encrypted_content` the destination cannot decrypt.
+ ///
+-/// Foreign-model encrypted reasoning is dropped first (see
++/// Foreign-model reasoning is scrubbed first (see
+ /// [`sanitize_reasoning_for_current_model`]) so mid-session model switches
+-/// do not replay `encrypted_content` the destination cannot decrypt.
++/// do not replay `encrypted_content` or `rs_*` ids the destination cannot
++/// resolve under `store: false`.
  fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
--    let items: Vec<rs::InputItem> = req
--        .items
-+    let sanitized = sanitize_reasoning_for_current_model(&req.items, req.model.as_deref());
-+    let items: Vec<rs::InputItem> = sanitized
-         .iter()
-         .flat_map(conversation_item_to_input_items)
-         .collect();
+     let sanitized = sanitize_reasoning_for_current_model(&req.items, req.model.as_deref());
+     let items: Vec<rs::InputItem> = sanitized
+@@ -2264,15 +2265,6 @@ fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
      rs::InputParam::Items(items)
  }
  
-+/// Whether a reasoning item still carries anything the Responses API can
-+/// usefully accept after foreign encrypted blobs are removed.
-+fn reasoning_item_has_replayable_payload(r: &rs::ReasoningItem) -> bool {
-+    r.encrypted_content
-+        .as_ref()
-+        .is_some_and(|s| !s.is_empty())
-+        || !reasoning_item_text(r).trim().is_empty()
-+}
-+
-+/// Look ahead from a reasoning sibling to the assistant turn it belongs to
-+/// and return that turn's `model_id`.
+-/// Whether a reasoning item still carries anything the Responses API can
+-/// usefully accept after foreign encrypted blobs are removed.
+-fn reasoning_item_has_replayable_payload(r: &rs::ReasoningItem) -> bool {
+-    r.encrypted_content
+-        .as_ref()
+-        .is_some_and(|s| !s.is_empty())
+-        || !reasoning_item_text(r).trim().is_empty()
+-}
+-
+ /// Look ahead from a reasoning sibling to the assistant turn it belongs to
+ /// and return that turn's `model_id`.
+ ///
+@@ -2291,23 +2283,21 @@ fn source_model_for_reasoning_at(items: &[ConversationItem], idx: usize) -> Opti
+     None
+ }
+ 
+-/// True when encrypted reasoning from `source_model` may be replayed to
++/// True when reasoning from `source_model` may be replayed as a native
++/// Responses `reasoning` item (with `id` / `encrypted_content`) to
+ /// `current_model`. Matches pi's same-model gate: exact model id match.
+ ///
+-/// Unknown provenance (`source_model` / `current_model` missing) keeps
+-/// encrypted content so legacy sessions and synthetic assistants without a
+-/// stamped `model_id` still hit the KV-cache on the same backend.
+-fn encrypted_reasoning_compatible(
+-    source_model: Option<&str>,
+-    current_model: Option<&str>,
+-) -> bool {
++/// Unknown provenance (`source_model` / `current_model` missing) keeps the
++/// item intact so legacy sessions and synthetic assistants without a stamped
++/// `model_id` still hit the KV-cache on the same backend.
++fn reasoning_item_compatible(source_model: Option<&str>, current_model: Option<&str>) -> bool {
+     match (source_model, current_model) {
+         (Some(src), Some(cur)) => src == cur,
+         _ => true,
+     }
+ }
+ 
+-/// Drop or scrub foreign-model encrypted reasoning for a Responses request.
++/// Drop or scrub foreign-model reasoning for a Responses request.
+ ///
+ /// pi's `transformMessages` drops redacted / signed thinking unless
+ /// `assistant.provider + api + model` match the target model. We only stamp
+@@ -2315,37 +2305,79 @@ fn encrypted_reasoning_compatible(
+ /// enough to stop Grok `rs_*` / `encrypted_content` from being sent to
+ /// Codex/OpenAI (and vice versa) after a mid-session `/model` switch.
+ ///
++/// When models differ we must not emit a native `reasoning` item at all:
++/// 1. `encrypted_content` — foreign blobs fail decryption (HTTP 400)
++/// 2. `id` (`rs_…`) — with `store: false` the destination looks up the id
++///    and returns 404 "Item … not found. Items are not persisted"
 +///
-+/// Reasoning / backend-tool-call siblings sit immediately before their
-+/// assistant; a user/system message means the reasoning was orphaned.
-+fn source_model_for_reasoning_at(items: &[ConversationItem], idx: usize) -> Option<&str> {
-+    for item in items.iter().skip(idx + 1) {
-+        match item {
-+            ConversationItem::Assistant(a) => return a.model_id.as_deref(),
-+            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => continue,
-+            ConversationItem::System(_)
-+            | ConversationItem::User(_)
-+            | ConversationItem::ToolResult(_) => return None,
++/// Visible summary/content is folded into the following assistant text
++/// (pi converts foreign thinking blocks to plain `text`). Encrypted-only
++/// foreign items are dropped.
++///
+ /// Wire-time only: the on-disk / in-memory chat history is left intact so
+-/// switching *back* to the original model can still replay its encrypted
+-/// blobs.
++/// switching *back* to the original model can still replay its blobs.
+ fn sanitize_reasoning_for_current_model(
+     items: &[ConversationItem],
+     current_model: Option<&str>,
+ ) -> Vec<ConversationItem> {
+     let mut out = Vec::with_capacity(items.len());
++    let mut pending_foreign_text: Vec<String> = Vec::new();
++
++    let flush_foreign_text = |pending: &mut Vec<String>, assistant: &mut AssistantItem| {
++        if pending.is_empty() {
++            return;
 +        }
-+    }
-+    None
-+}
++        let prefix = pending.join("\n");
++        pending.clear();
++        if assistant.content.is_empty() {
++            assistant.content = Arc::<str>::from(prefix);
++        } else {
++            assistant.content =
++                Arc::<str>::from(format!("{prefix}\n\n{}", assistant.content.as_ref()));
++        }
++    };
 +
-+/// True when encrypted reasoning from `source_model` may be replayed to
-+/// `current_model`. Matches pi's same-model gate: exact model id match.
-+///
-+/// Unknown provenance (`source_model` / `current_model` missing) keeps
-+/// encrypted content so legacy sessions and synthetic assistants without a
-+/// stamped `model_id` still hit the KV-cache on the same backend.
-+fn encrypted_reasoning_compatible(
-+    source_model: Option<&str>,
-+    current_model: Option<&str>,
-+) -> bool {
-+    match (source_model, current_model) {
-+        (Some(src), Some(cur)) => src == cur,
-+        _ => true,
-+    }
-+}
-+
-+/// Drop or scrub foreign-model encrypted reasoning for a Responses request.
-+///
-+/// pi's `transformMessages` drops redacted / signed thinking unless
-+/// `assistant.provider + api + model` match the target model. We only stamp
-+/// `model_id` on assistants, so the gate is exact `model_id` equality —
-+/// enough to stop Grok `rs_*` / `encrypted_content` from being sent to
-+/// Codex/OpenAI (and vice versa) after a mid-session `/model` switch.
-+///
-+/// Wire-time only: the on-disk / in-memory chat history is left intact so
-+/// switching *back* to the original model can still replay its encrypted
-+/// blobs.
-+fn sanitize_reasoning_for_current_model(
-+    items: &[ConversationItem],
-+    current_model: Option<&str>,
-+) -> Vec<ConversationItem> {
-+    let mut out = Vec::with_capacity(items.len());
-+    for (idx, item) in items.iter().enumerate() {
-+        match item {
-+            ConversationItem::Reasoning(r) => {
-+                let source = source_model_for_reasoning_at(items, idx);
-+                if encrypted_reasoning_compatible(source, current_model)
-+                    || r.encrypted_content.is_none()
-+                {
-+                    out.push(item.clone());
-+                    continue;
-+                }
-+                // Foreign encrypted blob: strip it (like pi drops redacted
-+                // thinking). Keep summary/content text when present so the
-+                // destination still sees visible chain-of-thought; drop the
-+                // item entirely when only the opaque blob remained.
-+                let mut scrubbed = r.clone();
-+                scrubbed.encrypted_content = None;
-+                if reasoning_item_has_replayable_payload(&scrubbed) {
-+                    out.push(ConversationItem::Reasoning(scrubbed));
-+                }
+     for (idx, item) in items.iter().enumerate() {
+         match item {
+             ConversationItem::Reasoning(r) => {
+                 let source = source_model_for_reasoning_at(items, idx);
+-                if encrypted_reasoning_compatible(source, current_model)
+-                    || r.encrypted_content.is_none()
+-                {
++                if reasoning_item_compatible(source, current_model) {
+                     out.push(item.clone());
+                     continue;
+                 }
+-                // Foreign encrypted blob: strip it (like pi drops redacted
+-                // thinking). Keep summary/content text when present so the
+-                // destination still sees visible chain-of-thought; drop the
+-                // item entirely when only the opaque blob remained.
+-                let mut scrubbed = r.clone();
+-                scrubbed.encrypted_content = None;
+-                if reasoning_item_has_replayable_payload(&scrubbed) {
+-                    out.push(ConversationItem::Reasoning(scrubbed));
++                // Foreign: never emit typed reasoning. Keep visible CoT as
++                // text to prepend onto the following assistant (pi-style).
++                let text = reasoning_item_text(r);
++                if !text.trim().is_empty() {
++                    pending_foreign_text.push(text);
+                 }
+             }
+-            other => out.push(other.clone()),
++            ConversationItem::Assistant(a) => {
++                let mut a = a.clone();
++                flush_foreign_text(&mut pending_foreign_text, &mut a);
++                out.push(ConversationItem::Assistant(a));
 +            }
-+            other => out.push(other.clone()),
-+        }
++            ConversationItem::BackendToolCall(_) => {
++                // Stay between reasoning and assistant; do not flush yet.
++                out.push(item.clone());
++            }
++            other => {
++                // User/system/tool-result interrupts: orphan foreign text
++                // becomes a standalone assistant message so it is not lost,
++                // then the interrupting item follows.
++                if !pending_foreign_text.is_empty() {
++                    let text = pending_foreign_text.join("\n");
++                    pending_foreign_text.clear();
++                    out.push(ConversationItem::assistant(text));
++                }
++                out.push(other.clone());
++            }
+         }
+     }
++    if !pending_foreign_text.is_empty() {
++        let text = pending_foreign_text.join("\n");
++        out.push(ConversationItem::assistant(text));
 +    }
-+    out
-+}
-+
- /// Walk a serialized Responses API request body and inject the
- /// `type: "reasoning_text"` discriminator that the API requires on
- /// `reasoning.content[*]` items.
-@@ -9462,6 +9551,88 @@ mod tests {
+     out
+ }
+ 
+@@ -9551,9 +9583,9 @@ mod tests {
          assert_eq!(enc_seen, vec!["enc1", "enc2", "enc3"]);
      }
  
-+    /// Mid-session model switch (e.g. Grok → Codex): encrypted reasoning
-+    /// from the prior model must not be replayed. Matches pi's
-+    /// `transformMessages` same-model gate for redacted/signed thinking.
-+    #[test]
-+    fn build_responses_input_strips_foreign_encrypted_reasoning_on_model_switch() {
-+        let items = vec![
-+            ConversationItem::user("hi"),
-+            reasoning_sibling("rs_grok_1", "visible summary", Some("enc_from_grok")),
-+            ConversationItem::assistant_with_model("answer", "grok-4.5"),
-+            ConversationItem::user("switch models and continue"),
-+        ];
-+        let req = ConversationRequest::from_items(items).with_model("gpt-5.6-sol");
-+        let input = input_items_json(&req);
-+
-+        let reasoning: Vec<&serde_json::Value> = input
-+            .iter()
-+            .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
-+            .collect();
-+        assert_eq!(reasoning.len(), 1, "summary-bearing foreign reasoning kept");
-+        assert!(
-+            reasoning[0].get("encrypted_content").is_none()
-+                || reasoning[0]
-+                    .get("encrypted_content")
-+                    .is_some_and(|v| v.is_null()),
-+            "foreign encrypted_content must be stripped, got: {}",
-+            reasoning[0]
+-    /// Mid-session model switch (e.g. Grok → Codex): encrypted reasoning
+-    /// from the prior model must not be replayed. Matches pi's
+-    /// `transformMessages` same-model gate for redacted/signed thinking.
++    /// Mid-session model switch (e.g. Grok → Codex): foreign reasoning must
++    /// not appear as typed `reasoning` items (encrypted → 400; `rs_*` id
++    /// with `store: false` → 404). Visible CoT folds into assistant text.
+     #[test]
+     fn build_responses_input_strips_foreign_encrypted_reasoning_on_model_switch() {
+         let items = vec![
+@@ -9565,24 +9597,65 @@ mod tests {
+         let req = ConversationRequest::from_items(items).with_model("gpt-5.6-sol");
+         let input = input_items_json(&req);
+ 
+-        let reasoning: Vec<&serde_json::Value> = input
++        let reasoning_count = input
+             .iter()
+             .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
++            .count();
++        assert_eq!(
++            reasoning_count, 0,
++            "foreign reasoning must not be typed reasoning items"
 +        );
-+        // Visible summary survives so the new model still sees CoT text.
-+        let summary_text = reasoning[0]
-+            .pointer("/summary/0/text")
-+            .and_then(|v| v.as_str());
-+        assert_eq!(summary_text, Some("visible summary"));
++        // Visible summary folded into the assistant message text.
++        let assistant_texts: Vec<&str> = input
++            .iter()
++            .filter_map(|v| {
++                if v.get("role").and_then(|r| r.as_str()) == Some("assistant") {
++                    v.get("content").and_then(|c| c.as_str())
++                } else {
++                    None
++                }
++            })
+             .collect();
+-        assert_eq!(reasoning.len(), 1, "summary-bearing foreign reasoning kept");
+         assert!(
+-            reasoning[0].get("encrypted_content").is_none()
+-                || reasoning[0]
+-                    .get("encrypted_content")
+-                    .is_some_and(|v| v.is_null()),
+-            "foreign encrypted_content must be stripped, got: {}",
+-            reasoning[0]
++            assistant_texts
++                .iter()
++                .any(|t| t.contains("visible summary") && t.contains("answer")),
++            "foreign CoT text must fold into assistant content, got {assistant_texts:?}"
+         );
+-        // Visible summary survives so the new model still sees CoT text.
+-        let summary_text = reasoning[0]
+-            .pointer("/summary/0/text")
+-            .and_then(|v| v.as_str());
+-        assert_eq!(summary_text, Some("visible summary"));
++        assert!(
++            !serde_json::to_string(&input)
++                .unwrap()
++                .contains("rs_grok_1"),
++            "foreign rs_* id must not appear on the wire"
++        );
++        assert!(
++            !serde_json::to_string(&input)
++                .unwrap()
++                .contains("enc_from_grok"),
++            "foreign encrypted_content must not appear on the wire"
++        );
 +    }
 +
-+    /// Encrypted-only foreign reasoning (no user-visible summary) is dropped
-+    /// entirely — replaying an empty shell with a foreign `rs_*` id is
-+    /// useless and risks further pairing validation failures.
++    /// Foreign reasoning with only a summary (no encrypted blob) still must
++    /// not emit a typed reasoning item with an `rs_*` id.
 +    #[test]
-+    fn build_responses_input_drops_encrypted_only_foreign_reasoning() {
++    fn build_responses_input_clears_foreign_reasoning_id_without_encrypted() {
 +        let items = vec![
 +            ConversationItem::user("hi"),
-+            ConversationItem::Reasoning(rs::ReasoningItem {
-+                id: "rs_foreign_enc_only".into(),
-+                summary: vec![],
-+                content: None,
-+                encrypted_content: Some("enc_only_blob".into()),
-+                status: None,
-+            }),
++            reasoning_sibling("rs_foreign_summary_only", "just a summary", None),
 +            ConversationItem::assistant_with_model("answer", "grok-4.5"),
 +            ConversationItem::user("continue on gpt"),
 +        ];
@@ -186,34 +254,13 @@ index b7af318..62d7807 100644
 +            .iter()
 +            .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
 +            .count();
-+        assert_eq!(
-+            reasoning_count, 0,
-+            "encrypted-only foreign reasoning must be dropped"
-+        );
-+    }
-+
-+    /// Same model keeps encrypted_content byte-stable (KV-cache / CoT replay).
-+    #[test]
-+    fn build_responses_input_keeps_same_model_encrypted_reasoning() {
-+        let items = vec![
-+            ConversationItem::user("hi"),
-+            reasoning_sibling("rs_same", "think", Some("enc_keep")),
-+            ConversationItem::assistant_with_model("answer", "gpt-5.6-sol"),
-+            ConversationItem::user("again"),
-+        ];
-+        let req = ConversationRequest::from_items(items).with_model("gpt-5.6-sol");
-+        let input = input_items_json(&req);
-+        let enc = input
-+            .iter()
-+            .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
-+            .and_then(|v| v.get("encrypted_content"))
-+            .and_then(|v| v.as_str());
-+        assert_eq!(enc, Some("enc_keep"));
-+    }
-+
-     /// INVARIANT: prefix stability across turns without reasoning.
-     /// Context and instructions must be prefixed once and consistently
-     /// across requests.
++        assert_eq!(reasoning_count, 0);
++        let body = serde_json::to_string(&input).unwrap();
++        assert!(!body.contains("rs_foreign_summary_only"));
++        assert!(body.contains("just a summary"));
+     }
+ 
+     /// Encrypted-only foreign reasoning (no user-visible summary) is dropped
 -- 
 2.50.1 (Apple Git-155)
 

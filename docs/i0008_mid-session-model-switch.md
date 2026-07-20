@@ -52,11 +52,16 @@ In `xai-grok-sampling-types` `build_responses_input`:
 1. Associate each `ConversationItem::Reasoning` with the following
    `AssistantItem.model_id` (skipping sibling reasoning / backend tool calls).
 2. If `source_model_id == current_request.model` (or either side is unknown,
-   for legacy sessions without a stamped model id): pass through unchanged.
-3. If models **differ** and the item has `encrypted_content`:
-   - Strip `encrypted_content`
-   - Keep the item when summary/content text remains (visible CoT for the new model)
-   - Drop the item when only the opaque blob remained
+   for legacy sessions without a stamped model id): pass through unchanged
+   (native `reasoning` item with `id` + `encrypted_content`).
+3. If models **differ**:
+   - Do **not** emit a typed `reasoning` item at all
+     - foreign `encrypted_content` → HTTP 400 decrypt failure
+     - foreign `rs_*` `id` with `store: false` → HTTP 404
+       `"Item … not found. Items are not persisted"`
+   - Fold visible summary/content into the following assistant text
+     (pi converts foreign thinking blocks to plain `text`)
+   - Drop encrypted-only foreign items
 
 On-disk / in-memory chat history is not mutated.
 
