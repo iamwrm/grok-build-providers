@@ -1,0 +1,766 @@
+From 745fe029598bd57e4ab477bd3bd8539dc95dbe31 Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 19:13:11 +0800
+Subject: [PATCH] Improve Codex parallel tool-call handling
+
+Force parallel_tool_calls on Responses/Codex requests, preserve
+Responses function-call item ids as call_id|fc_id for history replay,
+and commit local tool results in assistant source order while tools
+still execute concurrently.
+---
+ crates/codegen/xai-grok-sampler/src/client.rs |  10 +-
+ .../xai-grok-sampler/src/stream/responses.rs  |   5 +-
+ .../src/conversation.rs                       | 122 ++++-
+ .../session/acp_session_impl/tool_calls.rs    | 430 +++++++++---------
+ 4 files changed, 340 insertions(+), 227 deletions(-)
+
+diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
+index 5132b0f..ed577ca 100644
+--- a/crates/codegen/xai-grok-sampler/src/client.rs
++++ b/crates/codegen/xai-grok-sampler/src/client.rs
+@@ -456,6 +456,12 @@ fn apply_chatgpt_codex_request_shape(body: &mut serde_json::Value) {
+     }
+ 
+     obj.insert("store".to_string(), serde_json::Value::Bool(false));
++    // Explicit multi-function-call permission (pi sets this on every Codex
++    // request). Omission can cause some deployments to emit only one tool call.
++    obj.insert(
++        "parallel_tool_calls".to_string(),
++        serde_json::Value::Bool(true),
++    );
+     if let Some(reasoning) = obj.get_mut("reasoning").and_then(|v| v.as_object_mut()) {
+         reasoning.insert(
+             "summary".to_string(),
+@@ -3074,6 +3080,7 @@ mod tests {
+         apply_chatgpt_codex_request_shape(&mut body);
+         assert_eq!(body["instructions"], "You are a helpful assistant.");
+         assert_eq!(body["store"], false);
++        assert_eq!(body["parallel_tool_calls"], true);
+ 
+         let mut body = serde_json::json!({
+             "input": [
+@@ -3094,8 +3101,7 @@ mod tests {
+     #[test]
+     fn anthropic_oauth_shape_prepends_identity_and_strips_sampling_params() {
+         use xai_grok_sampling_types::messages::{
+-            CacheControl, MessagesRequest, SystemParam, TextBlock, ThinkingConfig,
+-            ThinkingDisplay,
++            CacheControl, MessagesRequest, SystemParam, TextBlock, ThinkingConfig, ThinkingDisplay,
+         };
+ 
+         let mut request = MessagesRequest {
+diff --git a/crates/codegen/xai-grok-sampler/src/stream/responses.rs b/crates/codegen/xai-grok-sampler/src/stream/responses.rs
+index ec5a650..1433d26 100644
+--- a/crates/codegen/xai-grok-sampler/src/stream/responses.rs
++++ b/crates/codegen/xai-grok-sampler/src/stream/responses.rs
+@@ -617,7 +617,10 @@ fn inject_streaming_tool_fallback(
+     let tool_calls: Vec<ToolCall> = streamed
+         .into_values()
+         .map(|call| ToolCall {
+-            id: Arc::from(call.call_id),
++            id: Arc::from(xai_grok_sampling_types::encode_responses_tool_call_id(
++                &call.call_id,
++                call.id.as_deref(),
++            )),
+             name: call.name,
+             arguments: Arc::from(call.arguments),
+         })
+diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
+index ac4fb43..b7af318 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
+@@ -455,7 +455,13 @@ impl ReasoningContent {
+ /// A tool call made by the assistant that the client must execute locally.
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct ToolCall {
+-    /// Unique identifier for this tool call
++    /// Unique identifier for this tool call.
++    ///
++    /// For OpenAI Responses/Codex turns this may be compound
++    /// `call_id|item_id` (e.g. `call_abc|fc_xyz`) so history can replay both
++    /// the pairing id and the Responses item id. Use
++    /// [`responses_tool_call_parts`] when emitting wire FunctionCall /
++    /// FunctionCallOutput items.
+     pub id: Arc<str>,
+     /// Name of the function to call
+     pub name: String,
+@@ -463,6 +469,28 @@ pub struct ToolCall {
+     pub arguments: Arc<str>,
+ }
+ 
++/// Build a Responses-compatible tool-call id, preserving the item id when
++/// present (pi-style `call_id|fc_id`).
++pub fn encode_responses_tool_call_id(call_id: &str, item_id: Option<&str>) -> String {
++    match item_id.map(str::trim).filter(|id| !id.is_empty()) {
++        Some(item_id) => format!("{call_id}|{item_id}"),
++        None => call_id.to_owned(),
++    }
++}
++
++/// Split a stored tool-call id into `(call_id, optional item_id)`.
++///
++/// Plain `call_…` ids (Chat Completions, legacy sessions) return
++/// `(id, None)`. Compound Responses ids return both parts.
++pub fn responses_tool_call_parts(id: &str) -> (&str, Option<&str>) {
++    match id.split_once('|') {
++        Some((call_id, item_id)) if !call_id.is_empty() && !item_id.is_empty() => {
++            (call_id, Some(item_id))
++        }
++        _ => (id, None),
++    }
++}
++
+ /// Tool/function definition for the model
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct ToolSpec {
+@@ -1771,8 +1799,10 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
+                 .into_iter()
+                 .map(|tc| {
+                     let arguments = sanitize_tool_arguments(&tc.id, &tc.name, tc.arguments.clone());
++                    // Chat Completions only understands the call_id half.
++                    let (call_id, _) = responses_tool_call_parts(tc.id.as_ref());
+                     ToolCallRequest::function(tc.name, arguments.as_ref().to_owned())
+-                        .with_id(tc.id.as_ref().to_owned())
++                        .with_id(call_id.to_owned())
+                 })
+                 .collect();
+ 
+@@ -1792,8 +1822,9 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
+             }
+         }
+         ConversationItem::ToolResult(t) => {
++            let (call_id, _) = responses_tool_call_parts(&t.tool_call_id);
+             if t.images.is_empty() {
+-                ChatRequestMessage::tool(t.tool_call_id, t.content.as_ref().to_owned())
++                ChatRequestMessage::tool(call_id.to_owned(), t.content.as_ref().to_owned())
+             } else {
+                 let mut blocks = vec![ChatContentBlock::Text {
+                     text: t.content.as_ref().to_owned(),
+@@ -1812,7 +1843,7 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
+                     content: MessageContent::Blocks(blocks),
+                     name: None,
+                     tool_calls: Vec::new(),
+-                    tool_call_id: Some(t.tool_call_id),
++                    tool_call_id: Some(call_id.to_owned()),
+                     model_id: None,
+                     reasoning_content: None,
+                 }
+@@ -2002,8 +2033,13 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
+                 // Assistant item — they are NOT separate siblings because
+                 // their lifecycle is tied to the assistant turn (a
+                 // ToolResult must follow each one in conversation order).
++                // Preserve Responses item ids (`fc_…`) for Codex history
++                // replay / reasoning pairing (pi-style `call_id|item_id`).
+                 tool_calls.push(ToolCall {
+-                    id: Arc::<str>::from(fc.call_id),
++                    id: Arc::<str>::from(encode_responses_tool_call_id(
++                        &fc.call_id,
++                        fc.id.as_deref(),
++                    )),
+                     name: fc.name,
+                     arguments: Arc::<str>::from(fc.arguments),
+                 });
+@@ -2180,7 +2216,10 @@ impl From<&ConversationRequest> for rs::CreateResponse {
+             max_tool_calls: None,
+             metadata: None,
+             model: req.model.clone(),
+-            parallel_tool_calls: None,
++            // Allow multi-function-call turns. OpenAI/xAI Responses default
++            // may already permit this; setting it explicitly matches pi and
++            // avoids backends that treat omission as "single tool only".
++            parallel_tool_calls: Some(true),
+             previous_response_id: None,
+             prompt: None,
+             prompt_cache_key: None,
+@@ -2328,10 +2367,7 @@ pub fn sanitize_unknown_reasoning_effort(response: &mut serde_json::Value) {
+             serde_json::Value::String(effort),
+         );
+     }
+-    if let Some(e) = obj
+-        .get_mut("reasoning")
+-        .and_then(|r| r.get_mut("effort"))
+-    {
++    if let Some(e) = obj.get_mut("reasoning").and_then(|r| r.get_mut("effort")) {
+         *e = serde_json::Value::String("xhigh".to_string());
+     }
+ }
+@@ -2383,12 +2419,13 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
+             // Add each tool call as a FunctionCall item
+             for tc in &a.tool_calls {
+                 let arguments = sanitize_tool_arguments(&tc.id, &tc.name, tc.arguments.clone());
++                let (call_id, item_id) = responses_tool_call_parts(tc.id.as_ref());
+                 items.push(rs::InputItem::Item(rs::Item::FunctionCall(
+                     rs::FunctionToolCall {
+-                        call_id: tc.id.as_ref().to_owned(),
++                        call_id: call_id.to_owned(),
+                         name: tc.name.clone(),
+                         arguments: arguments.as_ref().to_owned(),
+-                        id: None,
++                        id: item_id.map(str::to_owned),
+                         status: None,
+                     },
+                 )));
+@@ -2417,9 +2454,12 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
+                 }
+                 rs::FunctionCallOutput::Content(parts)
+             };
++            // Wire FunctionCallOutput pairs on `call_id` only; strip any
++            // compound Responses item id stored for history fidelity.
++            let (call_id, _) = responses_tool_call_parts(&t.tool_call_id);
+             vec![rs::InputItem::Item(rs::Item::FunctionCallOutput(
+                 rs::FunctionCallOutputItemParam {
+-                    call_id: t.tool_call_id.clone(),
++                    call_id: call_id.to_owned(),
+                     output,
+                     id: None,
+                     status: None,
+@@ -3227,8 +3267,10 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+                 for tc in &a.tool_calls {
+                     let input =
+                         serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
++                    // Anthropic pairs tool_use/tool_result on call_id only.
++                    let (call_id, _) = responses_tool_call_parts(tc.id.as_ref());
+                     pending_assistant.push(ContentBlock::ToolUse {
+-                        id: sanitize_tool_call_id(&tc.id),
++                        id: sanitize_tool_call_id(call_id),
+                         name: tc.name.clone(),
+                         input,
+                     });
+@@ -3266,8 +3308,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+                     }
+                     ToolResultContent::Blocks(blocks)
+                 };
++                let (call_id, _) = responses_tool_call_parts(&t.tool_call_id);
+                 pending_tool_results.push(ContentBlock::ToolResult {
+-                    tool_use_id: sanitize_tool_call_id(&t.tool_call_id),
++                    tool_use_id: sanitize_tool_call_id(call_id),
+                     content,
+                     cache_control: None,
+                 });
+@@ -4007,7 +4050,7 @@ mod tests {
+                 arguments: r#"{"path": "/bar.txt"}"#.to_string(),
+                 call_id: "call_789".to_string(),
+                 name: "read_file".to_string(),
+-                id: None,
++                id: Some("fc_item_789".to_string()),
+                 status: None,
+             })],
+             parallel_tool_calls: None,
+@@ -4038,10 +4081,55 @@ mod tests {
+             panic!("Expected Assistant item");
+         };
+         assert_eq!(a.tool_calls.len(), 1);
+-        assert_eq!(a.tool_calls[0].id.as_ref(), "call_789");
++        assert_eq!(a.tool_calls[0].id.as_ref(), "call_789|fc_item_789");
+         assert_eq!(a.tool_calls[0].name, "read_file");
+     }
+ 
++    #[test]
++    fn responses_tool_call_id_round_trips_item_id_and_output_uses_call_id() {
++        let assistant = ConversationItem::assistant_tool_calls(vec![ToolCall {
++            id: Arc::from("call_abc|fc_xyz"),
++            name: "read_file".into(),
++            arguments: Arc::from(r#"{"path":"a.rs"}"#),
++        }]);
++        let result = ConversationItem::tool_result("call_abc|fc_xyz", "ok");
++        let req =
++            ConversationRequest::from_items(vec![ConversationItem::user("hi"), assistant, result]);
++        let resp: rs::CreateResponse = (&req).into();
++        assert_eq!(resp.parallel_tool_calls, Some(true));
++        let rs::InputParam::Items(items) = resp.input else {
++            panic!("expected items input");
++        };
++        let fc = items.iter().find_map(|item| match item {
++            rs::InputItem::Item(rs::Item::FunctionCall(fc)) => Some(fc),
++            _ => None,
++        });
++        let fc = fc.expect("function call");
++        assert_eq!(fc.call_id, "call_abc");
++        assert_eq!(fc.id.as_deref(), Some("fc_xyz"));
++        let fco = items.iter().find_map(|item| match item {
++            rs::InputItem::Item(rs::Item::FunctionCallOutput(fco)) => Some(fco),
++            _ => None,
++        });
++        let fco = fco.expect("function call output");
++        assert_eq!(fco.call_id, "call_abc");
++        assert!(fco.id.is_none());
++    }
++
++    #[test]
++    fn encode_and_split_responses_tool_call_ids() {
++        assert_eq!(
++            encode_responses_tool_call_id("call_1", Some("fc_2")),
++            "call_1|fc_2"
++        );
++        assert_eq!(encode_responses_tool_call_id("call_1", None), "call_1");
++        assert_eq!(
++            responses_tool_call_parts("call_1|fc_2"),
++            ("call_1", Some("fc_2"))
++        );
++        assert_eq!(responses_tool_call_parts("call_1"), ("call_1", None));
++    }
++
+     /// `response.reasoning.effort` (echoed by the server) is stamped on the
+     /// trailing Assistant item beside `model_id`/`model_fingerprint`, and
+     /// round-trips through the persisted JSON.
+diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
+index d7d91c7..4a3d7ab 100644
+--- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
++++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
+@@ -489,230 +489,246 @@ impl SessionActor {
+             }
+         });
+         let _drainer_guard = crate::util::AbortOnDrop(drainer);
+-        while let Some((idx, mut result)) = dispatch_rx.recv().await {
+-            let prepared = approved_slots[idx]
+-                .take()
+-                .expect("dispatch index should match an approved slot exactly once");
+-            self.signals_handle().record_tool_call(&prepared.tool_name);
+-            let tool_start = self.events.tool_started(prepared.tool_name.clone());
+-            let mut post_tool_use_result: Option<serde_json::Value> = None;
+-            if let Some((server, _)) =
+-                crate::session::mcp_servers::parse_mcp_tool_name(&prepared.tool_name)
+-                && server.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
+-            {
+-                let auth_rejected = match &result {
+-                    Err(err) => xai_grok_mcp::servers::is_auth_rejection_message(&err.to_string()),
++        // Tools still run concurrently, but conversation history / tool
++        // results must be committed in assistant source order (pi parallel
++        // contract). Buffer out-of-order completions until the next index.
++        let mut next_source_idx = 0usize;
++        let mut pending_results: std::collections::HashMap<
++            usize,
++            Result<ToolRunResult, xai_tool_runtime::ToolError>,
++        > = std::collections::HashMap::new();
++        while let Some((idx, result)) = dispatch_rx.recv().await {
++            pending_results.insert(idx, result);
++            while let Some(mut result) = pending_results.remove(&next_source_idx) {
++                let prepared = approved_slots[next_source_idx]
++                    .take()
++                    .expect("dispatch index should match an approved slot exactly once");
++                self.signals_handle().record_tool_call(&prepared.tool_name);
++                let tool_start = self.events.tool_started(prepared.tool_name.clone());
++                let mut post_tool_use_result: Option<serde_json::Value> = None;
++                if let Some((server, _)) =
++                    crate::session::mcp_servers::parse_mcp_tool_name(&prepared.tool_name)
++                    && server.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
++                {
++                    let auth_rejected = match &result {
++                        Err(err) => {
++                            xai_grok_mcp::servers::is_auth_rejection_message(&err.to_string())
++                        }
++                        Ok(tool_result) => {
++                            tool_result.output.is_error()
++                                && xai_grok_mcp::servers::is_auth_rejection_message(
++                                    &tool_result.prompt_text,
++                                )
++                        }
++                    };
++                    if auth_rejected && self.reactive_managed_reauth(&server).await.is_ok() {
++                        result =
++                            dispatch_tool(&self.workspace_ops, &prepared, &self.session_info.id.0)
++                                .await;
++                    }
++                }
++                let tool_result_size_bytes = match &result {
++                    Ok(tool_result) => tool_result.prompt_text.len() as i64,
++                    Err(_) => 0,
++                };
++                let tool_failed = match &result {
++                    Ok(tool_result) => tool_result.output.is_error(),
++                    Err(_) => true,
++                };
++                let tool_loop = match result {
+                     Ok(tool_result) => {
+-                        tool_result.output.is_error()
+-                            && xai_grok_mcp::servers::is_auth_rejection_message(
+-                                &tool_result.prompt_text,
++                        let effective_tool_name = tool_result
++                            .effective_tool_name
++                            .clone()
++                            .or_else(|| prepared.dispatch_target_name.clone())
++                            .unwrap_or_else(|| prepared.tool_name.clone());
++                        post_tool_use_result = self
++                            .hook_event_active(xai_grok_hooks::event::HookEventName::PostToolUse)
++                            .then(|| {
++                                serde_json::to_value(&tool_result.output)
++                                    .unwrap_or(serde_json::Value::Null)
++                            });
++                        let followups = self
++                            .handle_bridge_tool_success(
++                                &prepared.tool_call_id,
++                                &prepared.call_id,
++                                &prepared.tool_name,
++                                &effective_tool_name,
++                                tool_result,
++                                prepared.concatenated_json_count,
++                                &prepared.model_id,
++                                &prepared.parsed_args,
+                             )
++                            .await?;
++                        deferred_followups.extend(followups);
++                        if prepared.tool_name == "search_tool" {
++                            let pi = self.chat_state_handle.get_prompt_index().await as i64;
++                            self.last_search_prompt_index
++                                .store(pi, std::sync::atomic::Ordering::Relaxed);
++                        }
++                        ToolLoop::Continue
++                    }
++                    Err(err) => {
++                        let err: anyhow::Error = err.into();
++                        let err_followups = self
++                            .handle_tool_error(
++                                &prepared.tool_call_id,
++                                &prepared.call_id,
++                                &prepared.tool_name,
++                                prepared.dispatch_target_name.as_deref(),
++                                &err,
++                                &prepared.model_id,
++                            )
++                            .await;
++                        deferred_followups.extend(err_followups);
++                        if self.hook_event_active(
++                            xai_grok_hooks::event::HookEventName::PostToolUseFailure,
++                        ) {
++                            let raw_input: serde_json::Value =
++                                serde_json::from_str(&prepared.raw_arguments)
++                                    .unwrap_or(serde_json::Value::Null);
++                            let (tool_input_value, tool_input_truncated) =
++                                xai_grok_hooks::event::truncate_payload(raw_input);
++                            let hook_tool_name = prepared.hook_tool_name();
++                            self.dispatch_hook(
++                                xai_grok_hooks::event::HookEventName::PostToolUseFailure,
++                                xai_grok_hooks::event::HookPayload::PostToolUseFailure {
++                                    tool_name: hook_tool_name.to_owned(),
++                                    tool_use_id: prepared.call_id.clone(),
++                                    tool_input: tool_input_value,
++                                    tool_input_truncated,
++                                    error: format!("{err:#}"),
++                                    subagent_type: self.subagent_type_label(),
++                                },
++                                None,
++                                Some(hook_tool_name),
++                            )
++                            .await;
++                        }
++                        ToolLoop::Continue
+                     }
+                 };
+-                if auth_rejected && self.reactive_managed_reauth(&server).await.is_ok() {
+-                    result = dispatch_tool(&self.workspace_ops, &prepared, &self.session_info.id.0)
+-                        .await;
+-                }
+-            }
+-            let tool_result_size_bytes = match &result {
+-                Ok(tool_result) => tool_result.prompt_text.len() as i64,
+-                Err(_) => 0,
+-            };
+-            let tool_failed = match &result {
+-                Ok(tool_result) => tool_result.output.is_error(),
+-                Err(_) => true,
+-            };
+-            let tool_loop = match result {
+-                Ok(tool_result) => {
+-                    let effective_tool_name = tool_result
+-                        .effective_tool_name
+-                        .clone()
+-                        .or_else(|| prepared.dispatch_target_name.clone())
+-                        .unwrap_or_else(|| prepared.tool_name.clone());
+-                    post_tool_use_result = self
+-                        .hook_event_active(xai_grok_hooks::event::HookEventName::PostToolUse)
+-                        .then(|| {
+-                            serde_json::to_value(&tool_result.output)
+-                                .unwrap_or(serde_json::Value::Null)
+-                        });
+-                    let followups = self
+-                        .handle_bridge_tool_success(
+-                            &prepared.tool_call_id,
+-                            &prepared.call_id,
+-                            &prepared.tool_name,
+-                            &effective_tool_name,
+-                            tool_result,
+-                            prepared.concatenated_json_count,
+-                            &prepared.model_id,
+-                            &prepared.parsed_args,
+-                        )
+-                        .await?;
+-                    deferred_followups.extend(followups);
+-                    if prepared.tool_name == "search_tool" {
+-                        let pi = self.chat_state_handle.get_prompt_index().await as i64;
+-                        self.last_search_prompt_index
+-                            .store(pi, std::sync::atomic::Ordering::Relaxed);
++                {
++                    let bridge = self.agent.borrow().tool_bridge().clone();
++                    if let Some(effects) = bridge.apply_pending_skill_update().await {
++                        if let Some(item) = self.wrap_skill_reminder(&effects) {
++                            deferred_followups.push(item);
++                        }
++                        if effects.send_available_commands {
++                            self.send_available_commands_update().await;
++                        }
+                     }
+-                    ToolLoop::Continue
+                 }
+-                Err(err) => {
+-                    let err: anyhow::Error = err.into();
+-                    let err_followups = self
+-                        .handle_tool_error(
+-                            &prepared.tool_call_id,
+-                            &prepared.call_id,
+-                            &prepared.tool_name,
+-                            prepared.dispatch_target_name.as_deref(),
+-                            &err,
+-                            &prepared.model_id,
+-                        )
+-                        .await;
+-                    deferred_followups.extend(err_followups);
+-                    if self
+-                        .hook_event_active(xai_grok_hooks::event::HookEventName::PostToolUseFailure)
+-                    {
+-                        let raw_input: serde_json::Value =
+-                            serde_json::from_str(&prepared.raw_arguments)
+-                                .unwrap_or(serde_json::Value::Null);
+-                        let (tool_input_value, tool_input_truncated) =
+-                            xai_grok_hooks::event::truncate_payload(raw_input);
+-                        let hook_tool_name = prepared.hook_tool_name();
+-                        self.dispatch_hook(
+-                            xai_grok_hooks::event::HookEventName::PostToolUseFailure,
+-                            xai_grok_hooks::event::HookPayload::PostToolUseFailure {
+-                                tool_name: hook_tool_name.to_owned(),
+-                                tool_use_id: prepared.call_id.clone(),
+-                                tool_input: tool_input_value,
+-                                tool_input_truncated,
+-                                error: format!("{err:#}"),
+-                                subagent_type: self.subagent_type_label(),
+-                            },
+-                            None,
+-                            Some(hook_tool_name),
+-                        )
+-                        .await;
+-                    }
+-                    ToolLoop::Continue
++                if let Some(tool_result_value) = post_tool_use_result {
++                    let raw_input: serde_json::Value =
++                        serde_json::from_str(&prepared.raw_arguments)
++                            .unwrap_or(serde_json::Value::Null);
++                    let (tool_input_value, tool_input_truncated) =
++                        xai_grok_hooks::event::truncate_payload(raw_input);
++                    let (tool_result_val, tool_result_truncated) =
++                        xai_grok_hooks::event::truncate_payload(tool_result_value);
++                    let hook_tool_name = prepared.hook_tool_name();
++                    self.dispatch_hook(
++                        xai_grok_hooks::event::HookEventName::PostToolUse,
++                        xai_grok_hooks::event::HookPayload::PostToolUse {
++                            tool_name: hook_tool_name.to_owned(),
++                            tool_use_id: prepared.call_id.clone(),
++                            tool_input: tool_input_value,
++                            tool_result: tool_result_val,
++                            tool_input_truncated,
++                            tool_result_truncated,
++                            duration_ms: None,
++                            is_backgrounded: false,
++                            subagent_type: self.subagent_type_label(),
++                        },
++                        None,
++                        Some(hook_tool_name),
++                    )
++                    .await;
+                 }
+-            };
+-            {
+-                let bridge = self.agent.borrow().tool_bridge().clone();
+-                if let Some(effects) = bridge.apply_pending_skill_update().await {
+-                    if let Some(item) = self.wrap_skill_reminder(&effects) {
+-                        deferred_followups.push(item);
++                self.events.tool_finished();
++                let tool_outcome = match &tool_loop {
++                    _ if tool_failed => crate::session::events::ToolOutcome::Error,
++                    ToolLoop::Continue => crate::session::events::ToolOutcome::Success,
++                    ToolLoop::PermissionReject { .. } => {
++                        crate::session::events::ToolOutcome::PermissionRejected
+                     }
+-                    if effects.send_available_commands {
+-                        self.send_available_commands_update().await;
++                    ToolLoop::Cancelled => crate::session::events::ToolOutcome::PermissionCancelled,
++                    ToolLoop::FollowupMessage(_) => crate::session::events::ToolOutcome::Followup,
++                    ToolLoop::HookDenied { .. } => crate::session::events::ToolOutcome::HookDenied,
++                    ToolLoop::NonExistingTool | ToolLoop::ToolParsingError => {
++                        crate::session::events::ToolOutcome::InvalidTool
+                     }
+-                }
+-            }
+-            if let Some(tool_result_value) = post_tool_use_result {
+-                let raw_input: serde_json::Value = serde_json::from_str(&prepared.raw_arguments)
+-                    .unwrap_or(serde_json::Value::Null);
+-                let (tool_input_value, tool_input_truncated) =
+-                    xai_grok_hooks::event::truncate_payload(raw_input);
+-                let (tool_result_val, tool_result_truncated) =
+-                    xai_grok_hooks::event::truncate_payload(tool_result_value);
+-                let hook_tool_name = prepared.hook_tool_name();
+-                self.dispatch_hook(
+-                    xai_grok_hooks::event::HookEventName::PostToolUse,
+-                    xai_grok_hooks::event::HookPayload::PostToolUse {
+-                        tool_name: hook_tool_name.to_owned(),
+-                        tool_use_id: prepared.call_id.clone(),
+-                        tool_input: tool_input_value,
+-                        tool_result: tool_result_val,
+-                        tool_input_truncated,
+-                        tool_result_truncated,
+-                        duration_ms: None,
+-                        is_backgrounded: false,
+-                        subagent_type: self.subagent_type_label(),
+-                    },
+-                    None,
+-                    Some(hook_tool_name),
+-                )
+-                .await;
+-            }
+-            self.events.tool_finished();
+-            let tool_outcome = match &tool_loop {
+-                _ if tool_failed => crate::session::events::ToolOutcome::Error,
+-                ToolLoop::Continue => crate::session::events::ToolOutcome::Success,
+-                ToolLoop::PermissionReject { .. } => {
+-                    crate::session::events::ToolOutcome::PermissionRejected
+-                }
+-                ToolLoop::Cancelled => crate::session::events::ToolOutcome::PermissionCancelled,
+-                ToolLoop::FollowupMessage(_) => crate::session::events::ToolOutcome::Followup,
+-                ToolLoop::HookDenied { .. } => crate::session::events::ToolOutcome::HookDenied,
+-                ToolLoop::NonExistingTool | ToolLoop::ToolParsingError => {
+-                    crate::session::events::ToolOutcome::InvalidTool
+-                }
+-            };
+-            let duration_ms = tool_start.elapsed().as_millis() as u64;
+-            self.signals_handle()
+-                .record_tool_duration(&prepared.tool_name, duration_ms);
+-            self.emit_event(crate::session::events::Event::ToolCompleted {
+-                tool_name: prepared.tool_name.clone(),
+-                duration_ms,
+-                outcome: tool_outcome,
+-            });
+-            self.observability_bridge
+-                .emit(
+-                    xai_tool_protocol::session_event::SessionEvent::ToolCallCompleted {
+-                        tool_call_id: prepared.call_id.clone(),
++                };
++                let duration_ms = tool_start.elapsed().as_millis() as u64;
++                self.signals_handle()
++                    .record_tool_duration(&prepared.tool_name, duration_ms);
++                self.emit_event(crate::session::events::Event::ToolCompleted {
++                    tool_name: prepared.tool_name.clone(),
++                    duration_ms,
++                    outcome: tool_outcome,
++                });
++                self.observability_bridge
++                    .emit(
++                        xai_tool_protocol::session_event::SessionEvent::ToolCallCompleted {
++                            tool_call_id: prepared.call_id.clone(),
++                            tool_name: prepared.tool_name.clone(),
++                            duration_ms,
++                            outcome: map_tool_outcome(tool_outcome),
++                        },
++                    )
++                    .await;
++                let (ext_file_path, ext_parameters) = if xai_grok_telemetry::external::is_active() {
++                    let parsed: Option<serde_json::Value> =
++                        serde_json::from_str(&prepared.raw_arguments).ok();
++                    let file_path = parsed.as_ref().and_then(|v| {
++                        ["file_path", "target_file", "filePath", "path"]
++                            .iter()
++                            .find_map(|k| v.get(*k).and_then(|p| p.as_str()))
++                            .map(str::to_owned)
++                    });
++                    (file_path, parsed)
++                } else {
++                    (None, None)
++                };
++                xai_grok_telemetry::session_ctx::log_event(
++                    xai_grok_telemetry::events::ToolCallCompleted {
+                         tool_name: prepared.tool_name.clone(),
++                        outcome: tool_outcome,
+                         duration_ms,
+-                        outcome: map_tool_outcome(tool_outcome),
++                        file_path: ext_file_path,
++                        parameters: ext_parameters,
+                     },
+-                )
+-                .await;
+-            let (ext_file_path, ext_parameters) = if xai_grok_telemetry::external::is_active() {
+-                let parsed: Option<serde_json::Value> =
+-                    serde_json::from_str(&prepared.raw_arguments).ok();
+-                let file_path = parsed.as_ref().and_then(|v| {
+-                    ["file_path", "target_file", "filePath", "path"]
+-                        .iter()
+-                        .find_map(|k| v.get(*k).and_then(|p| p.as_str()))
+-                        .map(str::to_owned)
+-                });
+-                (file_path, parsed)
+-            } else {
+-                (None, None)
+-            };
+-            xai_grok_telemetry::session_ctx::log_event(
+-                xai_grok_telemetry::events::ToolCallCompleted {
+-                    tool_name: prepared.tool_name.clone(),
+-                    outcome: tool_outcome,
+-                    duration_ms,
+-                    file_path: ext_file_path,
+-                    parameters: ext_parameters,
+-                },
+-            );
+-            tracing::info_span!(
+-                "tool.execution", tool_name = % prepared.tool_name, tool_use_id = %
+-                prepared.call_id, tool_input_size_bytes = prepared.raw_arguments.len() as
+-                i64, tool_result_size_bytes = tool_result_size_bytes, success =
+-                matches!(tool_outcome, crate ::session::events::ToolOutcome::Success),
+-                outcome = <&'static str >::from(tool_outcome),
+-            )
+-            .in_scope(|| {});
+-            if let Some(artifact) = compaction_artifact_read(&prepared.parsed_args) {
++                );
+                 tracing::info_span!(
+-                    "compaction.segment_read", session_id = % self.session_info.id.0,
+-                    tool_name = % prepared.tool_name, artifact = % artifact,
+-                    segment_index = artifact.segment_index().map(| i | i as i64), success
+-                    = matches!(tool_outcome, crate
+-                    ::session::events::ToolOutcome::Success),
++                    "tool.execution", tool_name = % prepared.tool_name, tool_use_id = %
++                    prepared.call_id, tool_input_size_bytes = prepared.raw_arguments.len() as
++                    i64, tool_result_size_bytes = tool_result_size_bytes, success =
++                    matches!(tool_outcome, crate ::session::events::ToolOutcome::Success),
++                    outcome = <&'static str >::from(tool_outcome),
+                 )
+                 .in_scope(|| {});
+-            }
+-            match &tool_loop {
+-                ToolLoop::PermissionReject { .. }
+-                | ToolLoop::Cancelled
+-                | ToolLoop::FollowupMessage(_) => {
+-                    if final_result.is_none() {
+-                        final_result = Some(tool_loop);
++                if let Some(artifact) = compaction_artifact_read(&prepared.parsed_args) {
++                    tracing::info_span!(
++                        "compaction.segment_read", session_id = % self.session_info.id.0,
++                        tool_name = % prepared.tool_name, artifact = % artifact,
++                        segment_index = artifact.segment_index().map(| i | i as i64), success
++                        = matches!(tool_outcome, crate
++                        ::session::events::ToolOutcome::Success),
++                    )
++                    .in_scope(|| {});
++                }
++                match &tool_loop {
++                    ToolLoop::PermissionReject { .. }
++                    | ToolLoop::Cancelled
++                    | ToolLoop::FollowupMessage(_) => {
++                        if final_result.is_none() {
++                            final_result = Some(tool_loop);
++                        }
+                     }
++                    _ => {}
+                 }
+-                _ => {}
++                next_source_idx += 1;
+             }
+         }
+         {
+-- 
+2.50.1 (Apple Git-155)
+

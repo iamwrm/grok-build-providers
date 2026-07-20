@@ -2,8 +2,8 @@
 
 **Status:** implemented, exported, and live-verified (2026-07-19)
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
-**Deliverable:** consolidated patches `0006–0008`, continuing the i0001/i0002 stack
-**Implementation branch:** clean-room series based on `ba76b0a`; i0003 boundary `3a8700e`, tree `3f592004ac37417b8ce8ce012645afd5605a7251`
+**Deliverable:** patches `0006–0008`, continuing the i0001/i0002 stack
+**Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc`
 
 ## Goal
 
@@ -80,7 +80,7 @@ grok-build already had a complete Anthropic Messages transport:
   (`conversation.rs::build_messages_request`).
 - `ReasoningEffort::to_messages_api` uses the pi-parity native mapping
   (`xhigh → "xhigh"`, `max → "max"`) with per-model menu gating in patch
-  `0008`. The collapsed pre-consolidation intermediate state is historical.
+  `0008`.
 - The i0001 seams (`AuthScheme` provider marker, `BearerResolver`, header
   injection in `sampling_config_for_model` and `sampler_turn.rs`,
   credential-gated catalog insertion in `resolve_model_list`, generic
@@ -146,10 +146,6 @@ grok-build already had a complete Anthropic Messages transport:
   and the requirement that custom older Messages models use `max` rather than
   native `xhigh`.
 
-Historical note: review of the pre-consolidation catalog found that its initial
-`xhigh` alias semantics were inaccurate. The active patch introduces the final
-native per-model behavior directly; see [patch-history.md](patch-history.md).
-
 ## Files affected (summary)
 
 | Repo | File | Change |
@@ -195,11 +191,7 @@ native per-model behavior directly; see [patch-history.md](patch-history.md).
   `~/.grok/openai_auth.json` (or now `anthropic_auth.json`), independent of
   this series.
 - `git diff --check` clean.
-- Active clean-room snapshot through i0003: patches `0001–0008` apply to
-  `ba76b0a`; commit `3a8700e` has tree
-  `3f592004ac37417b8ce8ce012645afd5605a7251`.
-- The pre-consolidation twelve-patch boundary and hashes are historical; see
-  [patch-history.md](patch-history.md).
+- Clean-room patches `0001–0008` apply to `ba76b0a`.
 - After the rebase, the sampling-types suite passes 277/277 (native wire
   mapping), the pager suite passes 7390 tests with 10 ignored (including the
   symmetric `xhigh→max` fallback), and the catalog test retains per-model

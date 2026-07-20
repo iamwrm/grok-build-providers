@@ -2,8 +2,8 @@
 
 **Status:** implemented and exported
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
-**Deliverable:** consolidated patches `0001–0004` in `patches/grok-build/`
-**Implementation branch:** clean-room series based on `ba76b0a` (Grok `0.2.106`); i0001 boundary `72ac660`, tree `98833e84644b5f092a29f1f610124c3d9157ce91`
+**Deliverable:** patches `0001–0004` in `patches/grok-build/`
+**Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc` (Grok `0.2.106`)
 
 ## Goal
 
@@ -274,20 +274,16 @@ fresh first turn followed by a resumed prompt that requires local tools, then
 confirm every loop completed on attempt 1 and no `inference_retry` appears in
 `~/.grok/logs/unified.jsonl`.
 
-### Maintenance state and historical snapshot
+### Maintenance state
 
-- **Active i0001 slice:** patches `0001–0004` end at clean-room commit
-  `72ac660`, tree `98833e84644b5f092a29f1f610124c3d9157ce91`, based on
+- Patches `0001–0004` are the current i0001 slice on base
   `ba76b0a683fa52e4e60685017b85905451be17bc`.
-- **Pre-consolidation historical slice:** old patches `0001–0005` ended at
-  `a17584579eee3824ee5a4b2135a3d8d62128ee3f`, tree
-  `5ca9de32f88ec8e5055a2cb92be7f4aad9997df7`. See
-  [patch-history.md](patch-history.md) for the old-to-new map.
 - Patch `0002` owns the complete Codex transport, including exact
   `response.metadata` and `keepalive` compatibility. Both informational event
   names are accepted from either the SSE `event` field or JSON `type`; all
   other unknown variants remain fail-closed. Patch `0004` owns the catalog and
-  docs.
+  docs. Parallel tool-call improvements (`parallel_tool_calls`, compound
+  `call_id|fc_id` history, source-order results) live in i0007 patch `0015`.
 - Existing release binary:
   `checkouts/grok-build/target/release/xai-grok-pager`. For a literal local
   rebuild, run `cargo build -p xai-grok-pager-bin --release` (release mode so
@@ -296,8 +292,8 @@ confirm every loop completed on attempt 1 and no `inference_retry` appears in
   inspect/revert unrelated formatting before export. Remove
   `target/release/incremental` afterward while preserving the binary.
 - To reproduce only i0001, clean-room `git am` patches `0001–0004` onto the
-  pinned base and compare with the active slice tree above. To reproduce
-  the current product, apply the complete series; CI does this automatically.
+  pinned base. To reproduce the current product, apply the complete series;
+  CI does this automatically.
 
 ## Decisions and deferred work
 

@@ -44,8 +44,8 @@ git clone https://github.com/earendil-works/pi checkouts/pi
 
    ```bash
    cd checkouts/grok-build
-   # Example: export one newly committed patch after current patch 0014.
-   git format-patch HEAD~1..HEAD --start-number 15 \
+   # Example: export one newly committed patch after current patch 0015.
+   git format-patch HEAD~1..HEAD --start-number 16 \
      -o ../../patches/grok-build/
    ```
 
@@ -99,11 +99,10 @@ Every initiative gets its own doc in `docs/`, following the pattern of
   decisions/deferred work.
 
 The initiative doc is the durable narrative that ties the numbered patches
-together — keep it updated as the patch series evolves. When patches are
-consolidated, preserve the old-to-new mapping in
-[`docs/patch-history.md`](patch-history.md), prove the final source tree is
-unchanged, and clean-room apply the replacement series before deleting the old
-files.
+together—keep it synchronized with the **current** patch series. When patches
+are rewritten or combined, update the owning initiative docs to the resulting
+layout, remove superseded descriptions, and clean-room apply the complete
+replacement series before deleting old patch files.
 
 ## Current patch ownership
 
@@ -115,6 +114,7 @@ files.
 | [i0004](i0004_release-ci.md) | `0009–0010` | Cross-platform release CI and Windows portability |
 | [i0005](i0005_last-turn-stats.md) | `0011–0013` | Raw sampling diagnostics and turn-end metrics |
 | [i0006](i0006_batch-file-edits.md) | `0014` | Atomic multi-edit search/replace for one file |
+| [i0007](i0007_codex-parallel-tools.md) | `0015` | Codex parallel tool-call wire + result ordering |
 
 ## Conventions
 

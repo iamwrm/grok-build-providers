@@ -2,8 +2,8 @@
 
 **Status:** implemented and exported
 **Upstreams:** `checkouts/pi` (reference semantics), `checkouts/grok-build` (patch target)
-**Deliverable:** consolidated patch `0005` in `patches/grok-build/`
-**Implementation branch:** clean-room series based on `ba76b0a`; i0002 boundary `a7b5601`, tree `7c51dd6e240654ea1ab684ccf452a3e2536d0226`
+**Deliverable:** patch `0005` in `patches/grok-build/`
+**Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc`
 **Depends on:** i0001 (OpenAI Codex OAuth provider, patches `0001–0004`)
 
 ## Patch ownership
@@ -16,11 +16,9 @@
 ## Anthropic interaction
 
 Patch `0005` introduces the canonical `Max` level and OpenAI Responses wire
-workaround. The final Anthropic-specific mapping lives in i0003 patch `0008`:
+workaround. The Anthropic-specific mapping lives in i0003 patch `0008`:
 `Xhigh → "xhigh"` on native-supporting models and `Max → "max"`, with per-model
-menu gating. The pre-consolidation series briefly collapsed both values to
-`"max"`; that intermediate state is historical only and is documented in
-[patch-history.md](patch-history.md).
+menu gating.
 
 ## Goal
 
@@ -212,12 +210,9 @@ and downgrade behavior.
   `0008`, not this cross-provider canonical-level patch.
 - Changing pi.
 
-## Verification completed after the `ba76b0a` rebase
+## Verification
 
-The original pre-consolidation stack was tested with an isolated `GROK_HOME`.
-The active clean-room i0002 boundary is commit `a7b5601`, tree
-`7c51dd6e240654ea1ab684ccf452a3e2536d0226`. Historical validation counts below
-remain applicable because the consolidated final source tree is identical.
+Tests that read stored credentials use an isolated `GROK_HOME`.
 
 - `cargo check --workspace --locked`: passes.
 - `cargo test -p xai-grok-sampling-types --lib --locked`: 277 passed (includes
@@ -227,10 +222,7 @@ remain applicable because the consolidated final source tree is identical.
   (includes `resolve_effort_token_max_downgrades_to_xhigh_unless_offered`).
 - `cargo test -p xai-grok-shell --lib --locked`: 5739 passed, 13 ignored.
 - `git diff --check` clean.
-- Active clean-room: patches `0001–0005` apply to `ba76b0a`; patch `0005`
-  ends at `a7b5601`, tree `7c51dd6e240654ea1ab684ccf452a3e2536d0226`.
-- Pre-consolidation seven-patch boundary and hashes are recorded in repository
-  history; see [patch-history.md](patch-history.md) for number mapping.
+- Clean-room patches `0001–0005` apply to `ba76b0a`.
 
 ### Remaining OpenAI `max` live check
 
