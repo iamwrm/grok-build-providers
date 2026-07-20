@@ -1,6 +1,6 @@
 # i0005: Last-prompt stats at turn end (cache read/write, TPS, cost)
 
-**Status:** in progress — patch 0016 implemented; grounding run pending; stats patches not started
+**Status:** in progress — patch 0016 implemented and live-verified; grounding complete; patches 0017–0019 not started
 **Upstreams:** `checkouts/pi` + `../piagent-config/packages/ren-public-package/0012-last-turn.ts` (reference), `checkouts/grok-build` (patch target)
 **Deliverable:** patch series `patches/grok-build/0016..`, continuing the i0001–i0004 stack
 **Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `ba76b0a` (stack tip after i0004: `d76cf1c`)
@@ -59,20 +59,54 @@ captured. Raw **requests** were not.
   text in addition to the full response text it already contained. Off by
   default, hidden flag, existing size-trimming applies.
 
+### Grounding run (2026-07-20, live)
+
+Headless two-call cycle (`claude-sonnet-4-6:low`, one terminal tool call)
+with `GROK_LOG_SAMPLING=true`; raw payloads from `sampling.jsonl`:
+
+- **Request shape:** exactly one `cache_control: {type: "ephemeral"}`
+  breakpoint exists, on the trailing (real) system block; the identity
+  block, tools, and all conversation messages carry none. (Note
+  `GROK_LOG_SAMPLING=1` is rejected by clap's bool parser on the hidden
+  `--log-sampling` flag — use `true`.)
+- **Response usage (verbatim):**
+
+  ```json
+  message_start:  {"input_tokens":2747,"cache_creation_input_tokens":10605,
+                   "cache_read_input_tokens":0,
+                   "cache_creation":{"ephemeral_5m_input_tokens":10605,"ephemeral_1h_input_tokens":0},
+                   "output_tokens":5,"service_tier":"standard",...}
+  message_delta:  {"input_tokens":2747,"cache_creation_input_tokens":10605,
+                   "cache_read_input_tokens":0,"output_tokens":91,
+                   "output_tokens_details":{"thinking_tokens":0}}
+  call 2 start:   {"input_tokens":2859,"cache_creation_input_tokens":0,
+                   "cache_read_input_tokens":10605,...}
+  ```
+
+- **Conclusions:** the flat `cache_creation_input_tokens` is present and
+  authoritative on both `message_start` and `message_delta` — the typed
+  `MessagesUsage`/`MessageDeltaUsage` fields grok-build already parses are
+  correct, so patch 0017 can plumb them as planned. The newer
+  `cache_creation` 5m/1h breakdown appears on `message_start` only
+  (currently ignored by serde; not needed). Anthropic's `input_tokens` is
+  uncached-only: total prompt = input + read + write (matches the
+  sampler's summation).
+- **Efficiency observation (out of scope here, candidate future patch):**
+  because the only breakpoint is on the system block, the growing
+  conversation history is never cached — call 2 re-billed 2,859 uncached
+  input tokens and that number will grow every call. pi/Claude Code also
+  place a `cache_control` marker on the trailing message. The planned
+  W-per-cycle stat will make this cost visible.
+
 ### Planned next
 
-1. **Grounding run:** live Claude turn with `GROK_LOG_SAMPLING=1`; inspect
-   `sampling.jsonl` to confirm request `cache_control` placement and the
-   exact response usage shape (flat `cache_creation_input_tokens` vs. the
-   newer `cache_creation: {ephemeral_5m_input_tokens, ...}` object, values
-   across a multi-tool loop) before committing to field names.
-2. **Patch 0017 — cache-write plumbing:** `TokenUsage.cache_creation_prompt_tokens`
+1. **Patch 0017 — cache-write plumbing:** `TokenUsage.cache_creation_prompt_tokens`
    → `UsageTotals.cached_write_tokens` → `PromptUsageModel.cachedWriteTokens`
    (+ headless `cache_creation_input_tokens` / `cacheCreationInputTokens`).
-3. **Patch 0018 — TUI stats line:** stop dropping `usage` in the pager's
+2. **Patch 0018 — TUI stats line:** stop dropping `usage` in the pager's
    turn-completed handlers; extend the "Worked for …" marker with the stats
    line (display-only render block; CTX from pager-side `context_state`).
-4. **Patch 0019 — docs.**
+3. **Patch 0019 — docs.**
 
 ## Non-goals
 
@@ -84,5 +118,10 @@ captured. Raw **requests** were not.
 
 ## Verification
 
-- Patch 0016: `cargo check -p xai-grok-sampler` clean; sampler lib test
-  suite passes (see below); `parse_enabled` unit test added.
+- Patch 0016: `cargo check -p xai-grok-sampler` clean; sampler lib suite
+  160/160; `parse_enabled` unit test added.
+- Live: release build at the 16-patch tip; headless
+  `-m anthropic/claude-sonnet-4-6:low` tool-using turn completed on attempt
+  1 with `GROK_LOG_SAMPLING=true`; `sampling.jsonl` contained 3
+  `request_body` events (one per LLM call, plus a `responses`-backend
+  auxiliary call) alongside the existing `sse_chunk` stream.
