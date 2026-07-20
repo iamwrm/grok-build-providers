@@ -191,3 +191,6 @@ sampler suite: 162/162.
   `response.metadata` absorption.
 - Patch 0019: `cargo check -p xai-grok-pager --all-targets` clean; pager
   session-event tests 41/41; turn-completion tests 19/19.
+- Final 19-patch release build clean. Live `openai-codex/gpt-5.5:low`
+  tool-using headless turn completed successfully (no `response.metadata`
+  serialization failure).
