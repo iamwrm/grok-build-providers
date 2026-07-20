@@ -1,0 +1,75 @@
+From d054b855441d0e651477ebfd25e2fe7cc1b8be12 Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 14:27:20 +0800
+Subject: [PATCH] Ignore informational response.metadata SSE events
+
+Newer OpenAI Responses/Codex deployments emit response.metadata as an
+informational stream event. The pinned async-openai ResponseStreamEvent enum
+does not model it, so typed deserialization aborted otherwise healthy turns
+with a non-retryable serialization error.
+
+Absorb only this exact event, matching either the SSE event name or JSON type
+to tolerate proxies that rewrite the event name. Keep every other unknown
+event fail-closed so protocol changes are not silently masked.
+---
+ crates/codegen/xai-grok-sampler/src/client.rs | 30 ++++++++++++++++++-
+ 1 file changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
+index 2cae275..3ad7bd0 100644
+--- a/crates/codegen/xai-grok-sampler/src/client.rs
++++ b/crates/codegen/xai-grok-sampler/src/client.rs
+@@ -96,6 +96,19 @@ impl GrokRequestHeaders<'_> {
+ /// `ResponseUsage` unchanged so billing telemetry stays correct. When
+ /// the API doesn't emit `context_details` (older deployments) `total_tokens`
+ /// passes through unchanged.
++/// Newer Responses/Codex deployments emit an informational
++/// `response.metadata` SSE event that the pinned async-openai enum does not
++/// model. It carries no response output and is followed by the normal typed
++/// lifecycle events, so absorb only this exact event rather than treating all
++/// unknown event types as ignorable.
++fn is_response_metadata_event(event_name: &str, data: &str) -> bool {
++    event_name == "response.metadata"
++        || serde_json::from_str::<serde_json::Value>(data)
++            .ok()
++            .and_then(|value| value.get("type")?.as_str().map(str::to_owned))
++            .is_some_and(|kind| kind == "response.metadata")
++}
++
+ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
+     let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
+         Ok(event) => event,
+@@ -1630,7 +1643,7 @@ impl SamplingClient {
+                             Some(collector) => collector.absorb(&event.event, data),
+                             None => is_check_event(&event.event, data),
+                         };
+-                        if swallow {
++                        if swallow || is_response_metadata_event(&event.event, data) {
+                             Some(None)
+                         } else if let Some(stream_error) = try_parse_stream_error(data) {
+                             Some(Some(Err(stream_error)))
+@@ -2773,6 +2786,21 @@ mod tests {
+     /// `usage.total_tokens` in place to the live context length
+     /// (`ctx.input + ctx.output`). Billing fields stay on the wire's
+     /// cumulative values.
++    #[test]
++    fn response_metadata_event_is_absorbed_by_name_or_payload_type() {
++        let data = r#"{"type":"response.metadata","sequence_number":1,"metadata":{"foo":"bar"}}"#;
++        assert!(is_response_metadata_event("response.metadata", data));
++        // Some SSE proxies omit the event name but retain the JSON type.
++        assert!(is_response_metadata_event("message", data));
++        assert!(!is_response_metadata_event(
++            "message",
++            r#"{"type":"response.output_text.delta","delta":"hi"}"#
++        ));
++        // The compatibility predicate is needed precisely because the pinned
++        // typed enum rejects this event.
++        assert!(serde_json::from_str::<rs::ResponseStreamEvent>(data).is_err());
++    }
++
+     #[test]
+     fn deserialize_response_event_overrides_total_tokens_from_context_details() {
+         let sse = r#"{
+-- 
+2.50.1 (Apple Git-155)
+

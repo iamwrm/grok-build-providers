@@ -1,6 +1,6 @@
 # i0005: Last-prompt stats at turn end (cache read/write, TPS, cost)
 
-**Status:** in progress — patches 0016–0017 implemented; raw-wire grounding complete; TUI patch 0018 in progress
+**Status:** in progress — patches 0016–0018 implemented; raw-wire grounding complete; TUI patch 0019 in progress
 **Upstreams:** `checkouts/pi` + `../piagent-config/packages/ren-public-package/0012-last-turn.ts` (reference), `checkouts/grok-build` (patch target)
 **Deliverable:** patch series `patches/grok-build/0016..`, continuing the i0001–i0004 stack
 **Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `ba76b0a` (stack tip after i0004: `d76cf1c`)
@@ -130,12 +130,22 @@ The zero write count is a real wire value (automatic OpenAI cache population
 is not separately billed), not an absent field. This is unlike Anthropic's
 explicit, billed cache creation.
 
+### Patch 0018 — tolerate `response.metadata` SSE events
+
+During implementation, live OpenAI Responses turns started failing with
+`unknown variant response.metadata`: newer Codex deployments emit this
+informational event, but the pinned `async-openai` `ResponseStreamEvent` enum
+does not model it. The sampler now absorbs only the exact
+`response.metadata` event (matched by SSE event name or JSON `type`, for
+proxy compatibility); all other unknown events remain fail-closed. Full
+sampler suite: 162/162.
+
 ### Planned next
 
-1. **Patch 0018 — TUI stats line:** stop dropping `usage` in the pager's
-   turn-completed handlers; extend the "Worked for …" marker with the stats
-   line (display-only render block; CTX from pager-side `context_state`).
-2. **Patch 0019 — docs.**
+1. **Patch 0019 — TUI stats line:** consume `usage` in the pager's
+   turn-completed handlers; extend the "Worked for …" marker with aggregate
+   usage stats (display-only render block; CTX from pager-side state).
+2. **Patch 0020 — docs.**
 
 ## Non-goals
 
