@@ -2,8 +2,8 @@
 
 **Status:** implemented, exported, and live-verified (2026-07-19)
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
-**Deliverable:** five-patch series `patches/grok-build/0008..0012`, continuing the i0001/i0002 stack
-**Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `ba76b0a` (Grok `0.2.106`; stack tip after i0002: `ff8806e`)
+**Deliverable:** consolidated patches `0006–0008`, continuing the i0001/i0002 stack
+**Implementation branch:** clean-room series based on `ba76b0a`; i0003 boundary `3a8700e`, tree `3f592004ac37417b8ce8ce012645afd5605a7251`
 
 ## Goal
 
@@ -78,10 +78,9 @@ grok-build already had a complete Anthropic Messages transport:
   `xai-grok-sampler/src/stream/messages.rs`), full conversation conversion
   incl. thinking blocks and adaptive `output_config.effort`
   (`conversation.rs::build_messages_request`).
-- `ReasoningEffort::to_messages_api` originally mapped `low|medium|high`
-  verbatim and collapsed `xhigh|max → "max"`; patch 0012 changes it to the
-  pi-parity native mapping (`xhigh → "xhigh"`, `max → "max"`) with per-model
-  menu gating.
+- `ReasoningEffort::to_messages_api` uses the pi-parity native mapping
+  (`xhigh → "xhigh"`, `max → "max"`) with per-model menu gating in patch
+  `0008`. The collapsed pre-consolidation intermediate state is historical.
 - The i0001 seams (`AuthScheme` provider marker, `BearerResolver`, header
   injection in `sampling_config_for_model` and `sampler_turn.rs`,
   credential-gated catalog insertion in `resolve_model_list`, generic
@@ -89,7 +88,7 @@ grok-build already had a complete Anthropic Messages transport:
 
 ## Implemented patch series
 
-### Patch 0008 — OAuth flow + storage + CLI
+### Patch 0006 — OAuth flow + storage + CLI
 
 - New module `xai-grok-shell/src/auth/anthropic.rs`: Rust port of pi's
   `auth/oauth/anthropic.ts` (constants identical: client id, URLs, scopes,
@@ -102,7 +101,7 @@ grok-build already had a complete Anthropic Messages transport:
 - CLI: `grok anthropic login|logout|status` wired in
   `xai-grok-pager/src/app/cli.rs` + pager-bin `main.rs`.
 
-### Patch 0009 — Anthropic OAuth Messages transport
+### Patch 0007 — Anthropic OAuth Messages transport
 
 - `AuthScheme::AnthropicOauth` (config string `anthropic_oauth`); wire format
   identical to `Bearer` in all sampler auth arms.
@@ -124,7 +123,7 @@ grok-build already had a complete Anthropic Messages transport:
   - preserve existing cache markers; cache the trailing block when none exist;
   - strip `temperature`/`top_p` when extended thinking is enabled.
 
-### Patch 0010 — built-in credential-gated model catalog
+### Patch 0008 — built-in catalog, native `xhigh`, and documentation
 
 - `anthropic_model_entries()`: pi's adaptive-thinking Claude generation only —
   `claude-opus-4-8/-4-7/-4-6`, `claude-sonnet-5`, `claude-sonnet-4-6`,
@@ -134,40 +133,22 @@ grok-build already had a complete Anthropic Messages transport:
 - Older budget-thinking models (Opus 4.5, Sonnet 4.5, Haiku 4.5, …) are
   excluded: grok-build's Messages conversion drives thinking exclusively
   through the adaptive `output_config.effort` field, which they reject.
-- Efforts `low|medium|high (default)|max`, plus native `xhigh` where
-  supported (see patch 0012).
+- Efforts `low|medium|high (default)|max`, plus native `xhigh` on Opus
+  4.7/4.8, Sonnet 5, and Fable 5. Opus 4.6 and Sonnet 4.6 keep
+  `low|medium|high|max`.
+- `ReasoningEffort::to_messages_api` sends `Xhigh → "xhigh"` and
+  `Max → "max"`; the resolver provides symmetric `xhigh↔max` fallback when a
+  built-in model offers only one top level.
 - Catalog only appears when `~/.grok/anthropic_auth.json` exists; inserted
-  before `[model.*]` overrides (same semantics as the Codex catalog).
+  before `[model.*]` overrides.
+- The same patch documents OAuth login, credential isolation, zero-config
+  catalog behavior, API-key-vs-OAuth Messages, provider-qualified selection,
+  and the requirement that custom older Messages models use `max` rather than
+  native `xhigh`.
 
-### Patch 0011 — user documentation
-
-- `02-authentication.md`: Anthropic Claude Pro/Max section (login flow, paste
-  fallback, credential isolation, model switching).
-- `11-custom-models.md`: zero-config `anthropic/*` built-ins,
-  `anthropic_oauth` in the `auth_scheme` enum, API-key-vs-OAuth Messages
-  clarification, advanced custom-entry override.
-- `04-slash-commands.md`: `anthropic/...` provider-prefix example; `max` note.
-
-### Patch 0012 — native `xhigh` on the Messages wire
-
-Added after review: the initial catalog omitted `xhigh` (and the docs
-wrongly called it an accepted alias — the effort resolver actually rejected
-it, since it only accepts menu tokens plus the legacy `max→xhigh`
-downgrade). Per pi's `thinkingLevelMap`, native `xhigh` is a distinct level
-between `high` and `max` on Opus 4.7/4.8, Sonnet 5, and Fable 5.
-
-- `ReasoningEffort::to_messages_api`: `Xhigh → "xhigh"`, `Max → "max"`
-  (was `Xhigh|Max → "max"`; updates the upstream mapping + i0002-era tests).
-- Catalog: `xhigh` offered on exactly the native-xhigh models; Opus 4.6 and
-  Sonnet 4.6 keep `low|medium|high|max`.
-- Resolver (`model_state.rs::resolve_effort_token_for`): symmetric fallback
-  — requested `xhigh` on a menu without it resolves to an offered `max`
-  (mirrors pi's Opus-4.6 map and the existing `max→xhigh` legacy branch).
-- Docs corrected; custom Messages entries for older Claude models should
-  use `max` (native `xhigh` now passes through verbatim and would 400).
-- **Known behavior change:** custom `[model.*]` Messages entries that set
-  `xhigh` against models without native xhigh now send `"xhigh"` instead of
-  `"max"`. Built-ins are unaffected; noted in `11-custom-models.md`.
+Historical note: review of the pre-consolidation catalog found that its initial
+`xhigh` alias semantics were inaccurate. The active patch introduces the final
+native per-model behavior directly; see [patch-history.md](patch-history.md).
 
 ## Files affected (summary)
 
@@ -181,9 +162,9 @@ between `high` and `max` on Opus 4.7/4.8, Sonnet 5, and Fable 5.
 | grok-build | `crates/codegen/xai-grok-shell/src/agent/config.rs` | credential resolution, header injection, catalog |
 | grok-build | `crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs` | per-turn bearer resolver + headers |
 | grok-build | `crates/codegen/xai-grok-pager/docs/user-guide/{02,04,11}-*.md` | docs |
-| grok-build | `crates/codegen/xai-grok-sampling-types/src/{types,conversation}.rs` | native `xhigh` Messages wire mapping (0012) |
-| grok-build | `crates/codegen/xai-grok-pager/src/acp/model_state.rs` | `xhigh→max` resolver fallback (0012) |
-| this repo | `patches/grok-build/0008..0012-*.patch` | durable patch series |
+| grok-build | `crates/codegen/xai-grok-sampling-types/src/{types,conversation}.rs` | native `xhigh` Messages wire mapping (`0008`) |
+| grok-build | `crates/codegen/xai-grok-pager/src/acp/model_state.rs` | `xhigh→max` resolver fallback (`0008`) |
+| this repo | `patches/grok-build/0006..0008-*.patch` | durable patch series |
 | this repo | `configs/anthropic-oauth.toml`, this doc | sample config, narrative |
 
 ## Non-goals (v1)
@@ -213,12 +194,12 @@ between `high` and `max` on Opus 4.7/4.8, Sonnet 5, and Fable 5.
   entries and fail pre-existing on any machine with a stored
   `~/.grok/openai_auth.json` (or now `anthropic_auth.json`), independent of
   this series.
-- `git diff ff8806e..HEAD --check` clean.
-- Clean-room snapshot through i0003: all **twelve** patches `git am` onto a
-  detached worktree at `ba76b0a`; resulting tree hash
-  `d0a27a1eca6dea6d0cc03ca6fc8e1db16ca45643` matches the patch-0012 tip
-  (`4f9056cc498247b0e7f542efcc462dcaf4e4fec2`) exactly. The current 15-patch
-  stack is validated separately in [i0004](i0004_release-ci.md).
+- `git diff --check` clean.
+- Active clean-room snapshot through i0003: patches `0001–0008` apply to
+  `ba76b0a`; commit `3a8700e` has tree
+  `3f592004ac37417b8ce8ce012645afd5605a7251`.
+- The pre-consolidation twelve-patch boundary and hashes are historical; see
+  [patch-history.md](patch-history.md).
 - After the rebase, the sampling-types suite passes 277/277 (native wire
   mapping), the pager suite passes 7390 tests with 10 ignored (including the
   symmetric `xhigh→max` fallback), and the catalog test retains per-model
@@ -226,7 +207,7 @@ between `high` and `max` on Opus 4.7/4.8, Sonnet 5, and Fable 5.
 - **Live testing (2026-07-19):** `grok anthropic login` browser flow
   completed and stored `~/.grok/anthropic_auth.json`; user-confirmed working
   live inference on the `anthropic/*` catalog (including native `xhigh`
-  selection after patch 0012). No `inference_retry` entries in
+  selection now owned by patch `0008`). No `inference_retry` entries in
   `~/.grok/logs/unified.jsonl` after the credential timestamp, and —
   notably — **no classifier rejection with the replacement table empty**:
   grok-build's system prompt + the Claude Code identity block currently
@@ -275,10 +256,9 @@ A one-turn greeting does not exercise the risky paths. After login:
 ## Decisions and deferred work
 
 1. **Provider key prefix:** `anthropic/` (pi parity).
-2. **Catalog scope:** adaptive-thinking generation only (see patch 0010).
+2. **Catalog scope:** adaptive-thinking generation only (patch `0008`).
 3. **Effort menu:** `low|medium|high|max`, plus native `xhigh` on Opus
-   4.7/4.8, Sonnet 5, and Fable 5 (patch 0012; supersedes the v1 decision to
-   collapse `xhigh` into `max`). Off-menu `xhigh` resolves to an offered
+   4.7/4.8, Sonnet 5, and Fable 5 (patch `0008`). Off-menu `xhigh` resolves to an offered
    `max` and vice versa.
 4. **Classifier table remains empty:** live OAuth inference passed without a
    classifier rejection, so no grok-build prompt rewrite is currently needed.

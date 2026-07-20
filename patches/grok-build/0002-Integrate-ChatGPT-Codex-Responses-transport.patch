@@ -1,29 +1,43 @@
-From 0ad8b0867d086f5c02802847940490cd43813b29 Mon Sep 17 00:00:00 2001
-From: Ren Wang <iamwrm@gmail.com>
-Date: Sat, 18 Jul 2026 23:48:40 +0800
-Subject: [PATCH 02/15] Integrate ChatGPT Codex Responses transport
+From ee2190d298168b8e6edb2f07cd631de09e4c182c Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 16:56:00 +0800
+Subject: [PATCH 02/13] Integrate ChatGPT Codex Responses transport
 
-Add the chatgpt_oauth auth scheme, live bearer and account-header
-resolution, and the complete Codex request and SSE response contract.
-Normalize assistant history, exclude unsigned display-only reasoning, and
-preserve streamed text, reasoning summaries, and function calls when the
-backend omits assembled terminal output. This supports first turns,
-resumed conversations, and multi-loop local tool execution without false
-empty-response retries.
+Add the chatgpt_oauth auth scheme, live bearer/account-header resolution, and the complete Codex request and SSE response contract. Normalize assistant history and preserve streamed text, reasoning summaries, and function calls when terminal output is incomplete. Tolerate the deployed informational response.metadata event while keeping all other unknown events fail-closed.
 ---
- crates/codegen/xai-grok-sampler/src/client.rs | 230 +++++++++++++++++-
+ crates/codegen/xai-grok-sampler/src/client.rs | 260 +++++++++++++++++-
  crates/codegen/xai-grok-sampler/src/config.rs |   7 +
- .../xai-grok-sampler/src/stream/responses.rs  | 156 +++++++++++-
+ .../xai-grok-sampler/src/stream/responses.rs  | 156 ++++++++++-
  .../xai-grok-shell/src/agent/config.rs        |  66 ++++-
  .../xai-grok-shell/src/auth/openai_codex.rs   |  14 +-
  .../session/acp_session_impl/sampler_turn.rs  |  10 +-
- 6 files changed, 470 insertions(+), 13 deletions(-)
+ 6 files changed, 499 insertions(+), 14 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index 28b1058..8cc38b2 100644
+index 28b1058..b873c8b 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
-@@ -348,6 +348,155 @@ impl PlatformInfo {
+@@ -96,6 +96,19 @@ impl GrokRequestHeaders<'_> {
+ /// `ResponseUsage` unchanged so billing telemetry stays correct. When
+ /// the API doesn't emit `context_details` (older deployments) `total_tokens`
+ /// passes through unchanged.
++/// Newer Responses/Codex deployments emit an informational
++/// `response.metadata` SSE event that the pinned async-openai enum does not
++/// model. It carries no response output and is followed by the normal typed
++/// lifecycle events, so absorb only this exact event rather than treating all
++/// unknown event types as ignorable.
++fn is_response_metadata_event(event_name: &str, data: &str) -> bool {
++    event_name == "response.metadata"
++        || serde_json::from_str::<serde_json::Value>(data)
++            .ok()
++            .and_then(|value| value.get("type")?.as_str().map(str::to_owned))
++            .is_some_and(|kind| kind == "response.metadata")
++}
++
+ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
+     let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
+         Ok(event) => event,
+@@ -348,6 +361,155 @@ impl PlatformInfo {
      }
  }
  
@@ -179,7 +193,7 @@ index 28b1058..8cc38b2 100644
  fn agent_version() -> String {
      xai_grok_version::VERSION.to_string()
  }
-@@ -416,7 +565,7 @@ impl SamplingClient {
+@@ -416,7 +578,7 @@ impl SamplingClient {
                      })?;
                      headers.insert(HeaderName::from_static("x-api-key"), header_value);
                  }
@@ -188,7 +202,7 @@ index 28b1058..8cc38b2 100644
                      let bearer = format!("Bearer {}", api_key);
                      let header_value = HeaderValue::from_str(&bearer).map_err(|_| {
                          tracing::debug!(
-@@ -559,7 +708,7 @@ impl SamplingClient {
+@@ -559,7 +721,7 @@ impl SamplingClient {
                          headers.insert(HeaderName::from_static("x-api-key"), v);
                      }
                  }
@@ -197,7 +211,7 @@ index 28b1058..8cc38b2 100644
                      headers.remove(HeaderName::from_static("x-api-key"));
                      if let Ok(v) = HeaderValue::from_str(&format!("Bearer {fresh}")) {
                          headers.insert(AUTHORIZATION, v);
-@@ -617,7 +766,7 @@ impl SamplingClient {
+@@ -617,7 +779,7 @@ impl SamplingClient {
                  .get(HeaderName::from_static("x-api-key"))
                  .and_then(|v| v.to_str().ok())
                  .map(|s| s.to_string()),
@@ -206,7 +220,7 @@ index 28b1058..8cc38b2 100644
                  .default_headers
                  .get(AUTHORIZATION)
                  .and_then(|v| v.to_str().ok())
-@@ -659,7 +808,7 @@ impl SamplingClient {
+@@ -659,7 +821,7 @@ impl SamplingClient {
          let auth_prefix = self.current_sent_bearer_prefix();
          let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
              (AuthScheme::XApiKey, Some(_)) => "x-api-key",
@@ -215,7 +229,7 @@ index 28b1058..8cc38b2 100644
              (_, None) => "none",
          };
          crate::sampling_log::AuthInfo {
-@@ -1063,6 +1212,9 @@ impl SamplingClient {
+@@ -1063,6 +1225,9 @@ impl SamplingClient {
          // it in post-serialize. This is the last surviving piece of the
          // old raw_output machinery.
          xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
@@ -225,7 +239,7 @@ index 28b1058..8cc38b2 100644
          let http_request = grok_headers
              .apply(self.post(self.endpoint("responses")))
              .json(&request_body);
-@@ -1199,6 +1351,9 @@ impl SamplingClient {
+@@ -1199,6 +1364,9 @@ impl SamplingClient {
              }
          }
          xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
@@ -235,7 +249,38 @@ index 28b1058..8cc38b2 100644
          // Fresh per attempt so signals never leak across retries; `None`
          // (check disabled) sends no header and does no peek work per event.
          let doom_loop = self
-@@ -2625,4 +2780,71 @@ mod tests {
+@@ -1323,7 +1491,7 @@ impl SamplingClient {
+                             Some(collector) => collector.absorb(&event.event, data),
+                             None => is_check_event(&event.event, data),
+                         };
+-                        if swallow {
++                        if swallow || is_response_metadata_event(&event.event, data) {
+                             Some(None)
+                         } else if let Some(stream_error) = try_parse_stream_error(data) {
+                             Some(Some(Err(stream_error)))
+@@ -2454,6 +2622,21 @@ mod tests {
+     /// `usage.total_tokens` in place to the live context length
+     /// (`ctx.input + ctx.output`). Billing fields stay on the wire's
+     /// cumulative values.
++    #[test]
++    fn response_metadata_event_is_absorbed_by_name_or_payload_type() {
++        let data = r#"{"type":"response.metadata","sequence_number":1,"metadata":{"foo":"bar"}}"#;
++        assert!(is_response_metadata_event("response.metadata", data));
++        // Some SSE proxies omit the event name but retain the JSON type.
++        assert!(is_response_metadata_event("message", data));
++        assert!(!is_response_metadata_event(
++            "message",
++            r#"{"type":"response.output_text.delta","delta":"hi"}"#
++        ));
++        // The compatibility predicate is needed precisely because the pinned
++        // typed enum rejects this event.
++        assert!(serde_json::from_str::<rs::ResponseStreamEvent>(data).is_err());
++    }
++
+     #[test]
+     fn deserialize_response_event_overrides_total_tokens_from_context_details() {
+         let sse = r#"{
+@@ -2625,4 +2808,71 @@ mod tests {
              rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
          ));
      }

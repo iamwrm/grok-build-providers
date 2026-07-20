@@ -2,8 +2,8 @@
 
 **Status:** implemented and exported
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
-**Deliverable:** five-patch series in `patches/grok-build/`
-**Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `ba76b0a` (Grok `0.2.106`)
+**Deliverable:** consolidated patches `0001–0004` in `patches/grok-build/`
+**Implementation branch:** clean-room series based on `ba76b0a` (Grok `0.2.106`); i0001 boundary `72ac660`, tree `98833e84644b5f092a29f1f610124c3d9157ce91`
 
 ## Goal
 
@@ -75,7 +75,7 @@ grok-build already has almost every seam we need:
 - `crates/codegen/xai-grok-sampler/src/stream/responses.rs` — Responses SSE
   decode; needs Codex request/stream compatibility deltas (`store:false`,
   `instructions`, `include`, terminal-output assembly). Friendly quota/reset
-  error mapping remains deferred rather than part of patch 0002.
+  error mapping remains deferred rather than part of patch `0002`.
 - `crates/codegen/xai-grok-shell/src/agent/{config,models}.rs` +
   `crates/codegen/xai-chat-state/src/types.rs` — `[model.*]` config
   (`api_key`/`env_key`/`base_url`/`api_backend`/`extra_headers`) and its
@@ -88,18 +88,17 @@ grok-build already has almost every seam we need:
 
 ## Implementation outcome
 
-Implemented as five cohesive commits/patches:
+Implemented as four cohesive patches:
 
 1. OAuth flow, credential storage/refresh, and `grok openai login|logout|status`.
 2. Complete Codex transport contract: `AuthScheme::ChatgptOauth`, live
    bearer/header wiring, request shaping, multi-turn history normalization,
-   and streamed text/reasoning/tool-call assembly.
-3. Credential-gated built-in `openai-codex/*` model catalog.
-4. pi-style `/model provider/model:effort` and `-m provider/model:effort` parsing.
-5. Upstream user-guide documentation only.
+   streamed text/reasoning/tool-call assembly, and deployed SSE compatibility.
+3. Generic `/model provider/model:effort` and `-m provider/model:effort` parsing.
+4. Credential-gated built-in `openai-codex/*` catalog and user documentation.
 
 The series is organized by subsystem. All Codex response compatibility
-behavior is introduced in patch 0002, so every later patch can rely on a
+behavior is introduced in patch `0002`, so every later patch can rely on a
 complete transport rather than repairing it.
 
 Normal users make **no config changes**: run `grok openai login` once, then
@@ -156,16 +155,7 @@ Codex body differences are applied in `client.rs`.
   - synthesize streamed text and function calls into the final typed response
     so normal completion classification and multi-loop tool execution work.
 
-### Patch 0003 — built-in credential-gated model catalog
-
-- Add pi's explicit Codex catalog (`gpt-5.3-codex-spark`, `gpt-5.4[-mini]`,
-  `gpt-5.5`, `gpt-5.6-luna/sol/terra`) with matching context windows.
-- Register keys as `openai-codex/<id>`, route to
-  `https://chatgpt.com/backend-api/codex`, and expose low through xhigh effort.
-- Only add the catalog when `~/.grok/openai_auth.json` exists; insert entries
-  before user overrides so advanced `[model.*]` customization still works.
-
-### Patch 0004 — pi-style model references (`provider/model:level`)
+### Patch 0003 — pi-style model references (`provider/model:level`)
 
 Adopt pi's model-reference syntax so switching is a single in-app token:
 
@@ -174,35 +164,29 @@ Adopt pi's model-reference syntax so switching is a single in-app token:
 grok -m openai-codex/gpt-5.5:xhigh -p "hello"
 ```
 
-- **Provider prefix:** built-in Codex catalog entries are registered under
-  `openai-codex/<id>` (e.g. `openai-codex/gpt-5.5`); the prefix selects the
-  provider (credential source + request flavor + base_url). Unprefixed names
-  still resolve via the existing case-insensitive id/display-name matching
-  when unambiguous (`/model gpt-5.5` works too); xAI built-ins keep their
-  bare names for backward compatibility.
-- **`:level` suffix:** port pi's `parseModelPattern` algorithm
-  (`checkouts/pi/packages/coding-agent/src/core/model-resolver.ts`): try the
-  full pattern as a model first, else split on the **last** colon, validate
-  the suffix as a thinking level, recurse on the prefix — this keeps model
-  ids containing colons working and warns on invalid levels.
-- **Level mapping:** accept pi's levels `none|minimal|low|medium|high|xhigh`
-  and map them onto `ReasoningEffort` / the codex `reasoning.effort` field
-  (Codex models pass the OpenAI effort string through verbatim; for xAI
-  models the existing effort names keep working). The existing
-  `/model <name> <effort>` two-argument form stays as an alias.
-- Implemented in `xai-grok-pager` (`slash/commands/model.rs`, `app/cli.rs`
-  for `-m`) plus catalog registration in `xai-grok-shell/src/agent/config.rs`.
+- **Provider prefix:** provider-qualified keys select the credential source,
+  request flavor, and base URL; unprefixed names retain existing unambiguous
+  matching behavior.
+- **`:level` suffix:** try the full model id first, then split on the last colon
+  only when the suffix is a canonical effort token. Model ids containing
+  colons and the existing two-argument `/model <name> <effort>` form remain
+  supported.
+- Implemented generically in the pager CLI and `/model`, so later providers and
+  reasoning levels reuse the same syntax.
 
-### Patch 0005 — user documentation
+### Patch 0004 — built-in Codex catalog and user documentation
 
-This patch changes documentation only:
-
-- Document `grok openai login|status|logout`, browser/device-code flows,
-  credential isolation, zero-config catalog behavior, and
-  `/model openai-codex/gpt-5.5:xhigh`.
-- Clarify API-key OpenAI Responses support versus ChatGPT OAuth.
-- In this repo, add `configs/openai-codex.toml` as an advanced example only;
-  normal usage requires no config edit.
+- Add pi's explicit Codex catalog (`gpt-5.3-codex-spark`, `gpt-5.4[-mini]`,
+  `gpt-5.5`, `gpt-5.6-luna/sol/terra`) with matching context windows.
+- Register keys as `openai-codex/<id>`, route to
+  `https://chatgpt.com/backend-api/codex`, and expose low through xhigh effort.
+- Only add the catalog when `~/.grok/openai_auth.json` exists; insert entries
+  before user overrides so advanced `[model.*]` customization still works.
+- Document login/status/logout, browser/device-code flows, credential
+  isolation, zero-config catalog behavior, API-key Responses separation, and
+  `provider/model:effort` selection.
+- `configs/openai-codex.toml` remains an advanced example; normal usage needs
+  no config edit.
 
 ## Files affected (summary)
 
@@ -218,7 +202,7 @@ This patch changes documentation only:
 | grok-build | `crates/codegen/xai-grok-sampler/src/client.rs` | bearer handling + Codex request shape |
 | grok-build | `crates/codegen/xai-grok-pager/src/slash/commands/model.rs` | `provider/model:level` parsing |
 | grok-build | `crates/codegen/xai-grok-pager/docs/user-guide/{02,04,11}-*.md` | docs |
-| this repo | `patches/grok-build/0001..0005-*.patch` | durable patch series |
+| this repo | `patches/grok-build/0001..0004-*.patch` | durable patch series |
 | this repo | `configs/openai-codex.toml`, `docs/` | sample config, this doc |
 
 ## Non-goals (v1)
@@ -237,7 +221,7 @@ This patch changes documentation only:
 - `cargo run -p xai-grok-pager-bin -- openai --help` exposes
   `login|logout|status` as expected.
 - `git diff ba76b0a..HEAD --check` passes.
-- All five exported patches apply cleanly with `git am` to a fresh detached
+- All four active i0001 patches apply cleanly with `git am` to a fresh detached
   worktree at `ba76b0a`.
 - Live release-binary inference with `openai-codex/gpt-5.6-sol:high` returned
   one answer and exited successfully without retries.
@@ -252,8 +236,8 @@ existing stored ChatGPT credential was used for live inference.
 
 ### Requirements to preserve
 
-- Keep upstream clones disposable and ignored under `checkouts/`; the five
-  numbered patches in `patches/grok-build/` are the durable source of truth.
+- Keep upstream clones disposable and ignored under `checkouts/`; active
+  patches `0001–0004` in `patches/grok-build/` are the durable source of truth.
   Do not add a fork or submodule.
 - Normal use must remain zero-config: login once, then switch in-app with
   `/model openai-codex/gpt-5.5:xhigh` (or Ctrl+M). The TOML example is for
@@ -269,7 +253,7 @@ existing stored ChatGPT credential was used for live inference.
 
 ### Codex protocol gotchas
 
-These are part of patch 0002's baseline contract, not optional fallbacks:
+These are part of patch `0002`'s baseline contract, not optional fallbacks:
 
 - Codex can stream visible text while leaving terminal `response.output` empty;
   streamed text must be synthesized into the typed final response or Grok will
@@ -292,19 +276,15 @@ confirm every loop completed on attempt 1 and no `inference_retry` appears in
 
 ### Maintenance state and historical snapshot
 
-- **i0001 slice:** patches `0001–0005` end at commit
-  `a17584579eee3824ee5a4b2135a3d8d62128ee3f`, based on `ba76b0a`; that
-  five-patch slice has tree `5ca9de32f88ec8e5055a2cb92be7f4aad9997df7`.
-  These identifiers are a verification snapshot for this initiative, not the
-  current tip of the combined repository stack.
-- **Current combined stack (through i0004):** 15 patches end at commit
-  `d76cf1c8315728a9304b414734691ca692b1cc8e`, tree
-  `f622605759a368e772f2da9afa0287321d6c8592`, based on
-  `ba76b0a683fa52e4e60685017b85905451be17bc` (Grok `0.2.106`). See
-  [i0004](i0004_release-ci.md) for release-build validation.
-- Patch 0002 owns the complete Codex transport; patch 0005 is
-  documentation-only. Later initiatives stack on top without changing that
-  ownership.
+- **Active i0001 slice:** patches `0001–0004` end at clean-room commit
+  `72ac660`, tree `98833e84644b5f092a29f1f610124c3d9157ce91`, based on
+  `ba76b0a683fa52e4e60685017b85905451be17bc`.
+- **Pre-consolidation historical slice:** old patches `0001–0005` ended at
+  `a17584579eee3824ee5a4b2135a3d8d62128ee3f`, tree
+  `5ca9de32f88ec8e5055a2cb92be7f4aad9997df7`. See
+  [patch-history.md](patch-history.md) for the old-to-new map.
+- Patch `0002` owns the complete Codex transport, including exact
+  `response.metadata` compatibility. Patch `0004` owns the catalog and docs.
 - Existing release binary:
   `checkouts/grok-build/target/release/xai-grok-pager`. For a literal local
   rebuild, run `cargo build -p xai-grok-pager-bin --release` (release mode so
@@ -312,8 +292,8 @@ confirm every loop completed on attempt 1 and no `inference_retry` appears in
   profile are fine). `cargo fmt --all` may touch unrelated pager files, so
   inspect/revert unrelated formatting before export. Remove
   `target/release/incremental` afterward while preserving the binary.
-- To reproduce only i0001, clean-room `git am` patches `0001–0005` onto the
-  pinned base and compare with the historical slice tree above. To reproduce
+- To reproduce only i0001, clean-room `git am` patches `0001–0004` onto the
+  pinned base and compare with the active slice tree above. To reproduce
   the current product, apply the complete series; CI does this automatically.
 
 ## Decisions and deferred work

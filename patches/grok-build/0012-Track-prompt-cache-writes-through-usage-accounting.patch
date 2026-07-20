@@ -1,22 +1,9 @@
-From 1770b6d4629473c0eaa9911fc3459027a35a71bd Mon Sep 17 00:00:00 2001
+From 4e6f7cd39dd09cd84a268c41190c915f3488dd06 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
-Date: Mon, 20 Jul 2026 13:54:23 +0800
-Subject: [PATCH] Track prompt cache writes through usage accounting
+Date: Mon, 20 Jul 2026 16:56:01 +0800
+Subject: [PATCH 12/13] Track prompt cache writes through usage accounting
 
-Promote provider cache-write tokens to a first-class normalized usage field
-and carry them through per-prompt/per-model ledgers, PromptUsage ACP payloads,
-last-call response metadata, and headless result projections.
-
-Anthropic Messages maps cache_creation_input_tokens directly. OpenAI
-Responses also exposes input_tokens_details.cache_write_tokens, which the
-current async-openai type omits; preserve it from the raw terminal event via
-the same process-local metadata side channel used for cost ticks. Chat
-Completions has no equivalent and reports zero.
-
-The new serde fields default to zero, so old shells/clients remain compatible.
-Existing headless input-token semantics stay frozen: input_tokens subtracts
-cache reads only, while cache_creation_input_tokens reports the write subset
-without changing the prior token identity.
+Promote provider cache-write tokens to a normalized usage field and carry them through ledgers, ACP PromptUsage, response metadata, and headless projections. Map Anthropic cache creation directly and preserve OpenAI Responses cache_write_tokens from raw terminal metadata while retaining backward-compatible token identities.
 ---
  .../codegen/xai-chat-state/src/actor/tests.rs |  3 +
  crates/codegen/xai-chat-state/src/usage.rs    | 31 +++++++++
@@ -135,10 +122,10 @@ index 17db0fe..9dd3990 100644
      fn ledger_sums_partial_subagent_and_zero_cost() {
          let mut ledger = UsageLedger::default();
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index 71795f1..2cae275 100644
+index d15cf73..3ad7bd0 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
-@@ -167,7 +167,8 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
+@@ -180,7 +180,8 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
      let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
          return;
      };
@@ -148,7 +135,7 @@ index 71795f1..2cae275 100644
      if let Some(ticks) = xai_grok_sampling_types::reported_cost_ticks(
          value
              .pointer("/response/usage/cost_in_usd_ticks")
-@@ -178,6 +179,15 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
+@@ -191,6 +192,15 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
              .get_or_insert_with(Default::default)
              .insert(COST_USD_TICKS_METADATA_KEY.to_owned(), ticks.to_string());
      }
@@ -164,7 +151,7 @@ index 71795f1..2cae275 100644
      let Some(usage) = response.usage.as_mut() else {
          return;
      };
-@@ -187,8 +197,24 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
+@@ -200,8 +210,24 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
      usage.total_tokens = total;
  }
  
@@ -190,7 +177,7 @@ index 71795f1..2cae275 100644
  
  /// Read `response.usage.context_details.{input_tokens, output_tokens}`
  /// from the parsed terminal-event JSON and return their sum. Returns `None`
-@@ -2787,6 +2813,40 @@ mod tests {
+@@ -2815,6 +2841,40 @@ mod tests {
          assert_eq!(usage.total_tokens, 5_593);
      }
  

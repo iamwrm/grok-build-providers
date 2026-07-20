@@ -1,18 +1,9 @@
-From 01ad5eddab2eb54142abdc0e05168cafb198e293 Mon Sep 17 00:00:00 2001
+From 5eedd46d3d04864245680f842d1f9801ed45f258 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
-Date: Mon, 20 Jul 2026 14:38:09 +0800
-Subject: [PATCH] Show prompt-cycle usage on completed-turn markers
+Date: Mon, 20 Jul 2026 16:56:01 +0800
+Subject: [PATCH 13/13] Show prompt-cycle usage on completed-turn markers
 
-Carry aggregate PromptUsage on both durable and legacy terminal rails, consume
-it on driver, viewer, and lost-RPC reconciliation paths, and enrich the
-existing display-only 'Worked for ...' scrollback marker with compact prompt
-cycle metrics: uncached input/output, TPS, cache read/write, cache hit ratio,
-context start:end, and trusted complete cost.
-
-Capture context at each local/viewer turn boundary and pair it with the final
-streamed context value. Costs fail closed when usage is partial or incomplete;
-old shells and marker types retain the original text via optional stats.
-Parked, bash, subagent, cancelled, and failed markers remain unchanged.
+Carry aggregate PromptUsage on durable and legacy terminal rails and enrich the existing Worked-for marker with uncached input/output, TPS, cache reads/writes, hit ratio, context start:end, and trusted complete cost. Converge driver, viewer, and lost-RPC finalization while preserving legacy and nonstandard marker behavior.
 ---
  .../xai-grok-pager/src/app/acp_handler/mod.rs |   2 +
  .../src/app/acp_handler/queue.rs              |   5 +

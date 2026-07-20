@@ -1,11 +1,9 @@
-From 65ef5405879be39c05870142c9de5c63ce0d108e Mon Sep 17 00:00:00 2001
+From e77a5fbdb039713c7beff561113b32c108bb1374 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
-Date: Mon, 20 Jul 2026 16:21:24 +0800
-Subject: [PATCH] Toggle raw sampling logs at runtime
+Date: Mon, 20 Jul 2026 16:56:01 +0800
+Subject: [PATCH 11/13] Add dynamically controllable raw sampling logs
 
-Preserve GROK_LOG_SAMPLING and --log-sampling as startup controls while replacing the immutable sampling gate with one process-wide atomic shared by request serialization and telemetry emission.
-
-Always install a dynamically interested sampling layer, and add hidden /debug sampling on|off|status commands routed over ACP so normal TUI and leader agent processes can change or report the gate without restarting. Confirm enablement with a full-payload privacy warning.
+Record fully shaped raw provider request bodies alongside response SSE chunks. Use one process-wide gate initialized by GROK_LOG_SAMPLING/--log-sampling, keep the tracing layer dynamically interested, and expose hidden /debug sampling on|off|status ACP controls with a full-payload privacy warning.
 ---
  .../codegen/xai-grok-pager/src/app/actions.rs |  31 +++
  .../xai-grok-pager/src/app/dispatch/router.rs |   9 +-
@@ -14,10 +12,11 @@ Always install a dynamically interested sampling layer, and add hidden /debug sa
  .../xai-grok-pager/src/app/effects/mod.rs     |  30 +++
  .../xai-grok-pager/src/app/event_loop.rs      |   5 +
  .../src/slash/commands/debug.rs               |  68 ++++++-
- .../xai-grok-sampler/src/sampling_log.rs      |  46 +++--
+ crates/codegen/xai-grok-sampler/src/client.rs |  10 +
+ .../xai-grok-sampler/src/sampling_log.rs      |  90 ++++++++-
  .../xai-grok-shell/src/extensions/debug.rs    |  68 +++++++
  .../xai-grok-telemetry/src/sampling_log.rs    | 186 +++++++++++++++++-
- 10 files changed, 459 insertions(+), 29 deletions(-)
+ 11 files changed, 523 insertions(+), 19 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager/src/app/actions.rs b/crates/codegen/xai-grok-pager/src/app/actions.rs
 index 1b9c31a..6c48501 100644
@@ -366,11 +365,67 @@ index af2d4cc..572b485 100644
 +        );
      }
  }
+diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
+index 0778f18..d15cf73 100644
+--- a/crates/codegen/xai-grok-sampler/src/client.rs
++++ b/crates/codegen/xai-grok-sampler/src/client.rs
+@@ -1043,6 +1043,7 @@ impl SamplingClient {
+             deployment_id: payload.x_grok_deployment_id.as_deref(),
+             user_id: payload.x_grok_user_id.as_deref(),
+         };
++        crate::sampling_log::log_request_body("chat_completions", "chat/completions", &payload);
+         let http_request = grok_headers
+             .apply(self.post(self.endpoint("chat/completions")))
+             .json(&payload);
+@@ -1101,6 +1102,11 @@ impl SamplingClient {
+             deployment_id: payload.x_grok_deployment_id.as_deref(),
+             user_id: payload.x_grok_user_id.as_deref(),
+         };
++        crate::sampling_log::log_request_body(
++            "chat_completions",
++            "chat/completions",
++            &streaming_request,
++        );
+         let http_request = grok_headers
+             .apply(self.post(self.endpoint("chat/completions")))
+             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
+@@ -1323,6 +1329,7 @@ impl SamplingClient {
+         if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
+             apply_chatgpt_codex_request_shape(&mut request_body);
+         }
++        crate::sampling_log::log_request_body("responses", "responses", &request_body);
+         let http_request = grok_headers
+             .apply(self.post(self.endpoint("responses")))
+             .json(&request_body);
+@@ -1498,6 +1505,7 @@ impl SamplingClient {
+             // Presence opts in; the server ignores the value.
+             http_request = http_request.header(DOOM_LOOP_CHECK_HEADER, "true");
+         }
++        crate::sampling_log::log_request_body("responses", "responses", &request_body);
+         let http_request = http_request.json(&request_body);
+ 
+         let built_request = http_request.build().map_err(|e| {
+@@ -1692,6 +1700,7 @@ impl SamplingClient {
+             deployment_id: request.x_grok_deployment_id.as_deref(),
+             user_id: request.x_grok_user_id.as_deref(),
+         };
++        crate::sampling_log::log_request_body("messages", "messages", &request.inner);
+         let http_request = grok_headers
+             .apply(self.post(self.endpoint("messages")))
+             .json(&request.inner);
+@@ -1799,6 +1808,7 @@ impl SamplingClient {
+             deployment_id: request.x_grok_deployment_id.as_deref(),
+             user_id: request.x_grok_user_id.as_deref(),
+         };
++        crate::sampling_log::log_request_body("messages", "messages", &request.inner);
+         let http_request = grok_headers
+             .apply(self.post(self.endpoint("messages")))
+             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
 diff --git a/crates/codegen/xai-grok-sampler/src/sampling_log.rs b/crates/codegen/xai-grok-sampler/src/sampling_log.rs
-index 3b4bebb..9a2bad1 100644
+index 69e2eea..9a2bad1 100644
 --- a/crates/codegen/xai-grok-sampler/src/sampling_log.rs
 +++ b/crates/codegen/xai-grok-sampler/src/sampling_log.rs
-@@ -1,23 +1,35 @@
+@@ -1,10 +1,69 @@
  //! Sampling log — emits `tracing` events with `target: "sampling_log"`.
  //! A dedicated layer in `xai-grok-telemetry` routes these to
 -//! `~/.grok/logs/sampling.jsonl`. Enable with `--log-sampling`.
@@ -392,15 +447,8 @@ index 3b4bebb..9a2bad1 100644
 +    static ENABLED: OnceLock<AtomicBool> = OnceLock::new();
 +    ENABLED.get_or_init(|| AtomicBool::new(parse_enabled(std::env::var(ENV_VAR).ok().as_deref())))
 +}
- 
--/// Same switch the `xai-grok-telemetry` sampling layer keys on. The pager's
--/// hidden `--log-sampling` flag sets this env var before telemetry init, so
--/// checking it here is equivalent to asking whether the layer is installed.
--/// Cached: the flag cannot change after startup, and the hot paths below
--/// run once per LLM call.
- pub fn enabled() -> bool {
--    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
--    *ENABLED.get_or_init(|| parse_enabled(std::env::var("GROK_LOG_SAMPLING").ok().as_deref()))
++
++pub fn enabled() -> bool {
 +    runtime_gate().load(Ordering::Relaxed)
 +}
 +
@@ -408,19 +456,53 @@ index 3b4bebb..9a2bad1 100644
 +/// the previous state so callers can report whether anything changed.
 +pub fn set_enabled(enabled: bool) -> bool {
 +    runtime_gate().swap(enabled, Ordering::SeqCst)
- }
- 
--/// Truthy values accepted by the telemetry layer for `GROK_LOG_SAMPLING`;
--/// keep in sync with `xai-grok-telemetry/src/sampling_log.rs`.
++}
++
 +/// Truthy startup values accepted for `GROK_LOG_SAMPLING`.
- fn parse_enabled(value: Option<&str>) -> bool {
-     value.is_some_and(|v| matches!(v, "1" | "true" | "on"))
- }
-@@ -85,7 +97,19 @@ pub fn request_span(
++fn parse_enabled(value: Option<&str>) -> bool {
++    value.is_some_and(|v| matches!(v, "1" | "true" | "on"))
++}
++
++/// Record the exact JSON request payload about to be sent to the provider,
++/// after all defaulting/shape functions ran (i.e. the true wire body).
++/// No-op unless the sampling log is enabled; serialization only happens on
++/// the enabled path. Serialization failures are swallowed — the log must
++/// never affect the request itself, which serializes independently.
++pub fn log_request_body<T: serde::Serialize>(backend: &'static str, endpoint: &str, body: &T) {
++    if !enabled() {
++        return;
++    }
++    match serde_json::to_string(body) {
++        Ok(data) => {
++            tracing::info!(
++                target: TARGET,
++                event = "request_body",
++                backend = backend,
++                endpoint = endpoint,
++                data = %data,
++            );
++        }
++        Err(e) => {
++            tracing::info!(
++                target: TARGET,
++                event = "request_body",
++                backend = backend,
++                endpoint = endpoint,
++                serialize_error = %e,
++            );
++        }
++    }
++}
  
- #[cfg(test)]
- mod tests {
--    use super::parse_enabled;
+ #[derive(Debug, Clone)]
+ pub struct AuthInfo {
+@@ -35,3 +94,32 @@ pub fn request_span(
+         reasoning_tokens = tracing::field::Empty,
+     )
+ }
++
++#[cfg(test)]
++mod tests {
 +    use super::{enabled, parse_enabled, set_enabled};
 +
 +    #[test]
@@ -434,9 +516,19 @@ index 3b4bebb..9a2bad1 100644
 +        assert!(!enabled());
 +        set_enabled(original);
 +    }
- 
-     #[test]
-     fn parse_enabled_accepts_layer_truthy_values_only() {
++
++    #[test]
++    fn parse_enabled_accepts_layer_truthy_values_only() {
++        assert!(parse_enabled(Some("1")));
++        assert!(parse_enabled(Some("true")));
++        assert!(parse_enabled(Some("on")));
++        assert!(!parse_enabled(Some("0")));
++        assert!(!parse_enabled(Some("false")));
++        assert!(!parse_enabled(Some("yes")));
++        assert!(!parse_enabled(Some("")));
++        assert!(!parse_enabled(None));
++    }
++}
 diff --git a/crates/codegen/xai-grok-shell/src/extensions/debug.rs b/crates/codegen/xai-grok-shell/src/extensions/debug.rs
 index 4196532..f8f7c37 100644
 --- a/crates/codegen/xai-grok-shell/src/extensions/debug.rs

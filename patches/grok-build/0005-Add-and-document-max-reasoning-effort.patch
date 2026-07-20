@@ -1,29 +1,14 @@
-From 5b57d14081b58dfe63e796d0075da1482219d1da Mon Sep 17 00:00:00 2001
-From: Ren Wang <iamwrm@gmail.com>
-Date: Sun, 19 Jul 2026 10:28:47 +0800
-Subject: [PATCH 06/15] Add max reasoning effort above xhigh
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+From 94ca834422ac0b852c88b34b599696472bdb52e7 Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 16:56:01 +0800
+Subject: [PATCH 05/13] Add and document max reasoning effort
 
-Make `max` a distinct canonical reasoning-effort level instead of a UX
-alias of `xhigh`, mirroring pi's thinking levels:
-
-- async-openai's Responses enum has no Max, so the typed request carries
-  an Xhigh placeholder and the sampler restores the literal "max" wire
-  value post-serialize (patch_reasoning_effort_max), driven by a
-  process-local canonical-effort field on CreateResponseWrapper.
-- An echoed reasoning.effort the typed enum can't parse is sanitized to
-  xhigh with the raw string stashed in response metadata
-  (sanitize_unknown_reasoning_effort); effort provenance stamped on
-  assistant items prefers the stash, so Max round-trips.
-- Only the built-in Codex gpt-5.6 entries offer a real Max menu level
-  (pi's supportsOpenAiMax). Elsewhere — pager effort-token resolution
-  and subagent effort overrides — a requested max downgrades to an
-  offered xhigh, preserving the old alias behavior instead of newly
-  rejecting the token or sending a wire value the backend rejects.
-- Anthropic Messages: Max maps to "max" like Xhigh (that API's ceiling).
+Make max a distinct canonical reasoning-effort level above xhigh. Work around the pinned async-openai type at the JSON request/response seams, gate true max by model capability, preserve compatible max-to-xhigh fallback behavior, and document the resulting model and CLI semantics.
 ---
+ .../docs/user-guide/02-authentication.md      |   4 +
+ .../docs/user-guide/04-slash-commands.md      |  10 +-
+ .../docs/user-guide/11-custom-models.md       |   4 +-
+ .../docs/user-guide/14-headless-mode.md       |   2 +-
  .../xai-grok-pager/src/acp/model_state.rs     |  73 +++++++-
  .../src/slash/commands/effort_levels.rs       |   3 +
  crates/codegen/xai-grok-sampler/src/client.rs |  62 ++++++-
@@ -32,8 +17,91 @@ alias of `xhigh`, mirroring pi's thinking levels:
  .../xai-grok-shell/src/agent/config.rs        |  42 +++--
  .../src/agent/session_config.rs               |   1 +
  .../src/agent/subagent/handle_request.rs      |  17 +-
- 8 files changed, 383 insertions(+), 41 deletions(-)
+ 12 files changed, 398 insertions(+), 46 deletions(-)
 
+diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
+index ae1fdbd..eeda4fb 100644
+--- a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
++++ b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
+@@ -66,6 +66,7 @@ level:
+ 
+ ```
+ /model openai-codex/gpt-5.5:xhigh
++/model openai-codex/gpt-5.6-sol:max
+ ```
+ 
+ The equivalent CLI form is:
+@@ -74,6 +75,9 @@ The equivalent CLI form is:
+ grok -m openai-codex/gpt-5.5:xhigh -p "hello"
+ ```
+ 
++The gpt-5.6 family additionally offers the `max` thinking level above
++`xhigh`; on models without it, `max` downgrades to `xhigh`.
++
+ Use `grok openai status` to inspect the credential and `grok openai logout` to
+ remove it. OpenAI login does not replace or modify the normal `grok login`
+ session.
+diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
+index 6d8a965..ea5d78e 100644
+--- a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
++++ b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
+@@ -145,18 +145,22 @@ colon suffix or a second argument:
+ Provider-prefixed IDs such as `openai-codex/gpt-5.5` explicitly select the
+ provider. The suffix is parsed from the last colon only after trying the whole
+ string as an exact model ID, so IDs that contain colons continue to work.
+-Supported canonical levels are `none`, `minimal`, `low`, `medium`, `high`, and
+-`xhigh` (subject to the selected model's offered levels).
++Supported canonical levels are `none`, `minimal`, `low`, `medium`, `high`,
++`xhigh`, and `max` (subject to the selected model's offered levels). `max` is
++a real level above `xhigh` on models that offer it (currently the Codex
++gpt-5.6 family); on other models it downgrades to `xhigh`, matching its old
++alias behavior.
+ 
+ Aliases: `/m`
+ 
+ ### `/effort <level>`
+ 
+-Set reasoning effort on the **current** model without re-selecting it. Levels: `low`, `medium`, `high`, `xhigh`. Only works when the active model supports reasoning effort.
++Set reasoning effort on the **current** model without re-selecting it. Levels: `low`, `medium`, `high`, `xhigh` — plus `max` on models that offer it (e.g. Codex gpt-5.6; elsewhere `max` downgrades to `xhigh`). Only works when the active model supports reasoning effort.
+ 
+ ```
+ /effort high
+ /effort low
++/effort max
+ ```
+ 
+ ### `/always-approve` and `/auto`
+diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md b/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
+index 2015cf6..4ec9bea 100644
+--- a/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
++++ b/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
+@@ -24,10 +24,12 @@ from Ctrl+M or use the provider/model reference directly:
+ 
+ ```
+ /model openai-codex/gpt-5.5:xhigh
++/model openai-codex/gpt-5.6-sol:max
+ ```
+ 
+ The provider prefix chooses the ChatGPT OAuth credential and Codex Responses
+-backend; the optional `:xhigh` suffix chooses reasoning effort. See
++backend; the optional `:effort` suffix chooses reasoning effort (`low` through
++`xhigh`; the gpt-5.6 family also offers `max` above `xhigh`). See
+ [Authentication](02-authentication.md#openai-codex-with-a-chatgpt-plan).
+ 
+ ## Selecting a Model
+diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md b/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md
+index 1cf6ac6..b5df096 100644
+--- a/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md
++++ b/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md
+@@ -33,7 +33,7 @@ Grok processes the prompt, runs any necessary tools, and prints the result to st
+ | `--tools <TOOLS>`       | Allowlist of built-in tools (comma-separated). MCP meta-tools remain available unless denied. Headless only. |
+ | `--disallowed-tools <TOOLS>` | Denylist of built-in tools to remove (comma-separated). Supports `Agent` entries. Headless only. |
+ | `--max-turns <N>`       | Maximum number of agentic turns before stopping. Headless only. |
+-| `--reasoning-effort` / `--effort <LEVEL>` | Reasoning effort for reasoning models. Canonical levels: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (alias of `xhigh`). Also accepts per-model menu option ids (e.g. `deep` → mapped wire value), same as `/effort`. Works in TUI and headless. |
++| `--reasoning-effort` / `--effort <LEVEL>` | Reasoning effort for reasoning models. Canonical levels: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (a real level above `xhigh` on models that offer it, e.g. Codex gpt-5.6; elsewhere it downgrades to `xhigh`). Also accepts per-model menu option ids (e.g. `deep` → mapped wire value), same as `/effort`. Works in TUI and headless. |
+ | `--permission-mode <MODE>` | Permission mode. `bypassPermissions` enables always-approve via this flag (see [22-permissions-and-safety.md](22-permissions-and-safety.md)); for deny-by-default use `defaultMode` in `.claude/settings.json`. |
+ | `--allow <RULE>`        | Permission allow rule with glob patterns (repeatable). Works in TUI and headless. |
+ | `--deny <RULE>`         | Permission deny rule with glob patterns (repeatable). Works in TUI and headless. |
 diff --git a/crates/codegen/xai-grok-pager/src/acp/model_state.rs b/crates/codegen/xai-grok-pager/src/acp/model_state.rs
 index ccb7260..9adf91e 100644
 --- a/crates/codegen/xai-grok-pager/src/acp/model_state.rs
@@ -141,10 +209,10 @@ index 7f79110..3e6e1c2 100644
  }
  
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index 8cc38b2..34908b9 100644
+index b873c8b..6555e2c 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
-@@ -100,7 +100,8 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
+@@ -113,7 +113,8 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
      let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
          Ok(event) => event,
          Err(first_err) => {
@@ -154,7 +222,7 @@ index 8cc38b2..34908b9 100644
              if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) {
                  // Strip tools that async_openai's rs::Tool can't deserialize
                  // (e.g., xAI-specific "x_search"). Instead of maintaining a
-@@ -112,6 +113,12 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
+@@ -125,6 +126,12 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
                  {
                      tools.retain(|t| serde_json::from_value::<rs::Tool>(t.clone()).is_ok());
                  }
@@ -167,7 +235,7 @@ index 8cc38b2..34908b9 100644
                  if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
                      apply_terminal_event_overrides(&mut event, data);
                      return Ok(event);
-@@ -1212,6 +1219,12 @@ impl SamplingClient {
+@@ -1225,6 +1232,12 @@ impl SamplingClient {
          // it in post-serialize. This is the last surviving piece of the
          // old raw_output machinery.
          xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
@@ -180,7 +248,7 @@ index 8cc38b2..34908b9 100644
          if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
              apply_chatgpt_codex_request_shape(&mut request_body);
          }
-@@ -1257,15 +1270,32 @@ impl SamplingClient {
+@@ -1270,15 +1283,32 @@ impl SamplingClient {
              });
          }
  
@@ -222,7 +290,7 @@ index 8cc38b2..34908b9 100644
          Ok(response_obj)
      }
  
-@@ -1351,6 +1381,12 @@ impl SamplingClient {
+@@ -1364,6 +1394,12 @@ impl SamplingClient {
              }
          }
          xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
@@ -235,7 +303,7 @@ index 8cc38b2..34908b9 100644
          if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
              apply_chatgpt_codex_request_shape(&mut request_body);
          }
-@@ -1897,6 +1933,9 @@ impl SamplingClient {
+@@ -1910,6 +1946,9 @@ impl SamplingClient {
          wrapper.x_grok_turn_idx = x_grok_turn_idx;
          wrapper.x_grok_agent_id = x_grok_agent_id;
          wrapper.extra_raw_tools = extra_tools;
@@ -245,7 +313,7 @@ index 8cc38b2..34908b9 100644
  
          if let Some(trace) = trace {
              wrapper.trace = Some(trace);
-@@ -1929,6 +1968,9 @@ impl SamplingClient {
+@@ -1942,6 +1981,9 @@ impl SamplingClient {
          wrapper.x_grok_session_id = x_grok_session_id;
          wrapper.x_grok_turn_idx = x_grok_turn_idx;
          wrapper.x_grok_agent_id = x_grok_agent_id;

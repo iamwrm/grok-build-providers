@@ -44,8 +44,8 @@ git clone https://github.com/earendil-works/pi checkouts/pi
 
    ```bash
    cd checkouts/grok-build
-   # Example: export one newly committed patch after current patch 0015.
-   git format-patch HEAD~1..HEAD --start-number 16 \
+   # Example: export one newly committed patch after current patch 0013.
+   git format-patch HEAD~1..HEAD --start-number 14 \
      -o ../../patches/grok-build/
    ```
 
@@ -99,17 +99,21 @@ Every initiative gets its own doc in `docs/`, following the pattern of
   decisions/deferred work.
 
 The initiative doc is the durable narrative that ties the numbered patches
-together — keep it updated as the patch series evolves.
+together — keep it updated as the patch series evolves. When patches are
+consolidated, preserve the old-to-new mapping in
+[`docs/patch-history.md`](patch-history.md), prove the final source tree is
+unchanged, and clean-room apply the replacement series before deleting the old
+files.
 
 ## Current patch ownership
 
 | Initiative | Patches | Purpose |
 |---|---:|---|
-| [i0001](i0001_add_openai-oauth.md) | `0001–0005` | OpenAI ChatGPT-plan OAuth and Codex transport |
-| [i0002](i0002_add_max_thinking.md) | `0006–0007` | Distinct `max` reasoning level |
-| [i0003](i0003_add_anthropic-oauth.md) | `0008–0012` | Anthropic OAuth, Claude catalog, native `xhigh` |
-| [i0004](i0004_release-ci.md) | `0013–0015` | Cross-platform release CI and Windows portability |
-| [i0005](i0005_last-turn-stats.md) | `0016–` | Last-prompt stats at turn end (cache read/write, TPS, cost) |
+| [i0001](i0001_add_openai-oauth.md) | `0001–0004` | OpenAI ChatGPT-plan OAuth and Codex transport |
+| [i0002](i0002_add_max_thinking.md) | `0005` | Distinct `max` reasoning level |
+| [i0003](i0003_add_anthropic-oauth.md) | `0006–0008` | Anthropic OAuth, Claude catalog, native `xhigh` |
+| [i0004](i0004_release-ci.md) | `0009–0010` | Cross-platform release CI and Windows portability |
+| [i0005](i0005_last-turn-stats.md) | `0011–0013` | Raw sampling diagnostics and turn-end metrics |
 
 ## Conventions
 

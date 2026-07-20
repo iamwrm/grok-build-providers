@@ -1,9 +1,9 @@
 # i0005: Last-prompt stats at turn end (cache read/write, TPS, cost)
 
-**Status:** implemented through patch 0020; raw-wire grounding and release-profile verification complete; user-guide patch deferred
+**Status:** implemented in consolidated patches `0011–0013`; raw-wire grounding and release-profile verification complete; user-guide patch deferred
 **Upstreams:** `checkouts/pi` + `../piagent-config/packages/ren-public-package/0012-last-turn.ts` (reference), `checkouts/grok-build` (patch target)
-**Deliverable:** patch series `patches/grok-build/0016..`, continuing the i0001–i0004 stack
-**Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, base `ba76b0a` (stack tip `65ef540`; i0004 tip `d76cf1c`)
+**Deliverable:** patches `0011–0013`, continuing the i0001–i0004 stack
+**Implementation branch:** clean-room series based on `ba76b0a`; full tip `d8c0564`, tree `0a219b73e452c3ce19ea64cd7679dde3bf1e7a89`
 
 ## Goal
 
@@ -34,7 +34,7 @@ CH cache hit ratio, CTX context-window usage start:end, $ cost.)
 
 ## Implemented patch series
 
-### Patch 0016 — record raw request payloads in the sampling log
+### Patch 0011 — dynamically controllable raw sampling logs
 
 grok-build already had a hidden raw-wire recorder: `--log-sampling` /
 `GROK_LOG_SAMPLING=1` routes `target: "sampling_log"` tracing events to
@@ -44,20 +44,23 @@ already logged verbatim (`event = "sse_chunk"`) for all three backends —
 so raw **responses** (including untyped usage objects) were already
 captured. Raw **requests** were not.
 
-- `xai-grok-sampler/src/sampling_log.rs`: new `enabled()` (cached read of
-  `GROK_LOG_SAMPLING`, same truthy values as the telemetry layer) and
-  `log_request_body(backend, endpoint, body)` — serializes and emits
-  `event = "request_body"` only when the log is enabled; serialization
-  errors are logged, never propagated.
+- `xai-grok-sampler/src/sampling_log.rs`: one process-wide `AtomicBool`,
+  initialized from `GROK_LOG_SAMPLING`, gates both request serialization and
+  telemetry. `log_request_body(backend, endpoint, body)` emits
+  `event = "request_body"` only when enabled; serialization errors are logged,
+  never propagated.
 - `xai-grok-sampler/src/client.rs`: call it at all six send sites
   (chat completions, Responses, Messages × streaming and non-streaming),
   **after** all defaulting/shape functions (`apply_message_defaults` →
   `apply_anthropic_oauth_request_shape`, `apply_chatgpt_codex_request_shape`,
   post-serialize JSON patches), so the log shows the true wire body —
   including the Claude Code identity block and `cache_control` markers.
-- Privacy note: with the flag on, `sampling.jsonl` now contains full prompt
-  text in addition to the full response text it already contained. Off by
-  default, hidden flag, existing size-trimming applies.
+- Runtime controls are `/debug sampling on|off|status`; startup controls remain
+  `GROK_LOG_SAMPLING=true` and hidden `--log-sampling`. The telemetry layer
+  keeps dynamic callsite interest so startup-off can become runtime-on.
+- Privacy note: when enabled, `sampling.jsonl` contains full prompts, tool
+  calls/results, and responses. It is off by default and enabling prints an
+  explicit warning; existing size trimming applies.
 
 ### Grounding run (2026-07-20, live)
 
@@ -86,7 +89,7 @@ with `GROK_LOG_SAMPLING=true`; raw payloads from `sampling.jsonl`:
 - **Conclusions:** the flat `cache_creation_input_tokens` is present and
   authoritative on both `message_start` and `message_delta` — the typed
   `MessagesUsage`/`MessageDeltaUsage` fields grok-build already parses are
-  correct, so patch 0017 can plumb them as planned. The newer
+  correct, so patch `0012` can plumb them as planned. The newer
   `cache_creation` 5m/1h breakdown appears on `message_start` only
   (currently ignored by serde; not needed). Anthropic's `input_tokens` is
   uncached-only: total prompt = input + read + write (matches the
@@ -98,13 +101,13 @@ with `GROK_LOG_SAMPLING=true`; raw payloads from `sampling.jsonl`:
   place a `cache_control` marker on the trailing message. The planned
   W-per-cycle stat will make this cost visible.
 
-### Patch 0017 — track prompt cache writes through usage accounting
+### Patch 0012 — track prompt cache writes through usage accounting
 
 - Added serde-compatible `TokenUsage.cache_creation_prompt_tokens` and
   populated it from Anthropic `cache_creation_input_tokens`.
 - A live Codex check found that OpenAI Responses also emits
   `input_tokens_details.cache_write_tokens`, although the pinned
-  `async-openai` type drops it. Patch 0017 preserves it from the raw terminal
+  `async-openai` type drops it. Patch `0012` preserves it from the raw terminal
   event through the existing process-local response-metadata side channel.
 - Added `UsageTotals.cached_write_tokens`, folded per prompt and per model,
   then projected it as ACP `cachedWriteTokens`, last-call
@@ -130,17 +133,14 @@ The zero write count is a real wire value (automatic OpenAI cache population
 is not separately billed), not an absent field. This is unlike Anthropic's
 explicit, billed cache creation.
 
-### Patch 0018 — tolerate `response.metadata` SSE events
+### Codex compatibility discovered during grounding
 
-During implementation, live OpenAI Responses turns started failing with
-`unknown variant response.metadata`: newer Codex deployments emit this
-informational event, but the pinned `async-openai` `ResponseStreamEvent` enum
-does not model it. The sampler now absorbs only the exact
-`response.metadata` event (matched by SSE event name or JSON `type`, for
-proxy compatibility); all other unknown events remain fail-closed. Full
-sampler suite: 162/162.
+Live OpenAI Responses turns exposed the informational `response.metadata` SSE
+event, which the pinned typed dependency does not model. Exact-event absorption
+is now owned by i0001 patch `0002` (the Codex transport); all other unknown
+events remain fail-closed.
 
-### Patch 0019 — show prompt-cycle usage on completed-turn markers
+### Patch 0013 — show prompt-cycle usage on completed-turn markers
 
 - Carries aggregate `PromptUsage` on both terminal rails: durable
   `TurnCompleted` and legacy `x.ai/session/prompt_complete` (important because
@@ -162,36 +162,6 @@ sampler suite: 162/162.
 - Parked, bash, subagent, cancelled, failed, and replacement-UX markers remain
   unchanged.
 
-### Patch 0020 — enable raw sampling logs before or after startup
-
-Raw recording now supports both startup configuration and a no-restart runtime
-command:
-
-```text
-GROK_LOG_SAMPLING=true grok
-/debug sampling on
-/debug sampling off
-/debug sampling status
-```
-
-- Replaced the sampler's immutable startup cache with one process-wide
-  `AtomicBool`, initialized once from `GROK_LOG_SAMPLING`. Request-body
-  serialization and tracing emission read the same gate. The hidden
-  `--log-sampling` startup flag also explicitly sets that gate after ACP connect,
-  covering an early agent-thread read before pager tracing initialization.
-- The telemetry layer is always installed so a later command can start writing.
-  Sampling event callsites report dynamic interest (`Interest::sometimes()`),
-  preventing tracing from caching the startup-off state permanently. A release
-  test exercises one callsite across `off → on → off`.
-- The hidden release-safe `/debug` command sends `x.ai/debug/sampling` over ACP,
-  so it controls the agent worker in normal TUI mode and the remote leader agent
-  in leader mode. The pager mirrors the confirmed response into its local gate.
-- Enabling prints an explicit warning that `sampling.jsonl` records full prompts,
-  tool calls/results, and responses. The command remains hidden from release
-  completion surfaces but is directly typeable.
-- The writer opens `~/.grok/logs/sampling.jsonl` at startup even when disabled;
-  disabled mode emits no sampling events and avoids request serialization.
-
 ### Deferred
 
 - Upstream user-guide documentation for the marker and raw-wire privacy warning.
@@ -207,24 +177,22 @@ GROK_LOG_SAMPLING=true grok
 
 ## Verification
 
-- Patch 0016: `cargo check -p xai-grok-sampler` clean; sampler lib suite
-  160/160; `parse_enabled` unit test added.
-- Live: release build at the 16-patch tip; headless
+- Patch `0011`: initial raw-request recorder verification passed sampler 160/160;
+  final runtime gate verification passed sampler 2/2, shell ACP handler 2/2,
+  pager `/debug` 8/8, focused pager dispatch/status 2/2, and dynamic callsite
+  gating 1/1 in release profile.
+- Live pre-consolidation grounding: headless
   `-m anthropic/claude-sonnet-4-6:low` tool-using turn completed on attempt
   1 with `GROK_LOG_SAMPLING=true`; `sampling.jsonl` contained 3
   `request_body` events (one per LLM call, plus a `responses`-backend
   auxiliary call) alongside the existing `sse_chunk` stream.
-- Patch 0017: sampler 161/161; chat-state 340/340; focused shell
+- Patch `0012`: sampler 161/161; chat-state 340/340; focused shell
   `PromptResponseMeta` and headless projection tests pass; final
   `cargo check -p xai-grok-shell --all-targets` clean.
-- Patch 0018: sampler 162/162 including exact-name / JSON-type
+- i0001 patch `0002`: sampler 162/162 including exact-name / JSON-type
   `response.metadata` absorption.
-- Patch 0019: `cargo check -p xai-grok-pager --all-targets` clean; pager
-  session-event tests 41/41; turn-completion tests 19/19.
-- Final 19-patch release build clean. Live `openai-codex/gpt-5.5:low`
-  tool-using headless turn completed successfully (no `response.metadata`
-  serialization failure).
-- Patch 0020 release-only validation (disk-constrained; debug artifacts removed):
-  sampler gate 2/2; shell ACP sampling handler 2/2; pager `/debug` command 8/8;
-  focused pager dispatch/status 2/2; telemetry same-callsite dynamic gate 1/1.
-  Final `cargo build --release -p xai-grok-pager-bin` clean.
+- Patch `0013`: pager session-event tests 41/41; turn-completion tests 19/19.
+- Consolidation clean-room: all 13 patches apply to `ba76b0a`, final tree
+  `0a219b73e452c3ce19ea64cd7679dde3bf1e7a89` exactly matches the old 20-patch
+  tree, and `CARGO_INCREMENTAL=0 cargo build --release --locked
+  -p xai-grok-pager-bin` passes.

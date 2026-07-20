@@ -1,0 +1,428 @@
+From d3a0c5e7850b9a3842a7b782c4902c97e46e5158 Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 16:56:01 +0800
+Subject: [PATCH 08/13] Add the Anthropic catalog with native xhigh support
+
+Register credential-gated adaptive-thinking anthropic/* models with their final per-model effort menus. Send native xhigh only on supporting models, retain max for older adaptive models with symmetric compatibility fallback, and document OAuth, catalog, and custom Messages behavior.
+---
+ .../docs/user-guide/02-authentication.md      |  44 ++++++
+ .../docs/user-guide/04-slash-commands.md      |  11 +-
+ .../docs/user-guide/11-custom-models.md       |  32 ++++-
+ .../xai-grok-pager/src/acp/model_state.rs     |  46 ++++++
+ .../src/conversation.rs                       |   3 +-
+ .../xai-grok-sampling-types/src/types.rs      |  14 +-
+ .../xai-grok-shell/src/agent/config.rs        | 133 ++++++++++++++++++
+ 7 files changed, 273 insertions(+), 10 deletions(-)
+
+diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
+index eeda4fb..565762e 100644
+--- a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
++++ b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
+@@ -84,6 +84,50 @@ session.
+ 
+ ---
+ 
++## Anthropic Claude with a Pro/Max plan
++
++Use Anthropic Claude models through a Claude Pro/Max subscription without API
++keys or `config.toml` edits.
++
++Sign in once:
++
++```bash
++grok anthropic login
++```
++
++The browser flow uses Anthropic's PKCE authorization flow and a fixed callback
++at `http://localhost:53692/callback`. When the browser runs on another
++machine, paste the redirect URL or the `code#state` pair shown by claude.ai
++into the terminal. Credentials are stored separately from the xAI session in
++`~/.grok/anthropic_auth.json`, refreshed automatically, and sent only to the
++Anthropic API.
++
++After login, the `anthropic/*` models appear in the Ctrl+M picker. Switch
++inside the app with a pi-style provider/model reference and optional thinking
++level:
++
++```
++/model anthropic/claude-opus-4-8:high
++/model anthropic/claude-sonnet-5:max
++```
++
++The equivalent CLI form is:
++
++```bash
++grok -m anthropic/claude-opus-4-8:high -p "hello"
++```
++
++Claude models offer thinking levels `low` through `max`. Native `xhigh` — a
++distinct level between `high` and `max` — is available on Opus 4.7/4.8,
++Sonnet 5, and Fable 5; on Opus 4.6 and Sonnet 4.6, a requested `xhigh`
++resolves to `max`.
++
++Use `grok anthropic status` to inspect the credential and
++`grok anthropic logout` to remove it. Anthropic login does not replace or
++modify the normal `grok login` session.
++
++---
++
+ ## API Key
+ 
+ For CI/CD, automation, or environments without browser access, use an API key from [console.x.ai](https://console.x.ai):
+diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
+index ea5d78e..d441268 100644
+--- a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
++++ b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
+@@ -140,16 +140,19 @@ colon suffix or a second argument:
+ /model Grok Build
+ /model Reasoning X high
+ /model openai-codex/gpt-5.5:xhigh
++/model anthropic/claude-opus-4-8:high
+ ```
+ 
+-Provider-prefixed IDs such as `openai-codex/gpt-5.5` explicitly select the
++Provider-prefixed IDs such as `openai-codex/gpt-5.5` or
++`anthropic/claude-opus-4-8` explicitly select the
+ provider. The suffix is parsed from the last colon only after trying the whole
+ string as an exact model ID, so IDs that contain colons continue to work.
+ Supported canonical levels are `none`, `minimal`, `low`, `medium`, `high`,
+ `xhigh`, and `max` (subject to the selected model's offered levels). `max` is
+-a real level above `xhigh` on models that offer it (currently the Codex
+-gpt-5.6 family); on other models it downgrades to `xhigh`, matching its old
+-alias behavior.
++a real level above `xhigh` on models that offer it (the Codex gpt-5.6 family
++and the Claude catalog); on other models it downgrades to `xhigh`, matching
++its old alias behavior. Symmetrically, `xhigh` resolves to an offered `max`
++on models without a native `xhigh` level (e.g. Claude Opus 4.6).
+ 
+ Aliases: `/m`
+ 
+diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md b/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
+index 4ec9bea..b5eece3 100644
+--- a/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
++++ b/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
+@@ -32,6 +32,23 @@ backend; the optional `:effort` suffix chooses reasoning effort (`low` through
+ `xhigh`; the gpt-5.6 family also offers `max` above `xhigh`). See
+ [Authentication](02-authentication.md#openai-codex-with-a-chatgpt-plan).
+ 
++## Anthropic Claude built-ins (zero config)
++
++After `grok anthropic login`, Grok automatically adds the built-in
++`anthropic/*` catalog (the adaptive-thinking Claude generation: Opus 4.6–4.8,
++Sonnet 4.6/5, Fable 5). No `[model.*]` configuration is needed:
++
++```
++/model anthropic/claude-opus-4-8:high
++/model anthropic/claude-sonnet-5:max
++```
++
++The provider prefix chooses the Anthropic OAuth credential and Messages
++backend; the optional `:effort` suffix chooses the adaptive thinking effort
++(`low` through `max`; native `xhigh` on Opus 4.7/4.8, Sonnet 5, and Fable 5,
++elsewhere `xhigh` resolves to `max`). See
++[Authentication](02-authentication.md#anthropic-claude-with-a-promax-plan).
++
+ ## Selecting a Model
+ 
+ ### CLI Flag
+@@ -98,7 +115,7 @@ description = "Model description"          # Optional description
+ api_key = "sk-..."                        # API key for this provider (optional)
+ env_key = "XAI_API_KEY"                   # Env var holding the API key (optional; string or array)
+ api_backend = "chat_completions"          # "chat_completions", "responses", or "messages"
+-auth_scheme = "bearer"                    # "bearer", "x_api_key", or "chatgpt_oauth"
++auth_scheme = "bearer"                    # "bearer", "x_api_key", "chatgpt_oauth", or "anthropic_oauth"
+ temperature = 0.7                         # Sampling temperature
+ top_p = 0.95                              # Nucleus sampling parameter
+ max_completion_tokens = 8192              # Maximum tokens per response
+@@ -191,7 +208,18 @@ context_window = 200000
+ extra_headers = { "x-api-key" = "sk-ant-...", "anthropic-version" = "2023-06-01" }
+ ```
+ 
+-The `messages` backend uses the Anthropic Messages protocol. Anthropic authenticates with an `x-api-key` header rather than `Authorization: Bearer`, so pass your key through `extra_headers`, which Grok sends verbatim.
++The `messages` backend uses the Anthropic Messages protocol. With an API key, Anthropic authenticates with an `x-api-key` header rather than `Authorization: Bearer`, so pass your key through `extra_headers`, which Grok sends verbatim.
++
++For Claude Pro/Max OAuth, do **not** configure a key manually; use the
++built-in `anthropic/*` catalog described above. Advanced custom entries can
++opt into the stored Anthropic credential with
++`auth_scheme = "anthropic_oauth"`, `api_backend = "messages"`, and
++`base_url = "https://api.anthropic.com/v1"`; Grok then injects the Claude
++Code identity headers and system block that the consumer-OAuth backend
++requires. In custom entries, only offer the `xhigh` effort on models with
++native `xhigh` support (Opus 4.7/4.8, Sonnet 5, Fable 5); it passes through
++verbatim on the Messages wire, and older models reject it — use `max`
++instead, which every adaptive Claude model accepts.
+ 
+ ### OpenAI (Chat Completions)
+ 
+diff --git a/crates/codegen/xai-grok-pager/src/acp/model_state.rs b/crates/codegen/xai-grok-pager/src/acp/model_state.rs
+index 9adf91e..45a3c77 100644
+--- a/crates/codegen/xai-grok-pager/src/acp/model_state.rs
++++ b/crates/codegen/xai-grok-pager/src/acp/model_state.rs
+@@ -247,6 +247,16 @@ impl ModelState {
+                 .find(|opt| opt.value == ReasoningEffort::Xhigh)
+                 .map(|o| o.value);
+         }
++        // Symmetric top-level mapping (pi's Claude `thinkingLevelMap`):
++        // models without a native `xhigh` but with a real Max level (e.g.
++        // Claude Opus 4.6 / Sonnet 4.6) resolve a requested `xhigh` to the
++        // offered `max` instead of rejecting it.
++        if parsed == ReasoningEffort::Xhigh {
++            return options
++                .iter()
++                .find(|opt| opt.value == ReasoningEffort::Max)
++                .map(|o| o.value);
++        }
+         None
+     }
+ 
+@@ -669,6 +679,42 @@ mod tests {
+         assert!(low_only.resolve_effort_token("max").is_none());
+     }
+ 
++    /// Symmetric top-level mapping: a requested `xhigh` on a menu without a
++    /// native Xhigh resolves to an offered Max (Claude Opus 4.6 / Sonnet 4.6
++    /// style), and is still rejected when neither top level exists.
++    #[test]
++    fn resolve_effort_token_xhigh_maps_to_max_unless_offered() {
++        let max_only = state_with_meta(Some(serde_json::json!({
++            "supportsReasoningEffort": true,
++            "reasoningEfforts": [
++                { "value": "high", "label": "High" },
++                { "value": "max", "label": "Max" },
++            ],
++        })));
++        assert_eq!(
++            max_only.resolve_effort_token("xhigh"),
++            Some(ReasoningEffort::Max)
++        );
++        // Native xhigh offered → no mapping.
++        let with_both = state_with_meta(Some(serde_json::json!({
++            "supportsReasoningEffort": true,
++            "reasoningEfforts": [
++                { "value": "xhigh", "label": "Extra high" },
++                { "value": "max", "label": "Max" },
++            ],
++        })));
++        assert_eq!(
++            with_both.resolve_effort_token("xhigh"),
++            Some(ReasoningEffort::Xhigh)
++        );
++        // Neither top level → rejected.
++        let low_only = state_with_meta(Some(serde_json::json!({
++            "supportsReasoningEffort": true,
++            "reasoningEfforts": [{ "value": "low", "label": "Low" }],
++        })));
++        assert!(low_only.resolve_effort_token("xhigh").is_none());
++    }
++
+     #[test]
+     fn resolve_effort_token_legacy_menu_rejects_none() {
+         // supportsReasoningEffort without a server list → built-in low..xhigh.
+diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
+index c4b162a..32ac83e 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
+@@ -5259,7 +5259,8 @@ mod tests {
+             (crate::ReasoningEffort::Low, "low"),
+             (crate::ReasoningEffort::Medium, "medium"),
+             (crate::ReasoningEffort::High, "high"),
+-            (crate::ReasoningEffort::Xhigh, "max"),
++            (crate::ReasoningEffort::Xhigh, "xhigh"),
++            (crate::ReasoningEffort::Max, "max"),
+         ] {
+             let req = messages_test_request(Some(variant));
+             let msgs = build_messages_request(&req);
+diff --git a/crates/codegen/xai-grok-sampling-types/src/types.rs b/crates/codegen/xai-grok-sampling-types/src/types.rs
+index edebb1a..94725f6 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/types.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/types.rs
+@@ -829,7 +829,14 @@ impl ReasoningEffort {
+             Self::Low => Some("low"),
+             Self::Medium => Some("medium"),
+             Self::High => Some("high"),
+-            Self::Xhigh | Self::Max => Some("max"),
++            // pi parity: `xhigh` and `max` are distinct native adaptive
++            // efforts. Native `xhigh` exists only on newer Claude models
++            // (Opus 4.7/4.8, Sonnet 5, Fable 5); catalogs/menus gate which
++            // levels a model offers, and the effort resolver maps a
++            // requested `xhigh` to an offered `max` (and vice versa) on
++            // models that lack one of the two.
++            Self::Xhigh => Some("xhigh"),
++            Self::Max => Some("max"),
+         }
+     }
+ }
+@@ -1267,9 +1274,10 @@ mod tests {
+             ReasoningEffort::Max.to_responses_api(),
+             crate::rs::ReasoningEffort::Xhigh
+         );
+-        // Anthropic Messages: "max" is the ceiling for both top levels.
++        // Anthropic Messages: native levels pass through verbatim (pi
++        // parity); menu gating keeps `xhigh` off models that reject it.
+         assert_eq!(ReasoningEffort::Max.to_messages_api(), Some("max"));
+-        assert_eq!(ReasoningEffort::Xhigh.to_messages_api(), Some("max"));
++        assert_eq!(ReasoningEffort::Xhigh.to_messages_api(), Some("xhigh"));
+     }
+ 
+     #[test]
+diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
+index dffc6e1..7f5b818 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/config.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
+@@ -3186,6 +3186,14 @@ pub fn resolve_model_list(
+             resolved.entry(key).or_insert(entry);
+         }
+     }
++    // Anthropic (Claude Pro/Max) models: available whenever the user has
++    // signed in with `grok anthropic login`. Same insertion semantics as
++    // the Codex catalog above.
++    if crate::auth::anthropic::read_credential().is_some() {
++        for (key, entry) in anthropic_model_entries() {
++            resolved.entry(key).or_insert(entry);
++        }
++    }
+     for (key, model_override) in &cfg.config_models {
+         let had_base = resolved.contains_key(key);
+         let base = resolved.shift_remove(key);
+@@ -3522,6 +3530,89 @@ pub fn openai_codex_model_entries() -> Vec<(String, ModelEntry)> {
+         .collect()
+ }
+ 
++/// Base URL of the Anthropic API; the sampler appends `/messages`.
++pub const ANTHROPIC_MESSAGES_BASE_URL: &str = "https://api.anthropic.com/v1";
++
++/// Built-in Anthropic (Claude Pro/Max) model catalog, keyed
++/// `anthropic/<id>`. Mirrors pi's `anthropic` provider catalog, restricted
++/// to the adaptive-thinking generation (Claude 4.6+): grok-build's Messages
++/// conversion drives thinking exclusively through the adaptive
++/// `output_config.effort` field, which older budget-thinking models reject.
++/// Callers gate on a stored Anthropic credential (`grok anthropic login`)
++/// so the picker doesn't fill with models that cannot work.
++pub fn anthropic_model_entries() -> Vec<(String, ModelEntry)> {
++    // (id, name, context_window, max_completion_tokens)
++    const CLAUDE_CONTEXT: u64 = 1_000_000;
++    let models: [(&str, &str, u64, u32); 6] = [
++        ("claude-opus-4-8", "Claude Opus 4.8", CLAUDE_CONTEXT, 128_000),
++        ("claude-opus-4-7", "Claude Opus 4.7", CLAUDE_CONTEXT, 128_000),
++        ("claude-opus-4-6", "Claude Opus 4.6", CLAUDE_CONTEXT, 128_000),
++        ("claude-sonnet-5", "Claude Sonnet 5", CLAUDE_CONTEXT, 128_000),
++        (
++            "claude-sonnet-4-6",
++            "Claude Sonnet 4.6",
++            CLAUDE_CONTEXT,
++            64_000,
++        ),
++        ("claude-fable-5", "Claude Fable 5", CLAUDE_CONTEXT, 128_000),
++    ];
++    models
++        .into_iter()
++        .map(|(slug, name, context_window, max_completion_tokens)| {
++            let key = format!("anthropic/{slug}");
++            let mut info = ModelInfo::fallback(slug);
++            info.id = Some(key.clone());
++            info.base_url = ANTHROPIC_MESSAGES_BASE_URL.to_string();
++            info.name = Some(format!("{name} (Anthropic)"));
++            info.description = Some("Anthropic Claude via Claude Pro/Max plan".to_string());
++            info.api_backend = ApiBackend::Messages;
++            info.auth_scheme = AuthScheme::AnthropicOauth;
++            info.context_window =
++                NonZeroU64::new(context_window).expect("claude context windows are non-zero");
++            info.max_completion_tokens = Some(max_completion_tokens);
++            info.supports_reasoning_effort = true;
++            info.reasoning_effort = Some(ReasoningEffort::High);
++            let mut efforts = vec![
++                (ReasoningEffort::Low, "low", "Low", false),
++                (ReasoningEffort::Medium, "medium", "Medium", false),
++                (ReasoningEffort::High, "high", "High", true),
++            ];
++            // pi parity (`thinkingLevelMap`): native `xhigh` — a distinct
++            // level between `high` and `max` — exists only on Opus 4.7/4.8,
++            // Sonnet 5, and Fable 5. All adaptive models accept `max`; on
++            // models without a native `xhigh` the effort resolver maps a
++            // requested `xhigh` to the offered `max`.
++            let has_native_xhigh = matches!(
++                slug,
++                "claude-opus-4-8" | "claude-opus-4-7" | "claude-sonnet-5" | "claude-fable-5"
++            );
++            if has_native_xhigh {
++                efforts.push((ReasoningEffort::Xhigh, "xhigh", "Extra high", false));
++            }
++            efforts.push((ReasoningEffort::Max, "max", "Max", false));
++            info.reasoning_efforts = efforts
++                .into_iter()
++                .map(|(value, id, label, default)| ReasoningEffortOption {
++                    id: id.to_string(),
++                    value,
++                    label: label.to_string(),
++                    description: None,
++                    default,
++                })
++                .collect();
++            (
++                key,
++                ModelEntry {
++                    info,
++                    api_key: None,
++                    env_key: None,
++                    api_base_url: None,
++                },
++            )
++        })
++        .collect()
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct ModelEntryConfig {
+     /// Stable unique identifier for this catalog entry. When present,
+@@ -6063,6 +6154,48 @@ reasoning_effort = "low"
+         }
+     }
+ 
++    /// Built-in Anthropic catalog: every entry is keyed `anthropic/<slug>`,
++    /// routes to the Anthropic Messages API with the OAuth auth scheme, and
++    /// offers efforts through `max`; native `xhigh` only where the model
++    /// supports it (pi's `thinkingLevelMap`).
++    #[test]
++    fn anthropic_entries_route_to_messages_backend() {
++        let entries = anthropic_model_entries();
++        assert!(!entries.is_empty());
++        assert!(entries.iter().any(|(k, _)| k == "anthropic/claude-opus-4-8"));
++        for (key, entry) in &entries {
++            assert_eq!(key, entry.info.id.as_deref().unwrap());
++            let slug = key.strip_prefix("anthropic/").unwrap();
++            assert_eq!(entry.info.model, slug);
++            assert_eq!(entry.info.base_url, ANTHROPIC_MESSAGES_BASE_URL);
++            assert_eq!(entry.info.api_backend, ApiBackend::Messages);
++            assert_eq!(entry.info.auth_scheme, AuthScheme::AnthropicOauth);
++            assert!(entry.info.supports_reasoning_effort);
++            assert!(
++                entry
++                    .info
++                    .reasoning_efforts
++                    .iter()
++                    .any(|o| o.value == ReasoningEffort::Max)
++            );
++            let offers_xhigh = entry
++                .info
++                .reasoning_efforts
++                .iter()
++                .any(|o| o.value == ReasoningEffort::Xhigh);
++            assert_eq!(
++                offers_xhigh,
++                matches!(
++                    slug,
++                    "claude-opus-4-8" | "claude-opus-4-7" | "claude-sonnet-5" | "claude-fable-5"
++                ),
++                "native xhigh is Opus 4.7/4.8, Sonnet 5, Fable 5 only (got {slug})"
++            );
++            assert!(entry.info.max_completion_tokens.is_some());
++            assert!(entry.api_key.is_none() && entry.env_key.is_none());
++        }
++    }
++
+     /// Anthropic OAuth headers: defaults injected, explicit user headers win.
+     #[test]
+     fn inject_anthropic_oauth_headers_defaults_and_user_override() {
+-- 
+2.50.1 (Apple Git-155)
+

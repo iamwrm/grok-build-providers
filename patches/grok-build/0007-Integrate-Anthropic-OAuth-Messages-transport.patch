@@ -1,16 +1,9 @@
-From 3e5cb8094e6385493e8b38bf0e4d171634d071c8 Mon Sep 17 00:00:00 2001
-From: Ren Wang <iamwrm@gmail.com>
-Date: Sun, 19 Jul 2026 11:21:40 +0800
-Subject: [PATCH 09/15] Integrate Anthropic OAuth Messages transport
+From dd51ea230051a83bce2b2e15258f97516b13635d Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 16:56:01 +0800
+Subject: [PATCH 07/13] Integrate Anthropic OAuth Messages transport
 
-Add the anthropic_oauth auth scheme with live bearer resolution and the
-Claude Code identity headers (anthropic-version, anthropic-beta oauth,
-claude-cli user-agent, x-app). Messages requests gain the mandatory
-Claude Code identity system block, a documented system-prompt fragment
-rewrite table for the consumer-OAuth third-party classifier, and drop
-temperature and top_p when extended thinking is enabled. Anthropic-OAuth
-models never fall back to the xAI session token, and explicit extra
-user-agent headers now win over the sampler default.
+Add anthropic_oauth bearer resolution, Claude Code identity headers, mandatory identity system block, consumer-OAuth request shaping, and safe sampling-parameter removal during extended thinking. Keep OAuth credentials isolated from API-key and xAI fallback paths.
 ---
  crates/codegen/xai-grok-sampler/src/client.rs | 165 +++++++++++++++++-
  crates/codegen/xai-grok-sampler/src/config.rs |   9 +
@@ -19,10 +12,10 @@ user-agent headers now win over the sampler default.
  4 files changed, 253 insertions(+), 8 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index 34908b9..64e006b 100644
+index 6555e2c..0778f18 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
-@@ -425,6 +425,83 @@ fn apply_chatgpt_codex_request_shape(body: &mut serde_json::Value) {
+@@ -438,6 +438,83 @@ fn apply_chatgpt_codex_request_shape(body: &mut serde_json::Value) {
      obj.remove("top_p");
  }
  
@@ -106,7 +99,7 @@ index 34908b9..64e006b 100644
  /// Convert a prior assistant easy-input message into the completed output
  /// message shape used by pi/the Codex client:
  ///
-@@ -572,7 +649,7 @@ impl SamplingClient {
+@@ -585,7 +662,7 @@ impl SamplingClient {
                      })?;
                      headers.insert(HeaderName::from_static("x-api-key"), header_value);
                  }
@@ -115,7 +108,7 @@ index 34908b9..64e006b 100644
                      let bearer = format!("Bearer {}", api_key);
                      let header_value = HeaderValue::from_str(&bearer).map_err(|_| {
                          tracing::debug!(
-@@ -639,7 +716,9 @@ impl SamplingClient {
+@@ -652,7 +729,9 @@ impl SamplingClient {
          }
  
          // Always set User-Agent: per-session origin if available, else fallback.
@@ -126,7 +119,7 @@ index 34908b9..64e006b 100644
              let ua_string = match config.origin_client.as_ref() {
                  Some(origin) => user_agent_string_for(origin),
                  None => user_agent_string_for(&OriginClientInfo {
-@@ -715,7 +794,7 @@ impl SamplingClient {
+@@ -728,7 +807,7 @@ impl SamplingClient {
                          headers.insert(HeaderName::from_static("x-api-key"), v);
                      }
                  }
@@ -135,7 +128,7 @@ index 34908b9..64e006b 100644
                      headers.remove(HeaderName::from_static("x-api-key"));
                      if let Ok(v) = HeaderValue::from_str(&format!("Bearer {fresh}")) {
                          headers.insert(AUTHORIZATION, v);
-@@ -773,7 +852,7 @@ impl SamplingClient {
+@@ -786,7 +865,7 @@ impl SamplingClient {
                  .get(HeaderName::from_static("x-api-key"))
                  .and_then(|v| v.to_str().ok())
                  .map(|s| s.to_string()),
@@ -144,7 +137,7 @@ index 34908b9..64e006b 100644
                  .default_headers
                  .get(AUTHORIZATION)
                  .and_then(|v| v.to_str().ok())
-@@ -815,7 +894,10 @@ impl SamplingClient {
+@@ -828,7 +907,10 @@ impl SamplingClient {
          let auth_prefix = self.current_sent_bearer_prefix();
          let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
              (AuthScheme::XApiKey, Some(_)) => "x-api-key",
@@ -156,7 +149,7 @@ index 34908b9..64e006b 100644
              (_, None) => "none",
          };
          crate::sampling_log::AuthInfo {
-@@ -1563,6 +1645,10 @@ impl SamplingClient {
+@@ -1576,6 +1658,10 @@ impl SamplingClient {
              request.inner.top_p = self.defaults.top_p;
          }
  
@@ -167,7 +160,7 @@ index 34908b9..64e006b 100644
          Ok(())
      }
  
-@@ -2889,4 +2975,73 @@ mod tests {
+@@ -2917,4 +3003,73 @@ mod tests {
          assert_eq!(body["instructions"], "part one\npart two");
          assert!(body["input"].as_array().unwrap().is_empty());
      }

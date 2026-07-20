@@ -1,11 +1,9 @@
-From fa524e65613045cef1d14596156eba8625d5c820 Mon Sep 17 00:00:00 2001
-From: Ren Wang <iamwrm@gmail.com>
-Date: Sat, 18 Jul 2026 23:48:58 +0800
-Subject: [PATCH 04/15] Support pi-style provider/model:effort references
+From 72bbd72c3ca5230d0dfffd291a7991b828871324 Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 16:56:00 +0800
+Subject: [PATCH 03/13] Support provider/model:effort references
 
-Parse provider-qualified model references and optional reasoning effort in
-both -m and /model. Split only the last colon after first trying the exact
-model id, preserving models whose ids contain colons and existing syntax.
+Parse provider-qualified model references and optional reasoning effort in both -m and /model. Split only the last colon after first trying the exact model id, preserving model ids that contain colons and all existing syntax.
 ---
  crates/codegen/xai-grok-pager-bin/src/main.rs | 15 ++++-
  crates/codegen/xai-grok-pager/src/app/cli.rs  | 55 +++++++++++++++++

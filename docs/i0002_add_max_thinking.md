@@ -2,28 +2,25 @@
 
 **Status:** implemented and exported
 **Upstreams:** `checkouts/pi` (reference semantics), `checkouts/grok-build` (patch target)
-**Deliverable:** patches `0006` (code) and `0007` (docs) appended to the series in `patches/grok-build/`
-**Implementation branch:** `checkouts/grok-build`, branch `openai-oauth`, commits `5b57d14` + `ff8806e` on top of `a175845` (base `ba76b0a`, Grok `0.2.106`)
-**Depends on:** i0001 (OpenAI Codex OAuth provider, patches 0001–0005)
+**Deliverable:** consolidated patch `0005` in `patches/grok-build/`
+**Implementation branch:** clean-room series based on `ba76b0a`; i0002 boundary `a7b5601`, tree `7c51dd6e240654ea1ab684ccf452a3e2536d0226`
+**Depends on:** i0001 (OpenAI Codex OAuth provider, patches `0001–0004`)
 
 ## Patch ownership
 
-- Patches `0001`–`0005` in `patches/grok-build/` are owned by **i0001**; this
-  work does not modify them, only stacks on top.
-- Patches `0006` (code) and `0007` (docs) are owned by **i0002** — this doc is
-  their source of truth for rationale, review, and future rebases. If either
-  patch stops applying cleanly, fix and re-export it as part of maintaining
-  this doc's series, and update the status line above.
+- Patches `0001`–`0004` in `patches/grok-build/` are owned by **i0001**; this
+  work stacks on top.
+- Patch `0005` is owned by **i0002** and contains both code and user docs. If it
+  stops applying cleanly, fix and re-export that patch as one coherent change.
 
-## Supersession note
+## Anthropic interaction
 
-This initiative records the stack as it existed through patch `0007`. Later,
-[i0003 patch 0012](i0003_add_anthropic-oauth.md#patch-0012--native-xhigh-on-the-messages-wire)
-changed the **Anthropic Messages** mapping from `Xhigh|Max → "max"` to distinct
-native values (`Xhigh → "xhigh"`, `Max → "max"`) with per-model menu gating.
-The OpenAI Responses behavior implemented here is unchanged. Statements below
-about both top Anthropic levels sharing the same wire value are historical
-patch-0006 behavior, not current full-stack behavior.
+Patch `0005` introduces the canonical `Max` level and OpenAI Responses wire
+workaround. The final Anthropic-specific mapping lives in i0003 patch `0008`:
+`Xhigh → "xhigh"` on native-supporting models and `Max → "max"`, with per-model
+menu gating. The pre-consolidation series briefly collapsed both values to
+`"max"`; that intermediate state is historical only and is documented in
+[patch-history.md](patch-history.md).
 
 ## Goal
 
@@ -52,9 +49,8 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
   - `supportsOpenAiMax(model)` — **gpt-5.6 only**, on the
     `openai-responses` / `azure-openai-responses` / `openai-codex-responses` /
     `openai-completions` APIs → merges `{ max: "max" }`;
-  - Anthropic adaptive-thinking models also map `max`. That was out of scope
-    for patches `0006–0007`; the then-current Messages path sent `"max"` for
-    `Xhigh`. i0003 patch `0012` later added native `xhigh` differentiation.
+  - Anthropic adaptive-thinking models also map `max`; active i0003 patch
+    `0008` owns native per-model `xhigh` differentiation.
 - `packages/ai/src/api/openai-codex-responses.ts` (and `openai-responses.ts`):
   the effort string is passed through `thinkingLevelMap` and lands on
   `reasoning.effort` verbatim — i.e. the wire value is literally `"max"`.
@@ -66,8 +62,7 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
   `"xhigh" | "max" => Xhigh` ("max is a CLI/UX alias of xhigh") and the error
   message plus `parse_canonical_effort_token` document that alias. Also here:
   `to_responses_api` / `from_responses_api` (bridges to async-openai),
-  `to_messages_api` (at this patch tip emitted `"max"` for `Xhigh` on the
-  Anthropic Messages API; superseded by patch `0012`),
+  `to_messages_api` (final Anthropic mapping is owned by i0003 patch `0008`),
   `ReasoningEffortOption { id, value, label, … }` (per-model
   effort menus where `id` is presentation/input and `value` is the wire value).
 - **Hard constraint:** `rs::ReasoningEffort` is
@@ -84,7 +79,7 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
   - `CreateResponseWrapper` already carries process-local fields the sampler
     strips before sending (`trace`) — precedent for a side-channel field.
 - `crates/codegen/xai-grok-shell/src/agent/config.rs` —
-  `openai_codex_model_entries()` (patch 0003): per-model
+  `openai_codex_model_entries()` (patch `0004`): per-model
   `reasoning_efforts` menus, currently `low|medium|high|xhigh` for all seven
   Codex models.
 - `crates/codegen/xai-grok-shell/src/agent/models.rs` —
@@ -96,7 +91,7 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
   rejected, not clamped).
 - `crates/codegen/xai-grok-pager/src/app/cli.rs` +
   `src/slash/commands/model.rs` — pi-style `provider/model:effort` references
-  (patch 0004) resolve the suffix via `parse_canonical_effort_token` and
+  (patch `0003`) resolve the suffix via `parse_canonical_effort_token` and
   `resolve_effort_for_model`; they pick up a new enum variant with no parser
   changes.
 - `crates/codegen/xai-grok-agent/src/config.rs` — agent-definition `Effort`
@@ -108,7 +103,7 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
 
 ## Implemented patch series
 
-### Patch 0006 — `max` reasoning effort (code)
+### Patch 0005 — `max` reasoning effort and user documentation
 
 **A. Canonical enum** — `xai-grok-sampling-types/src/types.rs`
 
@@ -117,9 +112,8 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
 - `FromStr`: `"max" → Max` (alias removed); update the error string and the
   `parse_canonical_effort_token` doc comment; rewrite the upstream
   `reasoning_effort_from_str_accepts_max_as_xhigh` test to the new semantics.
-- `to_messages_api`: `Max → Some("max")` (at the patch-0006 tip this was the
-  same wire value as `Xhigh`; patch `0012` later changed only `Xhigh` to emit
-  native `"xhigh"`).
+- `to_messages_api`: `Max → Some("max")`; active i0003 patch `0008` owns
+  native `Xhigh → "xhigh"` and per-model gating.
 - `to_responses_api`: `Max → rs::ReasoningEffort::Xhigh` as a **typed
   placeholder only** (async-openai cannot represent `Max`); the true wire
   value is restored by the post-serialize patch below. Document this loudly.
@@ -187,12 +181,9 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
   gpt-5.6 menu resolves to `Max`; `openai-codex/gpt-5.6-sol:max` reference
   parses end-to-end.
 
-### Patch 0007 — user documentation
-
-- Update the pager user-guide pages (`02-authentication`, `04-slash-commands`,
-  `11-custom-models`, `14-headless-mode`): document `max`, which models offer
-  it, and the downgrade-to-`xhigh` behavior elsewhere.
-- No code changes.
+The same patch updates the pager user guide (`02-authentication`,
+`04-slash-commands`, `11-custom-models`, `14-headless-mode`) with model support
+and downgrade behavior.
 
 ## Files affected (summary)
 
@@ -206,8 +197,8 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
 | grok-build | `crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs` | subagent `effort: max` downgrade for non-max models |
 | grok-build | `crates/codegen/xai-grok-pager/src/acp/model_state.rs` | `Max → Xhigh` downgrade in effort-token resolution + tests |
 | grok-build | `crates/codegen/xai-grok-pager/src/slash/commands/effort_levels.rs` | `Max` description (compiler-driven; legacy fallback menu unchanged) |
-| grok-build | `crates/codegen/xai-grok-pager/docs/user-guide/{02,04,11,14}-*.md` | docs (patch 0007) |
-| this repo | `patches/grok-build/0006-*.patch`, `0007-*.patch` | durable patches |
+| grok-build | `crates/codegen/xai-grok-pager/docs/user-guide/{02,04,11,14}-*.md` | docs in patch `0005` |
+| this repo | `patches/grok-build/0005-*.patch` | durable patch |
 | this repo | `docs/i0002_add_max_thinking.md` | this doc |
 
 ## Non-goals
@@ -217,14 +208,16 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
   the server-driven `reasoning_efforts` menu can introduce it later without
   code changes (a server menu entry `{"value": "max"}` will parse into the
   new variant automatically).
-- Anthropic-side `xhigh`-vs-`max` differentiation was a non-goal of this
-  initiative. It was subsequently implemented by i0003 patch `0012`.
+- Anthropic-side `xhigh`-vs-`max` differentiation is owned by i0003 patch
+  `0008`, not this cross-provider canonical-level patch.
 - Changing pi.
 
 ## Verification completed after the `ba76b0a` rebase
 
-The complete 15-patch stack was tested with an isolated `GROK_HOME`; the
-seven-patch slice hash below records this initiative's clean-room boundary.
+The original pre-consolidation stack was tested with an isolated `GROK_HOME`.
+The active clean-room i0002 boundary is commit `a7b5601`, tree
+`7c51dd6e240654ea1ab684ccf452a3e2536d0226`. Historical validation counts below
+remain applicable because the consolidated final source tree is identical.
 
 - `cargo check --workspace --locked`: passes.
 - `cargo test -p xai-grok-sampling-types --lib --locked`: 277 passed (includes
@@ -234,9 +227,10 @@ seven-patch slice hash below records this initiative's clean-room boundary.
   (includes `resolve_effort_token_max_downgrades_to_xhigh_unless_offered`).
 - `cargo test -p xai-grok-shell --lib --locked`: 5739 passed, 13 ignored.
 - `git diff --check` clean.
-- Clean-room: detached worktree at `ba76b0a`, `git am` of all seven patches
-  applies cleanly; resulting tree hash `5ea6849f16a572ca1c9d9827d53a67ecd2d3a745`
-  matches patch-0007 commit `ff8806e4b0e510e04fcb75144fe56404e5dd8709`.
+- Active clean-room: patches `0001–0005` apply to `ba76b0a`; patch `0005`
+  ends at `a7b5601`, tree `7c51dd6e240654ea1ab684ccf452a3e2536d0226`.
+- Pre-consolidation seven-patch boundary and hashes are recorded in repository
+  history; see [patch-history.md](patch-history.md) for number mapping.
 
 ### Remaining OpenAI `max` live check
 

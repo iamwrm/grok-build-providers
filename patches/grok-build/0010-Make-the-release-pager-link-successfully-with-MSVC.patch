@@ -1,21 +1,18 @@
-From 51043caa8e91be38756a0a5eaa95bbe6e579d66f Mon Sep 17 00:00:00 2001
-From: Ren Wang <iamwrm@gmail.com>
-Date: Sun, 19 Jul 2026 14:38:45 +0800
-Subject: [PATCH 14/15] Increase MSVC PDB page size for the pager link
+From b7ee45790d92411726fcbd38163bf6051fd2de47 Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 16:56:01 +0800
+Subject: [PATCH 10/13] Make the release pager link successfully with MSVC
 
-Rustc emits a minimal release PDB even when profile debug info is disabled.
-The pager's public-symbol table exceeds link.exe's default 4 KiB PDB page
-capacity and fails with fatal LNK4319; use the supported 16 KiB maximum for
-both Windows targets.
+Raise release PDB pages to the supported 16 KiB maximum and enable link.exe long-symbol truncation for both MSVC targets. Both settings are required for the pager's large public-symbol table to link successfully.
 ---
- .cargo/config.toml | 15 +++++++++++++--
- 1 file changed, 13 insertions(+), 2 deletions(-)
+ .cargo/config.toml | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
 
 diff --git a/.cargo/config.toml b/.cargo/config.toml
-index 912e93e..5fdac76 100644
+index 912e93e..c5a08b7 100644
 --- a/.cargo/config.toml
 +++ b/.cargo/config.toml
-@@ -59,10 +59,21 @@ rustflags = [
+@@ -59,10 +59,26 @@ rustflags = [
  ]
  
  [target.x86_64-pc-windows-msvc]
@@ -27,6 +24,10 @@ index 912e93e..5fdac76 100644
 +    # The pager's public-symbol table exceeds the default 4 KiB PDB page
 +    # capacity (fatal LNK4319); 16 KiB is link.exe's supported maximum.
 +    "-C", "link-arg=/PDBPAGESIZE:16384",
++    # The pager also contains generated/generic symbols long enough to hit
++    # LNK4318 and exhaust the PDB public-symbol table even at 16 KiB pages.
++    # Retain useful symbols while truncating only those pathological names.
++    "-C", "link-arg=/DEBUG:LongSymbolTruncate",
 +]
  
  [target.aarch64-pc-windows-msvc]
@@ -35,6 +36,7 @@ index 912e93e..5fdac76 100644
 +    "-C", "force-unwind-tables=yes",
 +    "-C", "target-feature=+crt-static",
 +    "-C", "link-arg=/PDBPAGESIZE:16384",
++    "-C", "link-arg=/DEBUG:LongSymbolTruncate",
 +]
  
  

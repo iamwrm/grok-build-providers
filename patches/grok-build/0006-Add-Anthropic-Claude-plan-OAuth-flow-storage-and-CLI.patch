@@ -1,12 +1,9 @@
-From 1abd914839682d810e2c5037bc45bbb70755cf0f Mon Sep 17 00:00:00 2001
-From: Ren Wang <iamwrm@gmail.com>
-Date: Sun, 19 Jul 2026 11:15:49 +0800
-Subject: [PATCH 08/15] Add Anthropic Claude-plan OAuth flow, storage, and CLI
+From 9964322b8f9e400830fd49a10ecd5dafd6df67d5 Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 16:56:01 +0800
+Subject: [PATCH 06/13] Add Anthropic Claude-plan OAuth flow, storage, and CLI
 
-Port pi's Anthropic (Claude Pro/Max) PKCE browser authentication flow with
-a paste-the-code fallback (claude.ai's code#state format). Store the
-isolated refreshable credential in ~/.grok/anthropic_auth.json and expose
-grok anthropic login, logout, and status commands.
+Port Anthropic Claude Pro/Max PKCE browser authentication with the code#state paste fallback. Store the isolated rotating credential in ~/.grok/anthropic_auth.json and expose grok anthropic login, logout, and status commands.
 ---
  crates/codegen/xai-grok-pager-bin/src/main.rs |  16 +
  crates/codegen/xai-grok-pager/src/app/cli.rs  |  23 +
