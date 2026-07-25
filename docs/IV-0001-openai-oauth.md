@@ -1,11 +1,31 @@
-# i0001: Add OpenAI (ChatGPT plan) OAuth provider to grok-build
+# IV-0001: Add OpenAI (ChatGPT plan) OAuth provider to grok-build
 
 **Status:** implemented and exported
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
 **Deliverable:** patches `0001–0004` in `patches/grok-build/`
 **Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc` (Grok `0.2.106`)
+**Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
-## Goal
+## Lifecycle map
+
+- **Why this exists:** make ChatGPT-plan Codex models usable from Grok without
+  requiring API-key billing or per-user model configuration.
+- **Durable implementation:** patches `0001–0004` plus
+  `configs/openai-codex.toml`; the disposable checkouts are reference and
+  patch-development locations, not lifecycle roots.
+- **Known consumers:** Grok CLI login commands, pager model selection, shell
+  credential resolution, sampler Responses transport, the built-in Codex
+  catalog, [IV-0002](IV-0002-max-thinking.md),
+  [IV-0005](IV-0005-last-turn-stats.md),
+  [IV-0007](IV-0007-codex-parallel-tools.md), and
+  [IV-0008](IV-0008-mid-session-model-switch.md).
+- **Key assumption:** the documented OpenAI public OAuth client and ChatGPT
+  backend contract remain available; live checks must be rerun when that
+  external contract changes.
+- **Evidence route:** use the clean-room patch application and multi-turn live
+  regression procedure under [Evidence and reproduction](#evidence-and-reproduction).
+
+## Intent and lifecycle justification
 
 Let grok-build use OpenAI Codex models (`gpt-5.x-codex` family) through a
 ChatGPT Plus/Pro subscription, by reimplementing pi's `openai-codex` OAuth
@@ -208,11 +228,11 @@ grok -m openai-codex/gpt-5.5:xhigh -p "hello"
 ## Non-goals (v1)
 
 - WebSocket transport / continuation, zstd request compression (SSE only).
-- Bundling OpenAI API-key auth (already works today via `env_key = "OPENAI_API_KEY"`
+- Bundling OpenAI API-key auth (already exists on the pinned base via `env_key = "OPENAI_API_KEY"`
   + `api_backend = "responses"` against `api.openai.com`).
 - Upstreaming to xai-org (patches stay local per `docs/repo.md`).
 
-## Verification completed
+## Evidence and reproduction
 
 - `cargo check --workspace` passes.
 - OAuth/JWT/PKCE/expiry and catalog tests: 6 passed.
@@ -221,7 +241,7 @@ grok -m openai-codex/gpt-5.5:xhigh -p "hello"
 - `cargo run -p xai-grok-pager-bin -- openai --help` exposes
   `login|logout|status` as expected.
 - `git diff ba76b0a..HEAD --check` passes.
-- All four active i0001 patches apply cleanly with `git am` to a fresh detached
+- All four active IV-0001 patches apply cleanly with `git am` to a fresh detached
   worktree at `ba76b0a`.
 - Live release-binary inference with `openai-codex/gpt-5.6-sol:high` returned
   one answer and exited successfully without retries.
@@ -276,14 +296,14 @@ confirm every loop completed on attempt 1 and no `inference_retry` appears in
 
 ### Maintenance state
 
-- Patches `0001–0004` are the current i0001 slice on base
+- Patches `0001–0004` are the current IV-0001 slice on base
   `ba76b0a683fa52e4e60685017b85905451be17bc`.
 - Patch `0002` owns the complete Codex transport, including exact
   `response.metadata` and `keepalive` compatibility. Both informational event
   names are accepted from either the SSE `event` field or JSON `type`; all
   other unknown variants remain fail-closed. Patch `0004` owns the catalog and
   docs. Parallel tool-call improvements (`parallel_tool_calls`, compound
-  `call_id|fc_id` history, source-order results) live in i0007 patch `0015`.
+  `call_id|fc_id` history, source-order results) live in IV-0007 patch `0015`.
 - Existing release binary:
   `checkouts/grok-build/target/release/xai-grok-pager`. For a literal local
   rebuild, run `cargo build -p xai-grok-pager-bin --release` (release mode so
@@ -291,7 +311,7 @@ confirm every loop completed on attempt 1 and no `inference_retry` appears in
   profile are fine). `cargo fmt --all` may touch unrelated pager files, so
   inspect/revert unrelated formatting before export. Remove
   `target/release/incremental` afterward while preserving the binary.
-- To reproduce only i0001, clean-room `git am` patches `0001–0004` onto the
+- To reproduce only IV-0001, clean-room `git am` patches `0001–0004` onto the
   pinned base. To reproduce the current product, apply the complete series;
   CI does this automatically.
 

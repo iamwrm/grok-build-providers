@@ -7,6 +7,8 @@ and [earendil-works/pi](https://github.com/earendil-works/pi).
 
 See [docs/repo.md](docs/repo.md) for the repo layout and workflow
 (plain clones in `checkouts/`, durable patches in `patches/` — no forks, no submodules).
+Repository work is organized by lifecycle initiatives (`docs/IV-*`) and
+horizontal doctrine (`docs/DC-*`).
 
 ## Release binaries
 

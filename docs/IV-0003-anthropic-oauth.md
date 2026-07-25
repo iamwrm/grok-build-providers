@@ -1,11 +1,31 @@
-# i0003: Add Anthropic (Claude Pro/Max plan) OAuth provider to grok-build
+# IV-0003: Add Anthropic (Claude Pro/Max plan) OAuth provider to grok-build
 
-**Status:** implemented, exported, and live-verified (2026-07-19)
+**Status:** implemented, exported, and live-verified at the recorded checkpoint
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
-**Deliverable:** patches `0006–0008`, continuing the i0001/i0002 stack
+**Deliverable:** patches `0006–0008`, continuing the IV-0001/IV-0002 stack
 **Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc`
+**Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
-## Goal
+## Lifecycle map
+
+- **Why this exists:** let Claude Pro/Max subscribers use supported adaptive
+  Claude models through Grok while preserving the consumer-OAuth request
+  contract and classifier escape hatch.
+- **Durable implementation:** patches `0006–0008` plus
+  `configs/anthropic-oauth.toml`.
+- **Known consumers:** Anthropic login CLI, shell credential refresh, sampler
+  Messages shaping, pager catalog/effort menus,
+  [IV-0002](IV-0002-max-thinking.md),
+  [IV-0005](IV-0005-last-turn-stats.md), and
+  [IV-0008](IV-0008-mid-session-model-switch.md).
+- **Key assumptions:** Anthropic keeps the public OAuth client and Claude Code
+  identity contract available, and Grok's current system prompt continues to
+  pass the classifier without replacement-table entries.
+- **Evidence route:** rerun isolated-home Cargo tests and the multi-loop live
+  recipe under [Evidence and reproduction](#evidence-and-reproduction) when
+  Anthropic changes OAuth, headers, models, or classifier behavior.
+
+## Intent and lifecycle justification
 
 Let grok-build use Anthropic Claude models (`claude-opus-4-x`, `claude-sonnet-*`,
 `claude-fable-5`) through a Claude Pro/Max subscription, by reimplementing pi's
@@ -81,7 +101,7 @@ grok-build already had a complete Anthropic Messages transport:
 - `ReasoningEffort::to_messages_api` uses the pi-parity native mapping
   (`xhigh → "xhigh"`, `max → "max"`) with per-model menu gating in patch
   `0008`.
-- The i0001 seams (`AuthScheme` provider marker, `BearerResolver`, header
+- The IV-0001 seams (`AuthScheme` provider marker, `BearerResolver`, header
   injection in `sampling_config_for_model` and `sampler_turn.rs`,
   credential-gated catalog insertion in `resolve_model_list`, generic
   `provider/model:effort` parsing) all extend directly.
@@ -171,11 +191,11 @@ grok-build already had a complete Anthropic Messages transport:
 - Budget-based (`thinking.budget_tokens`) models — catalog is adaptive-only.
 - Interleaved-thinking / fine-grained-tool-streaming beta headers (adaptive
   models don't need them).
-- Anthropic API-key auth (already works today via `api_backend = "messages"` +
+- Anthropic API-key auth (already exists on the pinned base via `api_backend = "messages"` +
   `extra_headers x-api-key`).
 - `~/.claude/credentials` import (refresh-token race risk).
 
-## Verification
+## Evidence and reproduction
 
 - `cargo check --workspace` passes.
 - Unit tests: 3 OAuth-flow tests (paste parsing, authorize URL/PKCE/state,
@@ -196,7 +216,7 @@ grok-build already had a complete Anthropic Messages transport:
   mapping), the pager suite passes 7390 tests with 10 ignored (including the
   symmetric `xhigh→max` fallback), and the catalog test retains per-model
   native-xhigh gating.
-- **Live testing (2026-07-19):** `grok anthropic login` browser flow
+- **Live verification checkpoint:** `grok anthropic login` browser flow
   completed and stored `~/.grok/anthropic_auth.json`; user-confirmed working
   live inference on the `anthropic/*` catalog (including native `xhigh`
   selection now owned by patch `0008`). No `inference_retry` entries in
@@ -219,7 +239,8 @@ A one-turn greeting does not exercise the risky paths. After login:
    trigger fragments by binary search (mirror
    `../piagent-config/packages/ren-private-package/repro-matrix.sh`), add
    minimal rewrites to `ANTHROPIC_OAUTH_SYSTEM_REPLACEMENTS` in
-   `xai-grok-sampler/src/client.rs`, and document each trigger + date there.
+   `xai-grok-sampler/src/client.rs`, and document each trigger plus the
+   semantic verification checkpoint there.
    Transient `overloaded_error` responses are capacity issues — retry, don't
    touch the table.
 

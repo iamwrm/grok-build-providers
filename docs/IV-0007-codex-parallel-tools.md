@@ -1,12 +1,30 @@
-# i0007: Improve Responses tool-call identity and concurrent result ordering
+# IV-0007: Improve Responses tool-call identity and concurrent result ordering
 
-**Status:** implemented in durable patch `0015`; historical and dated integration verification recorded below
+**Status:** implemented in durable patch `0015`; historical integration checkpoints recorded below
 **Upstream:** `checkouts/grok-build`
 **Deliverable:** `patches/grok-build/0015-Improve-Codex-parallel-tool-call-handling.patch`
 **Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc`
 **Patch-0015 checkpoint:** commit `93328fe`; 15-patch tree `0829a441098580595575d3a1ee64195165b6a771`
+**Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
-## Goal
+## Lifecycle map
+
+- **Why this exists:** permit multiple Responses tool calls, preserve native
+  call identity across replay, and keep concurrent execution while making
+  approved-call publication deterministic.
+- **Durable implementation:** patch `0015` across sampler request shaping,
+  Responses stream/history conversion, and the shared shell tool loop.
+- **Known consumers:** ChatGPT Codex and generic Responses routes, cross-backend
+  history projection, all providers using shared local-tool dispatch, and
+  [IV-0006](IV-0006-batch-file-edits.md).
+- **Key assumption:** approved-subset source ordering is sufficient; strict
+  whole-turn ordering and canonicalized path locks remain outside this scope.
+- **Evidence route:** rerun clean-room application, focused sampling-types and
+  sampler tests, and the raw-sampling diagnosis under
+  [Evidence and reproduction](#evidence-and-reproduction). Missing direct
+  out-of-order completion tests remain documented follow-up work.
+
+## Intent and lifecycle justification
 
 Improve behavior first exposed by OpenAI Codex Responses turns:
 
@@ -119,7 +137,7 @@ pre-flight failures.
 | `xai-grok-sampling-types/src/conversation.rs` | Generic Responses permission, compound-ID helpers, capture/replay, and cross-backend projection tests |
 | `xai-grok-shell/.../tool_calls.rs` | Add approved-call post-flight result buffering while retaining existing concurrent dispatch and literal-path locking |
 
-## Verification record
+## Evidence and reproduction
 
 ### Patch-0015 publication checkpoint
 
@@ -135,7 +153,7 @@ pre-flight failures.
 Those counts describe the historical series ending at patch `0015`; they are
 not current suite totals after later patches.
 
-### Integrated 17-patch verification record (2026-07-20)
+### Integrated 17-patch verification checkpoint
 
 - Patch `0015` remains part of the durable series — now `0001–0016` after the
   former patch `0016` panic fix was folded into patch `0011`; that fold does
@@ -150,7 +168,7 @@ not current suite totals after later patches.
   `xai-grok-sampler` unit and integration tests, and a successful pager release
   build.
 
-This is a dated integration record, not a promise that later revisions will
+This is an integration checkpoint, not a promise that later revisions will
 retain the same tree hash or counts. The recorded suite does not contain a
 focused regression test that drives the patch-0015 approved-call reorder buffer
 with completion order `[1, 0]`. The ordering contract above is grounded in the
@@ -172,7 +190,8 @@ an item `id` such as `fc_…`.
 
 Sampling logs contain raw prompts, tool arguments, tool results, and provider
 responses. Treat the file as sensitive. A live observation cited as durable
-verification should record its date, model, route, and sanitized evidence.
+verification should record its semantic checkpoint, model, route, and
+sanitized evidence.
 
 ## Non-goals and limitations
 
@@ -195,4 +214,4 @@ original assistant call list rather than only from the approved subset.
 
 ## Related
 
-- [i0006: Apply multiple exact edits to one file as one validated batch](i0006_batch-file-edits.md)
+- [IV-0006: Apply multiple exact edits to one file as one validated batch](IV-0006-batch-file-edits.md)

@@ -1,5 +1,7 @@
 # raylib paste-chip hover POC
 
+Lifecycle context: [IV-0009](../../docs/IV-0009-raylib-paste-hover.md).
+
 A small raylib GUI that preserves a large paste as raw text while rendering it as one atomic `[Pasted: N lines]` chip. Like Grok's normal prompt mode, the demo folds pastes of at least four lines (or more than 10,000 bytes). Moving the mouse over the chip opens a seven-line preview; use the mouse wheel to scroll through the complete paste. Double-clicking expands the chip back to its original text.
 
 ## Controls

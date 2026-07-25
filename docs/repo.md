@@ -13,8 +13,9 @@ This repo tracks work against upstream projects **without** forks or submodules.
 checkouts/          # plain git clones of upstreams (gitignored, disposable)
 patches/            # durable patch files, grouped by upstream
 configs/            # advanced provider-config examples
+projects/            # standalone proofs of concept owned by initiatives
 .github/workflows/  # clean-room build/release automation
-docs/               # initiative narratives and maintenance guidance
+docs/               # IV lifecycle maps, DC doctrine, and workflow guidance
 ```
 
 ## Why not forks or submodules?
@@ -81,46 +82,57 @@ onto the new base and update `GROK_BUILD_BASE`, initiative docs, and validation
 hashes together. Do not reset a working checkout to `origin/main` and assume
 the pinned series will still apply unchanged.
 
-## Initiative docs
+## Agentic workspace documents
 
-Every initiative gets its own doc in `docs/`, following the pattern of
-[`docs/i0001_add_openai-oauth.md`](i0001_add_openai-oauth.md):
+Read [DC-0001](DC-0001-agentic-workspace.md) for the repository-wide IV/DC
+workflow and interpretation doctrine.
 
-- **Naming:** `docs/iNNNN_short-slug.md` — a sequential initiative number
-  (`i0001`, `i0002`, …) plus a short descriptive slug.
-- **Header:** title `# iNNNN: <goal in one line>`, then status, the upstream
-  checkouts involved, the deliverable (usually a patch series under
-  `patches/<project>/`), and the implementation branch/base commit.
-- **Body:** goal, reference material (how an upstream already solves it),
-  integration points found during exploration, the implemented patch series
-  (one section per numbered patch), a files-affected summary table,
-  explicit non-goals, verification performed, handoff notes
-  (requirements to preserve, gotchas, maintenance state), and
-  decisions/deferred work.
+Every initiative gets a root document in `docs/`, following the pattern of
+[`docs/IV-0001-openai-oauth.md`](IV-0001-openai-oauth.md):
 
-The initiative doc is the durable narrative that ties the numbered patches
-together—keep it synchronized with the **current** patch series. When patches
-are rewritten or combined, update the owning initiative docs to the resulting
-layout, remove superseded descriptions, and clean-room apply the complete
-replacement series before deleting old patch files.
+- **Naming:** `docs/IV-NNNN-short-slug.md` — a sequential initiative number
+  (`IV-0001`, `IV-0002`, …) plus a short descriptive slug.
+- **Lifecycle role:** explain why related artifacts exist and record relevant
+  requirements, external knowledge, facts, assumptions, decisions, non-goals,
+  implementation locations, known consumers, evidence, and reproduction.
+- **Progressive disclosure:** split only when a semantically local part no
+  longer fits one coherent working context. Keep an annotated child link in
+  the root IV, and link every child back to its root.
+- **Maintenance:** keep the IV, implementation, consumers, and reproduction
+  path synchronized. Mark stale evidence as a checkpoint and rerun it when
+  current truth matters.
+- **Retirement:** begin at the root IV, follow linked and searched consumers,
+  preserve behavior still justified elsewhere, verify, then remove or mark
+  retired artifacts and links.
 
-## Current patch ownership
+Horizontal guidance uses `docs/DC-NNNN-short-slug.md`. DCs inform judgment
+across initiatives; they are not a deterministic policy or dependency engine.
+Links in both dimensions are attention routes and lifecycle clues, so annotate
+why a reader should follow them.
+
+When patches are rewritten or combined, update the owning initiative docs to
+the resulting layout, remove superseded descriptions, and clean-room apply the
+complete replacement series before deleting old patch files.
+
+## Current initiative map
 
 | Initiative | Patches | Purpose |
 |---|---:|---|
-| [i0001](i0001_add_openai-oauth.md) | `0001–0004` | OpenAI ChatGPT-plan OAuth and Codex transport |
-| [i0002](i0002_add_max_thinking.md) | `0005` | Distinct `max` reasoning level |
-| [i0003](i0003_add_anthropic-oauth.md) | `0006–0008` | Anthropic OAuth, Claude catalog, native `xhigh` |
-| [i0004](i0004_release-ci.md) | `0009–0010` | Cross-platform release CI and Windows portability |
-| [i0005](i0005_last-turn-stats.md) | `0011–0013` | Raw sampling diagnostics (incl. sampling-layer panic fix), turn-end metrics |
-| [i0006](i0006_batch-file-edits.md) | `0014` | Atomic multi-edit search/replace for one file |
-| [i0007](i0007_codex-parallel-tools.md) | `0015` | Codex parallel tool-call wire + result ordering |
-| [i0008](i0008_mid-session-model-switch.md) | `0016` | Safe native reasoning replay across model/provider switches |
+| [IV-0001](IV-0001-openai-oauth.md) | `0001–0004` | OpenAI ChatGPT-plan OAuth and Codex transport |
+| [IV-0002](IV-0002-max-thinking.md) | `0005` | Distinct `max` reasoning level |
+| [IV-0003](IV-0003-anthropic-oauth.md) | `0006–0008` | Anthropic OAuth, Claude catalog, native `xhigh` |
+| [IV-0004](IV-0004-release-ci.md) | `0009–0010` | Cross-platform release CI and Windows portability |
+| [IV-0005](IV-0005-last-turn-stats.md) | `0011–0013` | Raw sampling diagnostics (incl. sampling-layer panic fix), turn-end metrics |
+| [IV-0006](IV-0006-batch-file-edits.md) | `0014` | Atomic multi-edit search/replace for one file |
+| [IV-0007](IV-0007-codex-parallel-tools.md) | `0015` | Codex parallel tool-call wire + result ordering |
+| [IV-0008](IV-0008-mid-session-model-switch.md) | `0016` | Safe native reasoning replay across model/provider switches |
+| [IV-0009](IV-0009-raylib-paste-hover.md) | — | Standalone raylib paste-chip hover and scrolling-preview POC |
 
 ## Conventions
 
 - One directory per upstream under `patches/` (`patches/grok-build/`, `patches/pi/`).
-- One doc per initiative under `docs/` (`iNNNN_slug.md`), as described above.
+- One root doc per initiative under `docs/` (`IV-NNNN-slug.md`), as described above.
+- Horizontal doctrine uses `docs/DC-NNNN-slug.md`; read applicable DCs before changes.
 - Number patches (`0001-...`, `0002-...`) so apply order is explicit.
 - If a patch stops applying cleanly, fix it and commit the updated patch —
   the patch files are the source of truth, not the checkouts.

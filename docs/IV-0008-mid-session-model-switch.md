@@ -1,12 +1,30 @@
-# i0008: Safe mid-session model and provider switching
+# IV-0008: Safe mid-session model and provider switching
 
 **Status:** implemented in patch `0016` (numbered `0017` before the former sampling-panic fix was folded into patch `0011`); release-profile tests verified
 
 **Upstream:** `checkouts/grok-build`  
 **Deliverable:** `patches/grok-build/0016-Gate-native-reasoning-replay-by-route-API-and-model.patch`  
 **Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc`
+**Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
-## Problem
+## Lifecycle map
+
+- **Why this exists:** prevent provider-native opaque reasoning state from
+  crossing signing, encryption, API, model, or route boundaries during a
+  mid-session switch.
+- **Durable implementation:** patch `0016`; `ReasoningOrigin` provenance and
+  wire-time sanitization are the behavior that must survive rebases.
+- **Known consumers:** Responses, Anthropic Messages, and Chat Completions
+  conversion; session JSONL compatibility; every model-switch path; provider
+  initiatives [IV-0001](IV-0001-openai-oauth.md) and
+  [IV-0003](IV-0003-anthropic-oauth.md).
+- **Key assumption:** normalized route + API backend + wire model identifies a
+  native reasoning trust domain closely enough; mismatches deliberately fail
+  closed without mutating saved history.
+- **Evidence route:** rerun the release tests and cross-provider sampling-log
+  procedure under [Evidence and reproduction](#evidence-and-reproduction).
+
+## Intent and problem
 
 Provider-native reasoning is opaque state, not portable conversation text:
 
@@ -77,11 +95,20 @@ For Claude A → GPT/Grok → Claude A:
 
 Claude A → Claude B, or Claude through route A → the same model slug through route B, does not replay route A's signature.
 
+## Non-goals
+
+- Making provider-native reasoning portable across trust domains.
+- Mutating stored conversation history during a switch.
+- Treating a matching model slug alone as sufficient provenance.
+- Replaying legacy opaque reasoning when a real destination is known.
+
 ## Compatibility
 
 `AssistantItem.reasoning_origin` is optional in JSONL. Existing sessions deserialize normally. Legacy opaque reasoning is not replayed once a real request destination has been stamped; visible reasoning remains available as assistant text. New responses immediately carry complete provenance.
 
-## Tests
+## Evidence and reproduction
+
+### Automated coverage
 
 Release tests cover:
 
@@ -97,7 +124,7 @@ Release tests cover:
 - provenance JSONL backward compatibility;
 - route normalization without credential persistence.
 
-## Manual verification
+### Manual cross-provider reproduction
 
 ```bash
 checkouts/grok-build/target/release/xai-grok-pager

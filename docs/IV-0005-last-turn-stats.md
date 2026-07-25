@@ -1,11 +1,29 @@
-# i0005: Last-prompt stats at turn end (cache read/write, TPS, cost)
+# IV-0005: Last-prompt stats at turn end (cache read/write, TPS, cost)
 
 **Status:** implemented in consolidated patches `0011–0013` (the sampling-layer panic fix, formerly follow-up patch `0016`, is folded into `0011`); raw-wire grounding and release-profile verification complete; user-guide patch deferred
 **Upstreams:** `checkouts/pi` + `../piagent-config/packages/ren-public-package/0012-last-turn.ts` (reference), `checkouts/grok-build` (patch target)
-**Deliverable:** patches `0011–0013`, continuing the i0001–i0004 stack
+**Deliverable:** patches `0011–0013`, continuing the IV-0001–IV-0004 stack
 **Implementation branch:** clean-room series based on `ba76b0a`; current 16-patch series tree `dd6c4ce1ead5b4a91aae81f5f0699d0fa65dee7c`
+**Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
-## Goal
+## Lifecycle map
+
+- **Why this exists:** make each completed prompt cycle observable in the TUI
+  and expose raw request/response evidence when provider accounting or wire
+  compatibility needs diagnosis.
+- **Durable implementation:** patches `0011–0013`; patch `0011` also owns the
+  folded sampling-layer panic fix.
+- **Known consumers:** sampler diagnostics, shell usage aggregation, ACP
+  completion metadata, pager turn markers, headless projections, and provider
+  work in [IV-0001](IV-0001-openai-oauth.md) and
+  [IV-0003](IV-0003-anthropic-oauth.md).
+- **Key assumptions:** provider usage fields retain their documented meaning;
+  sampling logs are sensitive and remain disabled by default.
+- **Evidence route:** use isolated live grounding plus focused Cargo suites and
+  clean-room release builds under [Evidence and reproduction](#evidence-and-reproduction).
+  Treat recorded counts and tree hashes as checkpoints, not timeless truth.
+
+## Intent and lifecycle justification
 
 Every time the agent finishes a prompt cycle and returns to waiting for user
 input, show aggregate metrics for that cycle in the TUI — modeled on the
@@ -95,7 +113,7 @@ Regression test `json_fmt_does_not_panic_under_non_sampling_parent_spans`
 covers both the production config and the old span-list panic path.
 Release binary is built from **`xai-grok-pager-bin`** (not `-p xai-grok-pager`).
 
-### Grounding run (2026-07-20, live)
+### Anthropic live grounding checkpoint
 
 Headless two-call cycle (`claude-sonnet-4-6:low`, one terminal tool call)
 with `GROK_LOG_SAMPLING=true`; raw payloads from `sampling.jsonl`:
@@ -150,7 +168,7 @@ with `GROK_LOG_SAMPLING=true`; raw payloads from `sampling.jsonl`:
   subtracts cache reads only, so cache writes are a reported subset rather
   than a second subtraction.
 
-### OpenAI Codex cache grounding (2026-07-20, live)
+### OpenAI Codex live cache-grounding checkpoint
 
 Two identical `openai-codex/gpt-5.5:low` tool-using cycles showed automatic
 prefix caching works without explicit request cache markers:
@@ -170,7 +188,7 @@ explicit, billed cache creation.
 
 Live OpenAI Responses turns exposed informational `response.metadata` and
 `keepalive` SSE events, which the pinned typed dependency does not model.
-Exact-event absorption is owned by i0001 patch `0002` (the Codex transport);
+Exact-event absorption is owned by IV-0001 patch `0002` (the Codex transport);
 all other unknown events remain fail-closed.
 
 ### Patch 0013 — show prompt-cycle usage on completed-turn markers
@@ -208,7 +226,7 @@ all other unknown events remain fail-closed.
   extension (`PromptUsage` is aggregate; needs a per-call series).
 - OTel/telemetry export of cache-write tokens.
 
-## Verification
+## Evidence and reproduction
 
 - Patch `0011`: initial raw-request recorder verification passed sampler 160/160;
   final runtime gate verification passed sampler 2/2, shell ACP handler 2/2,
@@ -226,7 +244,7 @@ all other unknown events remain fail-closed.
 - Patch `0012`: sampler 161/161; chat-state 340/340; focused shell
   `PromptResponseMeta` and headless projection tests pass; final
   `cargo check -p xai-grok-shell --all-targets` clean.
-- i0001 patch `0002`: focused release regression covers exact-name / JSON-type
+- IV-0001 patch `0002`: focused release regression covers exact-name / JSON-type
   absorption for `response.metadata` and `keepalive`, while unrelated unknown
   events remain rejected.
 - Patch `0013`: pager session-event tests 41/41; turn-completion tests 19/19.

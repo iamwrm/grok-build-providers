@@ -1,12 +1,29 @@
-# i0004: Public repository and cross-platform release CI
+# IV-0004: Public repository and cross-platform release CI
 
 **Status:** implemented; current base locally verified, prior base verified on all five CI targets; `v*` tag publication configured but not yet exercised
 **Upstream:** `checkouts/grok-build` (patch target for Windows portability)
 **Deliverable:** `.github/workflows/release.yml` plus consolidated patches `0009–0010`
 **Upstream base:** `ba76b0a683fa52e4e60685017b85905451be17bc` (Grok `0.2.106`)
-**Current i0004 boundary:** commit `966c609`, tree `999a1e3c6fb865a25a18f8fb4d7ec526dd6d8f44` (10 active patches)
+**Current IV-0004 boundary:** commit `966c609`, tree `999a1e3c6fb865a25a18f8fb4d7ec526dd6d8f44` (10 active patches)
+**Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
-## Goal
+## Lifecycle map
+
+- **Why this exists:** turn the complete local patch stack into reproducible,
+  downloadable release binaries across the supported desktop targets.
+- **Durable implementation:** `.github/workflows/release.yml` and portability
+  patches `0009–0010`.
+- **Known consumers:** every initiative that contributes a Grok patch, manual
+  artifact users, tag-driven GitHub releases, and maintainers rebasing the
+  pinned upstream base.
+- **Key assumption:** the selected GitHub runner labels, protoc/NASM setup, and
+  target toolchains remain available; tag publication is configured but still
+  unexercised.
+- **Evidence route:** clean-room `git am` is the drift guard. Rerun the workflow
+  and preserve run links when current cross-platform truth matters; see
+  [Evidence and reproduction](#evidence-and-reproduction).
+
+## Intent and lifecycle justification
 
 Make `https://github.com/iamwrm/grok-build-providers` public and build the
 fully patched `xai-grok-pager` release binary for macOS, Linux, and Windows.
@@ -64,7 +81,14 @@ solution to both MSVC targets: the supported 16 KiB PDB page maximum plus
 link.exe's recommended `/DEBUG:LongSymbolTruncate`. The Windows release then
 linked, packaged, and uploaded successfully.
 
-## Verification
+## Non-goals
+
+- Replacing the ordered patch stack with a fork, submodule, or mutable checkout.
+- Publishing package-manager installers or auto-updaters.
+- Claiming tagged-release publication is verified before the first `v*` run.
+- Hiding patch drift by applying with a non-failing or best-effort mechanism.
+
+## Evidence and reproduction
 
 Current `ba76b0a` base:
 

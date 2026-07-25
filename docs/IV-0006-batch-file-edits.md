@@ -1,12 +1,28 @@
-# i0006: Apply multiple exact edits to one file as one validated batch
+# IV-0006: Apply multiple exact edits to one file as one validated batch
 
-**Status:** implemented in durable patch `0014`; historical and dated integration verification recorded below
+**Status:** implemented in durable patch `0014`; historical integration checkpoints recorded below
 **Upstream:** `checkouts/grok-build`
 **Deliverable:** `patches/grok-build/0014-Apply-exact-file-edits-atomically-in-batches.patch`
 **Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc`
 **Patch-0014 checkpoint:** commit `d8312ac`; 14-patch tree `25f2c549b4a3a357a521b60ec66d8b6d05f258d9`
+**Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
-## Goal
+## Lifecycle map
+
+- **Why this exists:** reduce tool round trips while preserving exact-match
+  validation and one-file write behavior for cognitively related edits.
+- **Durable implementation:** patch `0014`; the schema and runtime validator
+  jointly define single-edit versus batch mode.
+- **Known consumers:** Grok's standard and concise `search_replace` tools,
+  shell previews, workspace permissions, ACP diff rendering, Markdown-heavy
+  agent sessions, and [IV-0007](IV-0007-codex-parallel-tools.md).
+- **Key assumption:** validation atomicity is sufficient; this initiative does
+  not promise filesystem transactions or concurrent-writer detection.
+- **Evidence route:** rerun the focused `xai-grok-tools` release suite and
+  clean-room patch application under
+  [Evidence and reproduction](#evidence-and-reproduction).
+
+## Intent and lifecycle justification
 
 Reduce unnecessary model/tool round trips when editing Markdown or another file
 in several places. The session that motivated this change made 64 Markdown
@@ -111,7 +127,7 @@ Existing ACP completion conversion is also relevant to consumers: it attaches
 `edits.details` as diff metadata, while the batch aggregate old/new strings are
 empty.
 
-## Verification record
+## Evidence and reproduction
 
 ### Patch-0014 publication checkpoint
 
@@ -130,7 +146,7 @@ empty.
 Those counts describe the historical series ending at patch `0014`; they are
 not asserted as current test totals after later patches.
 
-### Integrated 17-patch verification record (2026-07-20)
+### Integrated 17-patch verification checkpoint
 
 - Patch `0014` remains part of the durable series — now `0001–0016` after the
   former patch `0016` panic fix was folded into patch `0011`; that fold does
@@ -145,7 +161,7 @@ not asserted as current test totals after later patches.
   `xai-grok-sampler` unit and integration tests, and a successful pager release
   build.
 
-This dated integration record validates the combined product but does not
+This integration checkpoint validates the combined product but does not
 replace the patch-0014-specific `xai-grok-tools` test record above. It is not a
 promise that later revisions will retain the same tree hash or test counts.
 
@@ -169,4 +185,4 @@ diff becomes a requirement.
 
 ## Related
 
-- [i0007: Improve Responses tool-call identity and concurrent result ordering](i0007_codex-parallel-tools.md)
+- [IV-0007: Improve Responses tool-call identity and concurrent result ordering](IV-0007-codex-parallel-tools.md)
