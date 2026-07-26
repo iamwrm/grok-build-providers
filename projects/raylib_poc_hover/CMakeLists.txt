@@ -48,6 +48,15 @@ download_checked(
 
 add_executable(raylib_poc_hover src/main.cpp)
 target_link_libraries(raylib_poc_hover PRIVATE raylib)
+
+if(WIN32)
+    # Build as a GUI application so Explorer launches do not create a console window.
+    set_target_properties(raylib_poc_hover PROPERTIES WIN32_EXECUTABLE TRUE)
+    if(MSVC)
+        # Keep the portable main() entry point while using the Windows GUI subsystem.
+        target_link_options(raylib_poc_hover PRIVATE /ENTRY:mainCRTStartup)
+    endif()
+endif()
 add_custom_command(TARGET raylib_poc_hover POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${FIRA_CODE_DIR}"

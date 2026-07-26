@@ -65,9 +65,13 @@ it does not claim that current upstream activates text previews by hover.
   lines, including accumulated smooth-wheel input; the title reports the
   visible range and a scrollbar reports relative position.
 - Double-click expands the raw text without changing it.
-- Windows high-DPI support is enabled before window creation. The 1100×720
-  design canvas scales into the current window, and raylib renders a
-  1440×900 logical window into the monitor-scaled framebuffer.
+- Windows high-DPI support is enabled before window creation. The 720-unit-tall
+  design scales to the current window while its usable width grows from 1040
+  to 1280 units on wider aspect ratios. Raylib renders the initial 1440×900
+  logical window into the monitor-scaled framebuffer. After a resize, raylib
+  5.5 framebuffer-sized Windows reports are normalized back to logical units.
+- Windows builds use the GUI subsystem, so launching the executable from
+  Explorer does not create a separate console window.
 - Fira Code is loaded at 96 pixels and filtered for clean scaled rendering.
 - Font and license downloads are SHA-256 checked. They are copied beside the
   executable at build time but never tracked in this repository.
@@ -91,8 +95,10 @@ remain a faithful interaction reference.
    element event mechanism to the requested graphical interaction.
 2. **Scrollable contiguous preview:** replaces the initial first/last summary
    so a 100-line paste remains inspectable without expansion.
-3. **Responsive logical canvas:** preserves the designed proportions while
-   scaling positions, font sizes, borders, clipping, and hit rectangles.
+3. **Responsive logical canvas:** scales positions, font sizes, borders, and
+   clipping together while allowing wider windows to add usable horizontal
+   space. Hit rectangles are laid out before input each frame so they remain
+   aligned during a resize.
 4. **Build-time font retrieval:** keeps the repository text/source-only while
    preserving reproducible font identity through hashes.
 5. **Assumption:** network access is available on a clean first configure to

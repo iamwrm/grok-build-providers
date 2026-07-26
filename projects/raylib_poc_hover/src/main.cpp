@@ -12,7 +12,10 @@ namespace {
 constexpr int kWindowWidth = 1440;
 constexpr int kWindowHeight = 900;
 constexpr float kDesignWidth = 1100.0f;
+constexpr float kMinDesignWidth = 1040.0f;
+constexpr float kMaxDesignWidth = 1280.0f;
 constexpr float kDesignHeight = 720.0f;
+constexpr float kHorizontalMargin = 70.0f;
 constexpr float kFontSize = 20.0f;
 constexpr float kTextSpacing = 0.0f;
 constexpr float kLineHeight = 30.0f;
@@ -37,12 +40,41 @@ const Color kPreviewBackground = {20, 38, 38, 255};
 const Color kPreviewBorder = {75, 139, 128, 255};
 
 float gUiScale = 1.0f;
+float gUiDesignWidth = kDesignWidth;
+float gUiScreenWidth = 0.0f;
+float gUiScreenHeight = 0.0f;
 Vector2 gUiOrigin{};
 
 void UpdateUiMetrics() {
-    gUiScale = std::min(GetScreenWidth() / kDesignWidth, GetScreenHeight() / kDesignHeight);
-    gUiOrigin = {(GetScreenWidth() - kDesignWidth * gUiScale) * 0.5f,
-                 (GetScreenHeight() - kDesignHeight * gUiScale) * 0.5f};
+    const float reportedWidth = static_cast<float>(std::max(GetScreenWidth(), 1));
+    const float reportedHeight = static_cast<float>(std::max(GetScreenHeight(), 1));
+
+    if (gUiScreenWidth == 0.0f || IsWindowResized()) {
+        gUiScreenWidth = reportedWidth;
+        gUiScreenHeight = reportedHeight;
+
+#if defined(_WIN32)
+        // raylib 5.5 can report framebuffer pixels as the screen size after a
+        // high-DPI Windows resize. Convert them back to the logical coordinates
+        // used by drawing and mouse input when that mismatch is detected.
+        const Vector2 dpiScale = GetWindowScaleDPI();
+        const bool reportsFramebufferSize =
+            dpiScale.x > 1.0f && std::abs(GetRenderWidth() - GetScreenWidth()) <= 1;
+        if (IsWindowResized() && reportsFramebufferSize) {
+            gUiScreenWidth /= dpiScale.x;
+            gUiScreenHeight /= dpiScale.y;
+        }
+#endif
+    }
+
+    // Scale for height and minimum readable width, then let wider windows add usable
+    // horizontal space instead of growing the entire interface indefinitely.
+    gUiScale =
+        std::min(gUiScreenWidth / kMinDesignWidth, gUiScreenHeight / kDesignHeight);
+    gUiDesignWidth =
+        std::clamp(gUiScreenWidth / gUiScale, kMinDesignWidth, kMaxDesignWidth);
+    gUiOrigin = {(gUiScreenWidth - gUiDesignWidth * gUiScale) * 0.5f,
+                 (gUiScreenHeight - kDesignHeight * gUiScale) * 0.5f};
 }
 
 float Ui(float value) {
@@ -164,7 +196,8 @@ void DrawLabel(Font font, const char* text, Vector2 position, Color color,
     DrawTextEx(font, text, position, Ui(designSize), kTextSpacing, color);
 }
 
-float DrawTextSegment(Font font, Segment& segment, Vector2& cursor, const Rectangle& contentArea) {
+float DrawTextSegment(Font font, Segment& segment, Vector2& cursor,
+                      const Rectangle& contentArea, bool draw) {
     const float lineHeight = Ui(kLineHeight);
     const float startY = cursor.y;
     segment.bounds = {cursor.x, cursor.y, 0.0f, lineHeight};
@@ -172,7 +205,7 @@ float DrawTextSegment(Font font, Segment& segment, Vector2& cursor, const Rectan
     std::string run;
     auto flushRun = [&]() {
         if (run.empty()) return;
-        DrawLabel(font, run.c_str(), cursor, kText);
+        if (draw) DrawLabel(font, run.c_str(), cursor, kText);
         const float width = MeasureTextEx(font, run.c_str(), Ui(kFontSize), kTextSpacing).x;
         cursor.x += width;
         segment.bounds.width = std::max(segment.bounds.width, cursor.x - segment.bounds.x);
@@ -203,7 +236,7 @@ float DrawTextSegment(Font font, Segment& segment, Vector2& cursor, const Rectan
 }
 
 void DrawChip(Font font, Segment& segment, Vector2& cursor, const Rectangle& contentArea,
-              bool hovered) {
+              bool hovered, bool draw) {
     const std::string label = ChipLabel(segment);
     const float textWidth = MeasureTextEx(font, label.c_str(), Ui(kFontSize), kTextSpacing).x;
     const float chipWidth = textWidth + Ui(kChipPaddingX * 2.0f);
@@ -214,18 +247,42 @@ void DrawChip(Font font, Segment& segment, Vector2& cursor, const Rectangle& con
     }
 
     segment.bounds = {cursor.x, cursor.y, chipWidth, Ui(kChipHeight)};
-    DrawRectangleRounded(segment.bounds, 0.35f, 8, hovered ? kChipHover : kChip);
-    DrawRectangleRoundedLinesEx(segment.bounds, 0.35f, 8, Ui(1.0f),
-                                hovered ? kAccent : kPreviewBorder);
-    DrawLabel(font, label.c_str(), {cursor.x + Ui(kChipPaddingX), cursor.y + Ui(4.0f)},
-              hovered ? RAYWHITE : kAccent, kFontSize - 2.0f);
+    if (draw) {
+        DrawRectangleRounded(segment.bounds, 0.35f, 8, hovered ? kChipHover : kChip);
+        DrawRectangleRoundedLinesEx(segment.bounds, 0.35f, 8, Ui(1.0f),
+                                    hovered ? kAccent : kPreviewBorder);
+        DrawLabel(font, label.c_str(),
+                  {cursor.x + Ui(kChipPaddingX), cursor.y + Ui(4.0f)},
+                  hovered ? RAYWHITE : kAccent, kFontSize - 2.0f);
+    }
     cursor.x += chipWidth + Ui(5.0f);
 }
 
+Rectangle GetEditorRectangle() {
+    return UiRectangle(kHorizontalMargin, 500.0f,
+                       gUiDesignWidth - kHorizontalMargin * 2.0f, 145.0f);
+}
+
+Rectangle GetEditorContentRectangle(const Rectangle& editor) {
+    return {editor.x + Ui(22.0f), editor.y + Ui(26.0f), editor.width - Ui(44.0f),
+            editor.height - Ui(45.0f)};
+}
+
+void LayoutEditor(Font font, std::vector<Segment>& segments, const Rectangle& editor) {
+    const Rectangle content = GetEditorContentRectangle(editor);
+    Vector2 cursor = {content.x, content.y};
+    for (Segment& segment : segments) {
+        if (segment.kind == Segment::Kind::Paste) {
+            DrawChip(font, segment, cursor, content, false, false);
+        } else {
+            DrawTextSegment(font, segment, cursor, content, false);
+        }
+    }
+}
+
 Rectangle DrawEditor(Font font, std::vector<Segment>& segments, int hoveredIndex) {
-    const Rectangle editor = UiRectangle(70.0f, 500.0f, 960.0f, 145.0f);
-    const Rectangle content = {editor.x + Ui(22.0f), editor.y + Ui(26.0f),
-                               editor.width - Ui(44.0f), editor.height - Ui(45.0f)};
+    const Rectangle editor = GetEditorRectangle();
+    const Rectangle content = GetEditorContentRectangle(editor);
 
     DrawRectangleRounded(editor, 0.08f, 12, kPanel);
     DrawRectangleRoundedLinesEx(editor, 0.08f, 12, Ui(1.5f), kBorder);
@@ -236,9 +293,10 @@ Rectangle DrawEditor(Font font, std::vector<Segment>& segments, int hoveredIndex
     for (std::size_t i = 0; i < segments.size(); ++i) {
         Segment& segment = segments[i];
         if (segment.kind == Segment::Kind::Paste) {
-            DrawChip(font, segment, cursor, content, static_cast<int>(i) == hoveredIndex);
+            DrawChip(font, segment, cursor, content, static_cast<int>(i) == hoveredIndex,
+                     true);
         } else {
-            DrawTextSegment(font, segment, cursor, content);
+            DrawTextSegment(font, segment, cursor, content, true);
         }
     }
 
@@ -337,7 +395,7 @@ int main() {
                    FLAG_MSAA_4X_HINT);
     InitWindow(kWindowWidth, kWindowHeight, "raylib - Grok paste chip hover POC");
     SetExitKey(KEY_NULL);
-    SetWindowMinSize(1000, 680);
+    SetWindowMinSize(800, 560);
     SetTargetFPS(60);
 
     const std::string fontPath =
@@ -376,6 +434,11 @@ int main() {
                 }
             }
         }
+
+        // Recompute hit rectangles before input handling so resizing never leaves the
+        // mouse interacting with bounds from the previous frame.
+        editor = GetEditorRectangle();
+        LayoutEditor(font, segments, editor);
 
         const Vector2 mouse = GetMousePosition();
         hoveredIndex = -1;
@@ -428,11 +491,13 @@ int main() {
             "%  |  UI " + std::to_string(static_cast<int>(std::round(gUiScale * 100.0f))) + "%";
         const float scaleLabelWidth =
             MeasureTextEx(font, scaleLabel.c_str(), Ui(14.0f), kTextSpacing).x;
-        const Vector2 scaleAnchor = UiPoint(1030.0f, 64.0f);
+        const Vector2 scaleAnchor = UiPoint(gUiDesignWidth - kHorizontalMargin, 64.0f);
         DrawLabel(font, scaleLabel.c_str(), {scaleAnchor.x - scaleLabelWidth, scaleAnchor.y},
                   kAccent, 14.0f);
 
-        const Rectangle explanation = UiRectangle(70.0f, 148.0f, 960.0f, 92.0f);
+        const Rectangle explanation =
+            UiRectangle(kHorizontalMargin, 148.0f,
+                        gUiDesignWidth - kHorizontalMargin * 2.0f, 92.0f);
         DrawRectangleRounded(explanation, 0.08f, 10, kPanelRaised);
         DrawLabel(font, "1  Paste multiline text -> store raw content + render a summary chip",
                   UiPoint(92.0f, 169.0f), kText, 18.0f);

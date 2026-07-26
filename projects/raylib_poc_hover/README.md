@@ -4,6 +4,8 @@ Lifecycle context: [IV-0009](../../docs/IV-0009-raylib-paste-hover.md).
 
 A small raylib GUI that preserves a large paste as raw text while rendering it as one atomic `[Pasted: N lines]` chip. Like Grok's normal prompt mode, the demo folds pastes of at least four lines (or more than 10,000 bytes). Moving the mouse over the chip opens a seven-line preview; use the mouse wheel to scroll through the complete paste. Double-clicking expands the chip back to its original text.
 
+The layout scales down to a readable minimum and uses additional horizontal space in wider windows. Editor hit regions are recalculated before input each frame, so hover and double-click behavior stays aligned while resizing.
+
 ## Controls
 
 - **Ctrl/Cmd+V**: paste clipboard text
@@ -24,7 +26,7 @@ cmake --build build --config Release
 .\build\Release\raylib_poc_hover.exe
 ```
 
-With a single-config generator, the executable is usually `build/raylib_poc_hover` (or `.exe` on Windows).
+With a single-config generator, the executable is usually `build/raylib_poc_hover` (or `.exe` on Windows). Windows builds use the GUI subsystem, so opening the executable from Explorer does not also open a terminal window.
 
 ## What was adapted from Grok
 
