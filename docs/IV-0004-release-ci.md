@@ -3,8 +3,8 @@
 **Status:** implemented; current base locally verified, prior base verified on all five CI targets; `v*` tag publication configured but not yet exercised
 **Upstream:** `checkouts/grok-build` (patch target for Windows portability)
 **Deliverable:** `.github/workflows/release.yml` plus consolidated patches `0009–0010`
-**Upstream base:** `ba76b0a683fa52e4e60685017b85905451be17bc` (Grok `0.2.106`)
-**Current IV-0004 boundary:** commit `966c609`, tree `999a1e3c6fb865a25a18f8fb4d7ec526dd6d8f44` (10 active patches)
+**Upstream base:** `47348d13ec4508dcfe440e34c6d511bb02998fb2` (Grok `0.2.112`)
+**Current IV-0004 boundary:** commit `639cea1`, tree `2ebe20d81cfbeeadbae2e41ad8802bba66fd5886` (10 active patches)
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
 ## Lifecycle map
@@ -73,13 +73,13 @@ on Windows while preserving normal proto generation.
 
 ### Patch 0010 — complete MSVC pager-link configuration
 
-Rustc emits a minimal release PDB on MSVC even with profile debug information
-disabled. The pager's public-symbol table exceeded link.exe's default 4 KiB
-capacity (`LNK4319`), and one generated/generic symbol still exhausted the
-table after increasing page size. Patch `0010` applies the complete working
-solution to both MSVC targets: the supported 16 KiB PDB page maximum plus
-link.exe's recommended `/DEBUG:LongSymbolTruncate`. The Windows release then
-linked, packaged, and uploaded successfully.
+Rustc asks MSVC to emit debug information for the final link even when release
+profile debug information is disabled. The pager's public-symbol table exceeds
+link.exe's capacity (`LNK4319`), while the former PDB-page and
+`/DEBUG:LongSymbolTruncate` flags are not portable across the current runner
+linker. Release archives do not ship a PDB, so patch `0010` passes
+`/DEBUG:NONE` for both MSVC targets. Forced unwind tables remain enabled for
+panic backtraces.
 
 ## Non-goals
 
@@ -90,17 +90,18 @@ linked, packaged, and uploaded successfully.
 
 ## Evidence and reproduction
 
-Current `ba76b0a` base:
+Current `47348d1` base:
 
-- All 13 consolidated patches apply cleanly in a detached clean-room worktree;
-  the full result has tree `0a219b73e452c3ce19ea64cd7679dde3bf1e7a89`,
-  exactly matching the pre-consolidation 20-patch tree.
-- `cargo check --workspace --locked` passes.
-- Sampling-types, sampler, shell, and pager library suites pass: 277, 159,
-  5739, and 7390 tests respectively (23 ignored across shell and pager).
-- Native arm64 macOS release build passes with `CARGO_INCREMENTAL=0`,
-  `CARGO_PROFILE_RELEASE_DEBUG=false`, and `--locked`; the resulting
-  `target/release/xai-grok-pager` reports `grok 0.2.106 (d76cf1c) [stable]`.
+- All 16 patches apply cleanly in a detached clean-room worktree and reproduce
+  tree `a9a11f502de730d7600bb58f42ceb8c5f77a2a32`, exactly matching the
+  rebased development branch.
+- `cargo check -p xai-grok-pager-bin --locked` passes in the clean-room tree.
+- A native Windows release build passes with `CARGO_INCREMENTAL=0`,
+  `CARGO_PROFILE_RELEASE_DEBUG=false`, and `--locked`; `/DEBUG:NONE` avoids the
+  PDB linker limit and the resulting binary reports `grok 0.2.112 (d560c35)`.
+- Sampling-types, sampler, chat-state, and telemetry library suites pass 285,
+  69, 351, and 154 tests respectively. Focused pager, shell, tool, and
+  parallel-dispatch coverage is recorded in IV-0002 and IV-0005–IV-0007.
 - Cross-platform CI for the rebased stack has not yet been run.
 
 Prior-base CI validation:
@@ -130,7 +131,7 @@ Prior-base CI validation:
   changes, fail before compiling rather than silently building another tree.
 - Use the currently supported `macos-15-intel` label for x86_64. The legacy
   `macos-13` label remained queued indefinitely during initial validation.
-- The release profile override disables debug info to reduce artifact size,
-  but MSVC still emits a minimal PDB internally; do not remove either setting
-  in patch `0010` unless linker behavior or pager symbol volume changes.
+- The release profile override disables Rust debug info and patch `0010`
+  suppresses final-link PDB generation with `/DEBUG:NONE`; keep both unless
+  linker behavior or pager symbol volume changes.
 - Upstream is Apache-2.0; each archive includes its `LICENSE`.

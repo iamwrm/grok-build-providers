@@ -1,4 +1,4 @@
-From 5d0818c1bd8923a05e6819c4a4f0e14bdc8e8b67 Mon Sep 17 00:00:00 2001
+From 33c6b1bae3f3066686230b2a652c52ad6d6eb867 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:00 +0800
 Subject: [PATCH 01/16] Add OpenAI ChatGPT-plan OAuth flow, storage, and CLI
@@ -13,10 +13,10 @@ Port the OpenAI Codex PKCE browser and device-code authentication flows. Store t
  create mode 100644 crates/codegen/xai-grok-shell/src/auth/openai_codex.rs
 
 diff --git a/crates/codegen/xai-grok-pager-bin/src/main.rs b/crates/codegen/xai-grok-pager-bin/src/main.rs
-index 8f28eed..81da5ae 100644
+index f52d448..48b3f9b 100644
 --- a/crates/codegen/xai-grok-pager-bin/src/main.rs
 +++ b/crates/codegen/xai-grok-pager-bin/src/main.rs
-@@ -1908,6 +1908,22 @@ async fn async_main() -> Result<()> {
+@@ -1962,6 +1962,22 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                  println!();
                  xai_grok_shell::instrumentation::finalize_and_exit(0);
              }
@@ -40,10 +40,10 @@ index 8f28eed..81da5ae 100644
                  init_tracing_simple("cli");
                  let config = xai_grok_shell::config::load_effective_config_disk_only()
 diff --git a/crates/codegen/xai-grok-pager/src/app/cli.rs b/crates/codegen/xai-grok-pager/src/app/cli.rs
-index e2ed796..533f338 100644
+index b239348..be68b70 100644
 --- a/crates/codegen/xai-grok-pager/src/app/cli.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/cli.rs
-@@ -42,6 +42,8 @@ pub enum Command {
+@@ -44,6 +44,8 @@ pub enum Command {
          #[arg(skip)]
          devbox: bool,
      },
@@ -52,7 +52,7 @@ index e2ed796..533f338 100644
      /// Manage MCP server configurations
      Mcp(crate::mcp_cmd::McpArgs),
      /// Manage plugins and marketplace sources
-@@ -139,6 +141,29 @@ See ~/.grok/README.md for more information.
+@@ -141,6 +143,29 @@ See ~/.grok/README.md for more information.
      /// var is set.
      Dashboard,
  }
@@ -83,10 +83,10 @@ index e2ed796..533f338 100644
  #[derive(Debug, clap::Args, Clone)]
  pub struct WrapArgs {
 diff --git a/crates/codegen/xai-grok-shell/src/auth/mod.rs b/crates/codegen/xai-grok-shell/src/auth/mod.rs
-index 16be304..eadb8c9 100644
+index 4a595b1..8fe025f 100644
 --- a/crates/codegen/xai-grok-shell/src/auth/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/auth/mod.rs
-@@ -11,6 +11,7 @@ mod jwt;
+@@ -12,6 +12,7 @@ mod jwt;
  pub(crate) mod manager;
  mod model;
  pub mod oidc;
@@ -835,5 +835,5 @@ index 0000000..a29b66a
 +    }
 +}
 -- 
-2.50.1 (Apple Git-155)
+2.52.0.windows.1
 

@@ -1,4 +1,4 @@
-From f1c9a7fb6dbcadd731fb7e2f0c3b304e850ba8ec Mon Sep 17 00:00:00 2001
+From 2d6a500481cb4acf910634ff889918f68e93ef6e Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 11/16] Add dynamically controllable raw sampling logs
@@ -21,7 +21,7 @@ The JSON fmt formatter walks every ancestor when writing the spans array and pan
  11 files changed, 634 insertions(+), 20 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager/src/app/actions.rs b/crates/codegen/xai-grok-pager/src/app/actions.rs
-index 1b9c31a..6c48501 100644
+index 1fb61a2..183c182 100644
 --- a/crates/codegen/xai-grok-pager/src/app/actions.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/actions.rs
 @@ -33,6 +33,23 @@ pub enum SwitchModelError {
@@ -48,7 +48,7 @@ index 1b9c31a..6c48501 100644
  #[derive(Debug)]
  #[allow(clippy::large_enum_variant)]
  pub enum Action {
-@@ -303,6 +320,9 @@ pub enum Action {
+@@ -311,6 +328,9 @@ pub enum Action {
      /// Toggle the scroll flight recorder at runtime (`/debug log`;
      /// `GROK_SCROLL_LOG=1` enables it from startup).
      ToggleScrollLog,
@@ -58,7 +58,7 @@ index 1b9c31a..6c48501 100644
      /// Print the `/debug` toggles and their on/off state to the transcript.
      ShowDebugStatus,
      /// Copy selected block's content to clipboard.
-@@ -1487,6 +1507,11 @@ pub enum Effect {
+@@ -1533,6 +1553,11 @@ pub enum Effect {
          agent_id: AgentId,
          session_id: acp::SessionId,
      },
@@ -70,7 +70,7 @@ index 1b9c31a..6c48501 100644
      /// Kill a background task.
      KillBgTask {
          session_id: acp::SessionId,
-@@ -2270,6 +2295,12 @@ pub enum TaskResult {
+@@ -2357,6 +2382,12 @@ pub enum TaskResult {
          agent_id: AgentId,
          result: Result<(), String>,
      },
@@ -84,10 +84,10 @@ index 1b9c31a..6c48501 100644
      /// returned an error envelope or an unparseable payload (treated as
      /// "clear pending state, keep the row").
 diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs
-index 7412b06..c649411 100644
+index cfa1e56..1bed725 100644
 --- a/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs
-@@ -531,13 +531,20 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
+@@ -543,13 +543,20 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
              }
              vec![]
          }
@@ -110,10 +110,10 @@ index 7412b06..c649411 100644
              if let Some(agent) = get_active_agent_mut(app) {
                  agent
 diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
-index 73e6082..5572076 100644
+index 151aeac..ab7d441 100644
 --- a/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
-@@ -455,6 +455,33 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
+@@ -517,6 +517,33 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
          TaskResult::CompactComplete { agent_id, result } => {
              handle_compact_complete(app, agent_id, result)
          }
@@ -148,10 +148,10 @@ index 73e6082..5572076 100644
              agent_id,
              model_id,
 diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/tests/router.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/tests/router.rs
-index 17e8635..a35f3d4 100644
+index b7388c0..421a033 100644
 --- a/crates/codegen/xai-grok-pager/src/app/dispatch/tests/router.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/dispatch/tests/router.rs
-@@ -2300,11 +2300,29 @@ fn show_debug_status_emits_toggle_states_to_transcript() {
+@@ -2582,11 +2582,29 @@ fn show_debug_status_emits_toggle_states_to_transcript() {
          .unwrap_or_else(|| panic!("status line missing, got {texts:?}"));
      assert!(status.contains("fps on"), "got: {status}");
      assert!(status.contains("log off"), "got: {status}");
@@ -182,10 +182,10 @@ index 17e8635..a35f3d4 100644
  #[test]
  fn toggle_scroll_log_flips_recorder_and_reports_path() {
 diff --git a/crates/codegen/xai-grok-pager/src/app/effects/mod.rs b/crates/codegen/xai-grok-pager/src/app/effects/mod.rs
-index 7d08f1f..1246866 100644
+index d9f63f6..d9bedda 100644
 --- a/crates/codegen/xai-grok-pager/src/app/effects/mod.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/effects/mod.rs
-@@ -1456,6 +1456,36 @@ pub(crate) fn execute(
+@@ -1518,6 +1518,36 @@ pub(crate) fn execute(
                      }
                  });
          }
@@ -223,10 +223,10 @@ index 7d08f1f..1246866 100644
              let tx = acp_tx.clone();
              tasks
 diff --git a/crates/codegen/xai-grok-pager/src/app/event_loop.rs b/crates/codegen/xai-grok-pager/src/app/event_loop.rs
-index dddedd4..f8ae36e 100644
+index f9e858a..d9393cc 100644
 --- a/crates/codegen/xai-grok-pager/src/app/event_loop.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/event_loop.rs
-@@ -718,6 +718,11 @@ pub(crate) async fn run(
+@@ -734,6 +734,11 @@ pub(crate) async fn run(
      if args.log_sampling {
          // SAFETY: called before any threads are spawned by init_tracing.
          unsafe { std::env::set_var("GROK_LOG_SAMPLING", "1") };
@@ -239,7 +239,7 @@ index dddedd4..f8ae36e 100644
      let tracing_handle = crate::tracing::init_tracing();
  
 diff --git a/crates/codegen/xai-grok-pager/src/slash/commands/debug.rs b/crates/codegen/xai-grok-pager/src/slash/commands/debug.rs
-index af2d4cc..572b485 100644
+index 22eed88..9d9dc5f 100644
 --- a/crates/codegen/xai-grok-pager/src/slash/commands/debug.rs
 +++ b/crates/codegen/xai-grok-pager/src/slash/commands/debug.rs
 @@ -1,4 +1,4 @@
@@ -314,7 +314,7 @@ index af2d4cc..572b485 100644
              )),
          }
      }
-@@ -169,6 +185,34 @@ mod tests {
+@@ -171,6 +187,34 @@ mod tests {
          ));
      }
  
@@ -349,7 +349,7 @@ index af2d4cc..572b485 100644
      #[test]
      fn debug_junk_subcommand_errors_helpfully() {
          let models = ModelState::default();
-@@ -192,6 +236,16 @@ mod tests {
+@@ -194,6 +238,16 @@ mod tests {
              .suggest_args(&app_ctx(&models), "")
              .expect("suggestions");
          let names: Vec<&str> = items.iter().map(|i| i.insert_text.as_str()).collect();
@@ -368,10 +368,10 @@ index af2d4cc..572b485 100644
      }
  }
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index 9372a8e..3a99853 100644
+index ab65bc2..5737563 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
-@@ -1046,6 +1046,7 @@ impl SamplingClient {
+@@ -1155,6 +1155,7 @@ impl SamplingClient {
              deployment_id: payload.x_grok_deployment_id.as_deref(),
              user_id: payload.x_grok_user_id.as_deref(),
          };
@@ -379,7 +379,7 @@ index 9372a8e..3a99853 100644
          let http_request = grok_headers
              .apply(self.post(self.endpoint("chat/completions")))
              .json(&payload);
-@@ -1104,6 +1105,11 @@ impl SamplingClient {
+@@ -1213,6 +1214,11 @@ impl SamplingClient {
              deployment_id: payload.x_grok_deployment_id.as_deref(),
              user_id: payload.x_grok_user_id.as_deref(),
          };
@@ -391,7 +391,7 @@ index 9372a8e..3a99853 100644
          let http_request = grok_headers
              .apply(self.post(self.endpoint("chat/completions")))
              .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
-@@ -1326,6 +1332,7 @@ impl SamplingClient {
+@@ -1429,6 +1435,7 @@ impl SamplingClient {
          if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
              apply_chatgpt_codex_request_shape(&mut request_body);
          }
@@ -399,7 +399,7 @@ index 9372a8e..3a99853 100644
          let http_request = grok_headers
              .apply(self.post(self.endpoint("responses")))
              .json(&request_body);
-@@ -1501,6 +1508,7 @@ impl SamplingClient {
+@@ -1581,6 +1588,7 @@ impl SamplingClient {
              // Presence opts in; the server ignores the value.
              http_request = http_request.header(DOOM_LOOP_CHECK_HEADER, "true");
          }
@@ -407,7 +407,7 @@ index 9372a8e..3a99853 100644
          let http_request = http_request.json(&request_body);
  
          let built_request = http_request.build().map_err(|e| {
-@@ -1695,6 +1703,7 @@ impl SamplingClient {
+@@ -1775,6 +1783,7 @@ impl SamplingClient {
              deployment_id: request.x_grok_deployment_id.as_deref(),
              user_id: request.x_grok_user_id.as_deref(),
          };
@@ -415,7 +415,7 @@ index 9372a8e..3a99853 100644
          let http_request = grok_headers
              .apply(self.post(self.endpoint("messages")))
              .json(&request.inner);
-@@ -1802,6 +1811,7 @@ impl SamplingClient {
+@@ -1882,6 +1891,7 @@ impl SamplingClient {
              deployment_id: request.x_grok_deployment_id.as_deref(),
              user_id: request.x_grok_user_id.as_deref(),
          };
@@ -532,7 +532,7 @@ index 69e2eea..9a2bad1 100644
 +    }
 +}
 diff --git a/crates/codegen/xai-grok-shell/src/extensions/debug.rs b/crates/codegen/xai-grok-shell/src/extensions/debug.rs
-index 4196532..f8f7c37 100644
+index 2b9bfcf..2abb23a 100644
 --- a/crates/codegen/xai-grok-shell/src/extensions/debug.rs
 +++ b/crates/codegen/xai-grok-shell/src/extensions/debug.rs
 @@ -8,6 +8,7 @@
@@ -546,12 +546,12 @@ index 4196532..f8f7c37 100644
 @@ -24,6 +25,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
          }
          "x.ai/debug/arm_auto_compact" => handle_arm_auto_compact(agent, args),
-         "x.ai/debug/agent" => handle_agent(agent),
+         "x.ai/debug/agent" => handle_agent(agent).await,
 +        "x.ai/debug/sampling" => handle_sampling(args),
          _ => Err(acp::Error::method_not_found()),
      }
  }
-@@ -34,6 +36,72 @@ fn handle_agent(agent: &MvpAgent) -> ExtResult {
+@@ -35,6 +37,72 @@ async fn handle_agent(agent: &MvpAgent) -> ExtResult {
          .map_err(|e| acp::Error::internal_error().data(e.to_string()))
  }
  
@@ -625,7 +625,7 @@ index 4196532..f8f7c37 100644
      use crate::session::feedback::{FeedbackMode, FeedbackTier};
  
 diff --git a/crates/codegen/xai-grok-telemetry/src/sampling_log.rs b/crates/codegen/xai-grok-telemetry/src/sampling_log.rs
-index e846169..53a872a 100644
+index e846169..c9d7853 100644
 --- a/crates/codegen/xai-grok-telemetry/src/sampling_log.rs
 +++ b/crates/codegen/xai-grok-telemetry/src/sampling_log.rs
 @@ -1,32 +1,145 @@
@@ -811,8 +811,8 @@ index e846169..53a872a 100644
 +#[cfg(test)]
 +mod tests {
 +    use std::io::{self, Write};
-+    use std::sync::{Arc, Mutex};
 +    use std::sync::atomic::{AtomicUsize, Ordering};
++    use std::sync::{Arc, Mutex};
 +
 +    use tracing_subscriber::fmt::MakeWriter;
 +    use tracing_subscriber::layer::SubscriberExt as _;
@@ -963,5 +963,5 @@ index e846169..53a872a 100644
 +    }
  }
 -- 
-2.50.1 (Apple Git-155)
+2.52.0.windows.1
 

@@ -1,4 +1,4 @@
-From aff7451583a7a18c54f7e44a858485483a26109a Mon Sep 17 00:00:00 2001
+From d560c3574e61791b802ff153e674d390e878b5cf Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 22:17:03 +0800
 Subject: [PATCH 16/16] Gate native reasoning replay by route, API, and model
@@ -16,20 +16,20 @@ Persist non-secret inference provenance on assistant turns and replay opaque rea
  .../xai-grok-sampler/src/stream/messages.rs   |   1 +
  .../src/conversation.rs                       | 599 +++++++++++++++++-
  .../xai-grok-sampling-types/src/types.rs      |  13 +
- .../src/agent/subagent/tests/mod.rs           |   2 +-
+ .../src/agent/subagent/tests/mod.rs           |  33 +-
  .../src/session/acp_session_impl/laziness.rs  |   1 +
  .../session/acp_session_impl/sampler_turn.rs  |   1 +
  .../laziness/laziness_debug_tests.rs          |   6 +
  .../src/session/goal_classifier/evidence.rs   |   2 +
  .../src/session/helpers/session_compact.rs    |   3 +
  .../src/session/memory/hooks.rs               |   1 +
- .../src/session/storage/jsonl/tests.rs        |  10 +-
+ .../src/session/storage/jsonl/tests.rs        | 207 +++---
  .../xai-grok-shell/src/session/storage/mod.rs |   1 +
  .../src/trace_classifier/mod.rs               |   3 +
- 21 files changed, 721 insertions(+), 16 deletions(-)
+ 21 files changed, 838 insertions(+), 127 deletions(-)
 
 diff --git a/crates/codegen/xai-chat-state/src/actor/request_builder.rs b/crates/codegen/xai-chat-state/src/actor/request_builder.rs
-index 4a708aa..b385685 100644
+index 17b6a21..ddb2a21 100644
 --- a/crates/codegen/xai-chat-state/src/actor/request_builder.rs
 +++ b/crates/codegen/xai-chat-state/src/actor/request_builder.rs
 @@ -131,6 +131,7 @@ impl ChatStateActor {
@@ -41,10 +41,10 @@ index 4a708aa..b385685 100644
              max_output_tokens: self.state.sampling_config.max_completion_tokens,
              top_p: self.state.sampling_config.top_p,
 diff --git a/crates/codegen/xai-chat-state/src/actor/tests.rs b/crates/codegen/xai-chat-state/src/actor/tests.rs
-index 2bc9565..5e9c2c5 100644
+index c3eada8..5a8e62d 100644
 --- a/crates/codegen/xai-chat-state/src/actor/tests.rs
 +++ b/crates/codegen/xai-chat-state/src/actor/tests.rs
-@@ -1488,6 +1488,7 @@ async fn parallel_tool_calls_accept_first_reject_second_skip_third() {
+@@ -1750,6 +1750,7 @@ async fn parallel_tool_calls_accept_first_reject_second_skip_third() {
                      arguments: r#"{"command":"cargo test"}"#.into(),
                  },
              ],
@@ -52,7 +52,7 @@ index 2bc9565..5e9c2c5 100644
              model_id: Some("grok-3".to_string()),
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -1774,6 +1775,7 @@ async fn dangling_tool_calls_after_crash_are_repaired_on_load() {
+@@ -2036,6 +2037,7 @@ async fn dangling_tool_calls_after_crash_are_repaired_on_load() {
                      arguments: r#"{"command":"cargo test"}"#.into(),
                  },
              ],
@@ -60,7 +60,7 @@ index 2bc9565..5e9c2c5 100644
              model_id: Some("grok-3".to_string()),
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -3406,6 +3408,7 @@ async fn get_last_model_metadata_returns_both_fields() {
+@@ -3668,6 +3670,7 @@ async fn get_last_model_metadata_returns_both_fields() {
          ConversationItem::Assistant(xai_grok_sampling_types::AssistantItem {
              content: "hello".into(),
              tool_calls: vec![],
@@ -68,7 +68,7 @@ index 2bc9565..5e9c2c5 100644
              model_id: Some("grok-4.5".into()),
              model_fingerprint: Some("fp_abc123".into()),
              reasoning_effort: None,
-@@ -3455,6 +3458,7 @@ async fn sampling_config_survives_compaction_replacement() {
+@@ -3719,6 +3722,7 @@ async fn sampling_config_survives_compaction_replacement() {
              ConversationItem::Assistant(xai_grok_sampling_types::AssistantItem {
                  content: "I'll fix it.".into(),
                  tool_calls: vec![],
@@ -76,7 +76,7 @@ index 2bc9565..5e9c2c5 100644
                  model_id: Some("grok-4.5".into()),
                  model_fingerprint: Some("fp_abc123".into()),
                  reasoning_effort: None,
-@@ -3538,6 +3542,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
+@@ -3804,6 +3808,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
              ConversationItem::Assistant(xai_grok_sampling_types::AssistantItem {
                  content: "done".into(),
                  tool_calls: vec![],
@@ -84,7 +84,7 @@ index 2bc9565..5e9c2c5 100644
                  model_id: Some("grok-4.5".into()),
                  model_fingerprint: Some("fp_acd3142484d3ad6f".into()),
                  reasoning_effort: None,
-@@ -3573,6 +3578,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
+@@ -3839,6 +3844,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
              xai_grok_sampling_types::AssistantItem {
                  content: "working on it".into(),
                  tool_calls: vec![],
@@ -105,10 +105,10 @@ index c12420b..0ea271c 100644
                  model_fingerprint: None,
                  reasoning_effort: None,
 diff --git a/crates/codegen/xai-chat-state/src/compaction_utils.rs b/crates/codegen/xai-chat-state/src/compaction_utils.rs
-index ca75479..74d06d4 100644
+index 0ca003c..3fcefb9 100644
 --- a/crates/codegen/xai-chat-state/src/compaction_utils.rs
 +++ b/crates/codegen/xai-chat-state/src/compaction_utils.rs
-@@ -2681,6 +2681,7 @@ actual user question";
+@@ -2712,6 +2712,7 @@ actual user question";
                          arguments: r#"{"target_file":"src/lib.rs"}"#.into(),
                      },
                  ],
@@ -116,7 +116,7 @@ index ca75479..74d06d4 100644
                  model_id: Some("grok-3".to_string()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -2714,6 +2715,7 @@ actual user question";
+@@ -2751,6 +2752,7 @@ actual user question";
                          arguments: r#"{"command":"cargo test"}"#.into(),
                      },
                  ],
@@ -124,7 +124,7 @@ index ca75479..74d06d4 100644
                  model_id: Some("grok-3".to_string()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -2973,6 +2975,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+@@ -3087,6 +3089,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
              ConversationItem::Assistant(AssistantItem {
                  content: "response".into(),
                  tool_calls: vec![],
@@ -132,7 +132,7 @@ index ca75479..74d06d4 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -2997,6 +3000,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+@@ -3111,6 +3114,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
              ConversationItem::Assistant(AssistantItem {
                  content: "response".into(),
                  tool_calls: vec![],
@@ -140,7 +140,7 @@ index ca75479..74d06d4 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -3047,6 +3051,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+@@ -3161,6 +3165,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                      name: "grep".into(),
                      arguments: "{}".into(),
                  }],
@@ -148,7 +148,7 @@ index ca75479..74d06d4 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -3090,6 +3095,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+@@ -3204,6 +3209,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
              ConversationItem::Assistant(AssistantItem {
                  content: "plain text response".into(),
                  tool_calls: vec![],
@@ -156,7 +156,7 @@ index ca75479..74d06d4 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -3126,6 +3132,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+@@ -3240,6 +3246,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                      name: "grep".into(),
                      arguments: "{}".into(),
                  }],
@@ -164,7 +164,7 @@ index ca75479..74d06d4 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -3136,6 +3143,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+@@ -3250,6 +3257,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
              ConversationItem::Assistant(AssistantItem {
                  content: "thinking only".into(),
                  tool_calls: vec![],
@@ -172,7 +172,7 @@ index ca75479..74d06d4 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -3145,6 +3153,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+@@ -3259,6 +3267,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
              ConversationItem::Assistant(AssistantItem {
                  content: "plain reply".into(),
                  tool_calls: vec![],
@@ -180,7 +180,7 @@ index ca75479..74d06d4 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -3214,6 +3223,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+@@ -3328,6 +3337,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                      name: "ls".into(),
                      arguments: "{}".into(),
                  }],
@@ -189,10 +189,10 @@ index ca75479..74d06d4 100644
                  model_fingerprint: None,
                  reasoning_effort: None,
 diff --git a/crates/codegen/xai-grok-sampler/src/actor/request_task.rs b/crates/codegen/xai-grok-sampler/src/actor/request_task.rs
-index 66665af..d257c1f 100644
+index aa829f8..06aa2c7 100644
 --- a/crates/codegen/xai-grok-sampler/src/actor/request_task.rs
 +++ b/crates/codegen/xai-grok-sampler/src/actor/request_task.rs
-@@ -15,8 +15,8 @@ use tokio_util::sync::CancellationToken;
+@@ -18,8 +18,8 @@ use tokio_util::sync::CancellationToken;
  use tracing::Instrument;
  
  use xai_grok_sampling_types::{
@@ -203,7 +203,7 @@ index 66665af..d257c1f 100644
  };
  
  use crate::client::{ApiBackend, SamplingClient};
-@@ -113,7 +113,19 @@ pub(crate) async fn run_request_task(
+@@ -122,7 +122,19 @@ pub(crate) async fn run_request_task(
          sampling_span.record("reasoning_effort", eff.as_str());
      }
  
@@ -223,7 +223,7 @@ index 66665af..d257c1f 100644
      let mut retry_count: u32 = 0;
      // Doom-loop recovery keeps its own resample budget, independent of the
      // transport/empty budget above.
-@@ -144,9 +156,12 @@ pub(crate) async fn run_request_task(
+@@ -164,9 +176,12 @@ pub(crate) async fn run_request_task(
  
          match outcome {
              AttemptOutcome::Completed {
@@ -238,10 +238,10 @@ index 66665af..d257c1f 100644
                  if let Some(policy) = doom_policy {
                      let confident = policy.confident_triggers(&response.doom_loop_signals);
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index ed577ca..e80d216 100644
+index dd144c4..995cc02 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
-@@ -1997,6 +1997,19 @@ impl SamplingClient {
+@@ -2077,6 +2077,19 @@ impl SamplingClient {
              request.max_output_tokens = self.defaults.max_completion_tokens;
          }
  
@@ -261,7 +261,7 @@ index ed577ca..e80d216 100644
          Ok(())
      }
  
-@@ -2193,8 +2206,17 @@ impl SamplingClient {
+@@ -2267,8 +2280,17 @@ impl SamplingClient {
      /// Backend-aware streaming call that collects the full response.
      pub async fn conversation_collect(
          &self,
@@ -280,7 +280,7 @@ index ed577ca..e80d216 100644
          let request_id = crate::types::RequestId::random();
          let idle_timeout = std::time::Duration::from_secs(300);
          let result = match self.api_backend() {
-@@ -2217,7 +2239,12 @@ impl SamplingClient {
+@@ -2291,7 +2313,12 @@ impl SamplingClient {
              }
          };
          result
@@ -295,7 +295,7 @@ index ed577ca..e80d216 100644
                  status: info
                      .status_code
 diff --git a/crates/codegen/xai-grok-sampler/src/config.rs b/crates/codegen/xai-grok-sampler/src/config.rs
-index fb3143d..da48698 100644
+index db81fff..8947bfb 100644
 --- a/crates/codegen/xai-grok-sampler/src/config.rs
 +++ b/crates/codegen/xai-grok-sampler/src/config.rs
 @@ -12,6 +12,20 @@ use xai_grok_sampling_types::{
@@ -319,7 +319,7 @@ index fb3143d..da48698 100644
  use crate::attribution::SharedAttributionCallback;
  use crate::retry::{DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD};
  
-@@ -224,6 +238,15 @@ pub struct OriginClientInfo {
+@@ -236,6 +250,15 @@ pub struct OriginClientInfo {
  mod tests {
      use super::*;
  
@@ -360,10 +360,10 @@ index 75e9ef7..eb730a4 100644
              model_fingerprint: None,
              // The Messages API does not echo the applied reasoning effort.
 diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-index b7af318..0134fc8 100644
+index bcfa979..b4b240f 100644
 --- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
 +++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-@@ -240,6 +240,10 @@ pub struct AssistantItem {
+@@ -249,6 +249,10 @@ pub struct AssistantItem {
      /// Tool calls made by the assistant (client must execute these locally)
      #[serde(default, skip_serializing_if = "Vec::is_empty")]
      pub tool_calls: Vec<ToolCall>,
@@ -374,7 +374,7 @@ index b7af318..0134fc8 100644
      /// The model that generated this response
      #[serde(default, skip_serializing_if = "Option::is_none")]
      pub model_id: Option<String>,
-@@ -557,6 +561,11 @@ pub struct ConversationRequest {
+@@ -588,6 +592,11 @@ pub struct ConversationRequest {
      pub tool_choice: Option<ConversationToolChoice>,
      /// Model to use (if not using client default)
      pub model: Option<String>,
@@ -386,7 +386,7 @@ index b7af318..0134fc8 100644
      /// Sampling temperature
      pub temperature: Option<f32>,
      /// Maximum output tokens
-@@ -1113,6 +1122,7 @@ impl ConversationItem {
+@@ -1187,6 +1196,7 @@ impl ConversationItem {
          Self::Assistant(AssistantItem {
              content: Arc::<str>::from(content.into()),
              tool_calls: Vec::new(),
@@ -394,7 +394,7 @@ index b7af318..0134fc8 100644
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -1128,6 +1138,7 @@ impl ConversationItem {
+@@ -1202,6 +1212,7 @@ impl ConversationItem {
          Self::Assistant(AssistantItem {
              content: Arc::<str>::from(content.into()),
              tool_calls: Vec::new(),
@@ -402,7 +402,7 @@ index b7af318..0134fc8 100644
              model_id: Some(model_id.into()),
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -1139,6 +1150,7 @@ impl ConversationItem {
+@@ -1213,6 +1224,7 @@ impl ConversationItem {
          Self::Assistant(AssistantItem {
              content: Arc::<str>::from(""),
              tool_calls,
@@ -410,7 +410,7 @@ index b7af318..0134fc8 100644
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -1650,6 +1662,7 @@ impl From<ChatRequestMessage> for ConversationItem {
+@@ -1724,6 +1736,7 @@ impl From<ChatRequestMessage> for ConversationItem {
                  ConversationItem::Assistant(AssistantItem {
                      content: Arc::<str>::from(content),
                      tool_calls,
@@ -418,7 +418,7 @@ index b7af318..0134fc8 100644
                      model_id,
                      model_fingerprint: None,
                      reasoning_effort: None,
-@@ -1887,6 +1900,14 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
+@@ -1961,6 +1974,14 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
  /// turn (there is intentionally no public single-item conversion, since a
  /// lone `Reasoning` item has no chat-completions equivalent).
  pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRequestMessage> {
@@ -433,7 +433,7 @@ index b7af318..0134fc8 100644
      let mut out: Vec<ChatRequestMessage> = Vec::with_capacity(items.len());
      let mut pending_reasoning: Vec<String> = Vec::new();
  
-@@ -1961,6 +1982,7 @@ impl From<ChatResponseMessage> for ConversationItem {
+@@ -2035,6 +2056,7 @@ impl From<ChatResponseMessage> for ConversationItem {
          ConversationItem::Assistant(AssistantItem {
              content: Arc::<str>::from(content),
              tool_calls,
@@ -441,7 +441,7 @@ index b7af318..0134fc8 100644
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -2090,6 +2112,7 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
+@@ -2155,6 +2177,7 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
      items.push(ConversationItem::Assistant(AssistantItem {
          content: Arc::<str>::from(content),
          tool_calls,
@@ -449,7 +449,7 @@ index b7af318..0134fc8 100644
          model_id: Some(model_id),
          model_fingerprint,
          reasoning_effort,
-@@ -2109,7 +2132,8 @@ impl From<ConversationRequest> for ChatCompletionRequest {
+@@ -2174,7 +2197,8 @@ impl From<ConversationRequest> for ChatCompletionRequest {
          // Uses the reasoning-aware helper so `Reasoning` siblings collapse
          // into `reasoning_content` on the following assistant rather than
          // being emitted as empty assistant messages.
@@ -459,7 +459,7 @@ index b7af318..0134fc8 100644
  
          let tools_is_empty = req.tools.is_empty();
          let tools: Option<Vec<ToolDefinition>> = if tools_is_empty {
-@@ -2251,15 +2275,138 @@ impl From<&ConversationRequest> for rs::CreateResponse {
+@@ -2316,15 +2340,138 @@ impl From<&ConversationRequest> for rs::CreateResponse {
  /// Reasoning items are top-level siblings (not bundled into the assistant),
  /// so they appear inline in the same order the model originally emitted —
  /// which is what lets the server-side prefix KV-cache hit on repeat turns.
@@ -600,7 +600,7 @@ index b7af318..0134fc8 100644
  /// Walk a serialized Responses API request body and inject the
  /// `type: "reasoning_text"` discriminator that the API requires on
  /// `reasoning.content[*]` items.
-@@ -3136,6 +3283,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+@@ -3128,6 +3275,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
          ToolResultContent,
      };
  
@@ -608,7 +608,7 @@ index b7af318..0134fc8 100644
      let mut system_blocks: Vec<TextBlock> = Vec::new();
      let mut messages: Vec<Message> = Vec::new();
      let mut pending_assistant: Vec<ContentBlock> = Vec::new();
-@@ -3227,8 +3375,10 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+@@ -3219,8 +3367,10 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
          }
      };
  
@@ -621,7 +621,7 @@ index b7af318..0134fc8 100644
          match item {
              ConversationItem::System(s) => {
                  flush_assistant(&mut pending_assistant, &mut messages);
-@@ -3479,6 +3629,7 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
+@@ -3471,6 +3621,7 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
          ConversationItem::Assistant(AssistantItem {
              content: Arc::<str>::from(content),
              tool_calls,
@@ -629,8 +629,8 @@ index b7af318..0134fc8 100644
              model_id: Some(resp.model),
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -3613,6 +3764,34 @@ mod tests {
-     use super::*;
+@@ -3606,6 +3757,34 @@ mod tests {
+     use crate::tool_overrides::*;
      use assert_matches::assert_matches;
  
 +    #[test]
@@ -664,7 +664,7 @@ index b7af318..0134fc8 100644
      #[test]
      fn prior_turn_interrupt_serde_round_trip_and_unknown_fallback() {
          for (variant, wire) in [
-@@ -4354,6 +4533,7 @@ mod tests {
+@@ -4422,6 +4601,7 @@ mod tests {
                  name: "read_file".to_string(),
                  arguments: r#"{"path": "/test.txt"}"#.into(),
              }],
@@ -672,7 +672,7 @@ index b7af318..0134fc8 100644
              model_id: Some("grok-3".to_string()),
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -4809,6 +4989,7 @@ mod tests {
+@@ -4877,6 +5057,7 @@ mod tests {
          let assistant_item = ConversationItem::Assistant(AssistantItem {
              content: "The answer is 42.".into(),
              tool_calls: vec![],
@@ -680,7 +680,7 @@ index b7af318..0134fc8 100644
              model_id: Some("grok-3".to_string()),
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -4841,6 +5022,7 @@ mod tests {
+@@ -4909,6 +5090,7 @@ mod tests {
              ConversationItem::Assistant(AssistantItem {
                  content: "The answer is 4.".into(),
                  tool_calls: vec![],
@@ -688,7 +688,7 @@ index b7af318..0134fc8 100644
                  model_id: Some("grok-3".to_string()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -4901,6 +5083,7 @@ mod tests {
+@@ -4969,6 +5151,7 @@ mod tests {
              ConversationItem::Assistant(AssistantItem {
                  content: "Hi!".into(),
                  tool_calls: vec![],
@@ -696,7 +696,7 @@ index b7af318..0134fc8 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -5540,6 +5723,7 @@ mod tests {
+@@ -5610,6 +5793,7 @@ mod tests {
          let with_reasoning = ConversationItem::Assistant(AssistantItem {
              content: "Here is the answer.".into(),
              tool_calls: vec![],
@@ -704,7 +704,7 @@ index b7af318..0134fc8 100644
              model_id: Some("messages-compatible-model".into()),
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -5736,6 +5920,7 @@ mod tests {
+@@ -5806,6 +5990,7 @@ mod tests {
              ConversationItem::Assistant(AssistantItem {
                  content: "I'll look at the code.".into(),
                  tool_calls: vec![],
@@ -712,7 +712,7 @@ index b7af318..0134fc8 100644
                  model_id: Some("messages-compatible-model".into()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -5748,6 +5933,7 @@ mod tests {
+@@ -5818,6 +6003,7 @@ mod tests {
                      name: "read_file".to_string(),
                      arguments: r#"{"path":"src/main.rs"}"#.into(),
                  }],
@@ -720,7 +720,7 @@ index b7af318..0134fc8 100644
                  model_id: Some("messages-compatible-model".into()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -5756,6 +5942,7 @@ mod tests {
+@@ -5826,6 +6012,7 @@ mod tests {
              ConversationItem::Assistant(AssistantItem {
                  content: "I see the issue.".into(),
                  tool_calls: vec![],
@@ -728,7 +728,7 @@ index b7af318..0134fc8 100644
                  model_id: Some("messages-compatible-model".into()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -5768,6 +5955,7 @@ mod tests {
+@@ -5838,6 +6025,7 @@ mod tests {
                      name: "search_replace".to_string(),
                      arguments: "{}".into(),
                  }],
@@ -736,7 +736,7 @@ index b7af318..0134fc8 100644
                  model_id: Some("messages-compatible-model".into()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -6503,6 +6691,7 @@ mod tests {
+@@ -6573,6 +6761,7 @@ mod tests {
                      ).into(),
                  },
              ],
@@ -744,7 +744,7 @@ index b7af318..0134fc8 100644
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -6569,6 +6758,7 @@ mod tests {
+@@ -6639,6 +6828,7 @@ mod tests {
              ConversationItem::Assistant(AssistantItem {
                  content: format!("I edited {worktree}/src/main.rs").into(),
                  tool_calls: vec![],
@@ -752,7 +752,7 @@ index b7af318..0134fc8 100644
                  model_id: Some("grok-3".to_string()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -6626,6 +6816,7 @@ mod tests {
+@@ -6696,6 +6886,7 @@ mod tests {
                          r#"{{"file_path":"{worktree}/src/main.rs","old_string":"fn main() {{}}","new_string":"fn main() {{\n    println!(\"Hello\");\n}}"}}"#
                      ).into(),
                  }],
@@ -760,7 +760,7 @@ index b7af318..0134fc8 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -6677,6 +6868,7 @@ mod tests {
+@@ -6747,6 +6938,7 @@ mod tests {
                      name: "read_file".to_string(),
                      arguments: format!(r#"{{"target_file":"{root}/src/main.rs"}}"#).into(),
                  }],
@@ -768,7 +768,7 @@ index b7af318..0134fc8 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -6785,6 +6977,7 @@ mod tests {
+@@ -6855,6 +7047,7 @@ mod tests {
                  name: "run_terminal_cmd".to_string(),
                  arguments: r#"{"command":"echo hello"}"#.into(),
              }],
@@ -776,7 +776,7 @@ index b7af318..0134fc8 100644
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -6900,6 +7093,7 @@ mod tests {
+@@ -6970,6 +7163,7 @@ mod tests {
              items: vec![ConversationItem::Assistant(AssistantItem {
                  content: String::new().into(),
                  tool_calls: vec![],
@@ -784,7 +784,7 @@ index b7af318..0134fc8 100644
                  model_id: Some("test-model".to_string()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -6921,6 +7115,7 @@ mod tests {
+@@ -6991,6 +7185,7 @@ mod tests {
              items: vec![ConversationItem::Assistant(AssistantItem {
                  content: "Here is my answer.".into(),
                  tool_calls: vec![],
@@ -792,7 +792,7 @@ index b7af318..0134fc8 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -6946,6 +7141,7 @@ mod tests {
+@@ -7016,6 +7211,7 @@ mod tests {
                      name: "read_file".to_string(),
                      arguments: "{}".into(),
                  }],
@@ -800,7 +800,7 @@ index b7af318..0134fc8 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -7143,6 +7339,7 @@ mod tests {
+@@ -7213,6 +7409,7 @@ mod tests {
          let item = AssistantItem {
              content: "Hello".into(),
              tool_calls: vec![],
@@ -808,7 +808,7 @@ index b7af318..0134fc8 100644
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -7232,6 +7429,7 @@ mod tests {
+@@ -7302,6 +7499,7 @@ mod tests {
                      arguments: "{}".into(),
                  })
                  .collect(),
@@ -816,7 +816,7 @@ index b7af318..0134fc8 100644
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -7934,6 +8132,7 @@ mod tests {
+@@ -8004,6 +8202,7 @@ mod tests {
                      name: "read_file".to_string(),
                      arguments: "{}".into(),
                  }],
@@ -824,7 +824,7 @@ index b7af318..0134fc8 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -8444,6 +8643,7 @@ mod tests {
+@@ -8538,6 +8737,7 @@ mod tests {
                  ConversationItem::Assistant(AssistantItem {
                      content: String::new().into(),
                      tool_calls: Vec::new(),
@@ -832,7 +832,7 @@ index b7af318..0134fc8 100644
                      model_id: None,
                      model_fingerprint: None,
                      reasoning_effort: None,
-@@ -9277,6 +9477,42 @@ mod tests {
+@@ -9371,6 +9571,42 @@ mod tests {
          })
      }
  
@@ -875,7 +875,7 @@ index b7af318..0134fc8 100644
      /// Helper: serialise the wire `input` array to a Vec of JSON values.
      fn input_items_json(req: &ConversationRequest) -> Vec<serde_json::Value> {
          let cr: rs::CreateResponse = req.into();
-@@ -9462,6 +9698,358 @@ mod tests {
+@@ -9556,6 +9792,358 @@ mod tests {
          assert_eq!(enc_seen, vec!["enc1", "enc2", "enc3"]);
      }
  
@@ -1234,7 +1234,7 @@ index b7af318..0134fc8 100644
      /// INVARIANT: prefix stability across turns without reasoning.
      /// Context and instructions must be prefixed once and consistently
      /// across requests.
-@@ -9677,6 +10265,7 @@ mod tests {
+@@ -9771,6 +10359,7 @@ mod tests {
                      name: "read_file".to_string(),
                      arguments: Arc::<str>::from("{}"),
                  }],
@@ -1243,10 +1243,10 @@ index b7af318..0134fc8 100644
                  model_fingerprint: None,
                  reasoning_effort: None,
 diff --git a/crates/codegen/xai-grok-sampling-types/src/types.rs b/crates/codegen/xai-grok-sampling-types/src/types.rs
-index 94725f6..c6d8cb4 100644
+index ade02eb..3c1866b 100644
 --- a/crates/codegen/xai-grok-sampling-types/src/types.rs
 +++ b/crates/codegen/xai-grok-sampling-types/src/types.rs
-@@ -1054,6 +1054,19 @@ impl ApiBackend {
+@@ -1029,6 +1029,19 @@ impl ApiBackend {
      }
  }
  
@@ -1267,20 +1267,51 @@ index 94725f6..c6d8cb4 100644
  #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
  pub struct SamplingConfig {
 diff --git a/crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs b/crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs
-index f21c5a3..a4152ce 100644
+index ae384a3..9b05d14 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/subagent/tests/mod.rs
-@@ -1942,7 +1942,7 @@ fn verbatim_fork_falls_back_to_summary_on_incomplete_tail() {
-         ConversationItem::assistant("a1"), ConversationItem::user("q2"),
-         ConversationItem::Assistant(AssistantItem { content : String::new().into(),
-         tool_calls : vec![ToolCall { id : "tc1".into(), name : "bash".into(), arguments :
--        "{}".into(), }], model_id : None, model_fingerprint : None, reasoning_effort :
-+        "{}".into(), }], reasoning_origin : None, model_id : None, model_fingerprint : None, reasoning_effort :
-         None, }),
-     ];
+@@ -1023,22 +1023,23 @@ fn verbatim_fork_falls_back_to_summary_on_incomplete_tail() {
+         AssistantItem, ContentPart, ConversationItem, ToolCall,
+     };
+     let items = vec![
+-            ConversationItem::system("parent system"),
+-            ConversationItem::user("q1 UNIQUE_FORK_MARKER_TEST"),
+-            ConversationItem::assistant("a1"),
+-            ConversationItem::user("q2"),
+-            ConversationItem::Assistant(AssistantItem {
+-                content: String::new().into(),
+-                tool_calls: vec![ToolCall {
+-                    id: "tc1".into(),
+-                    name: "bash".into(),
+-                    arguments: "{}".into(),
+-                }],
+-                model_id: None,
+-                model_fingerprint: None,
+-                reasoning_effort: None,
+-            }),
+-        ];
++        ConversationItem::system("parent system"),
++        ConversationItem::user("q1 UNIQUE_FORK_MARKER_TEST"),
++        ConversationItem::assistant("a1"),
++        ConversationItem::user("q2"),
++        ConversationItem::Assistant(AssistantItem {
++            content: String::new().into(),
++            tool_calls: vec![ToolCall {
++                id: "tc1".into(),
++                name: "bash".into(),
++                arguments: "{}".into(),
++            }],
++            reasoning_origin: None,
++            model_id: None,
++            model_fingerprint: None,
++            reasoning_effort: None,
++        }),
++    ];
      let ctx = verbatim_or_normalize_fork(items, 256_000);
+     assert_eq!(ctx.source, InitialContextSource::Forked);
+     assert!(
 diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/laziness.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/laziness.rs
-index 42e60e1..8cfef2b 100644
+index 709f55b..70679a5 100644
 --- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/laziness.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/laziness.rs
 @@ -547,6 +547,7 @@ impl SessionActor {
@@ -1292,10 +1323,10 @@ index 42e60e1..8cfef2b 100644
              max_output_tokens: Some(LAZINESS_MAX_OUTPUT_TOKENS),
              // Don't pass `reasoning_effort` — `grok-4.5` (and
 diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
-index 27c6fda..6e1242f 100644
+index f5450af..7399332 100644
 --- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
-@@ -443,6 +443,7 @@ impl SessionActor {
+@@ -628,6 +628,7 @@ impl SessionActor {
                          hosted_tools: vec![],
                          tool_choice: None,
                          model: Some(model),
@@ -1356,10 +1387,10 @@ index be4e3e7..d953cbd 100644
          model_fingerprint: None,
          reasoning_effort: None,
 diff --git a/crates/codegen/xai-grok-shell/src/session/goal_classifier/evidence.rs b/crates/codegen/xai-grok-shell/src/session/goal_classifier/evidence.rs
-index 272d5f6..9cac58d 100644
+index 201d1b2..a0d9977 100644
 --- a/crates/codegen/xai-grok-shell/src/session/goal_classifier/evidence.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/goal_classifier/evidence.rs
-@@ -1151,6 +1151,7 @@ mod tests {
+@@ -1133,6 +1133,7 @@ mod tests {
          ConversationItem::Assistant(AssistantItem {
              content: text.into(),
              tool_calls: Vec::new(),
@@ -1367,19 +1398,19 @@ index 272d5f6..9cac58d 100644
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -1168,6 +1169,7 @@ mod tests {
-                 name: "update_goal".to_string(),
-                 arguments: "{\"completed\":true}".into(),
+@@ -1147,6 +1148,7 @@ mod tests {
+                 name: "read_file".to_string(),
+                 arguments: "{\"target_file\":\"x\"}".into(),
              }],
 +            reasoning_origin: None,
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
 diff --git a/crates/codegen/xai-grok-shell/src/session/helpers/session_compact.rs b/crates/codegen/xai-grok-shell/src/session/helpers/session_compact.rs
-index cd21d8b..2622fa0 100644
+index 9db539c..547fbab 100644
 --- a/crates/codegen/xai-grok-shell/src/session/helpers/session_compact.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/helpers/session_compact.rs
-@@ -982,6 +982,7 @@ mod compacted_history_shape_tests {
+@@ -986,6 +986,7 @@ mod compacted_history_shape_tests {
                      name: "read_file".into(),
                      arguments: r#"{"target_file": "src/auth.rs"}"#.into(),
                  }],
@@ -1387,15 +1418,15 @@ index cd21d8b..2622fa0 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -993,6 +994,7 @@ mod compacted_history_shape_tests {
-             "tc2".into(), name : "search_replace".into(), arguments :
-             r#"{"file_path": "src/auth.rs", "old_string": "buggy", "new_string": "fixed"}"#
-             .into(), }],
+@@ -998,6 +999,7 @@ mod compacted_history_shape_tests {
+                     name: "search_replace".into(),
+                     arguments: r#"{"file_path": "src/auth.rs", "old_string": "buggy", "new_string": "fixed"}"#.into(),
+                 }],
 +                reasoning_origin: None,
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -1158,6 +1160,7 @@ mod compacted_history_shape_tests {
+@@ -1163,6 +1165,7 @@ mod compacted_history_shape_tests {
                      name: "read_file".into(),
                      arguments: r#"{"target_file": "src/auth.rs"}"#.into(),
                  }],
@@ -1416,59 +1447,256 @@ index 4649b9c..3dd9a14 100644
              model_fingerprint: None,
              reasoning_effort: None,
 diff --git a/crates/codegen/xai-grok-shell/src/session/storage/jsonl/tests.rs b/crates/codegen/xai-grok-shell/src/session/storage/jsonl/tests.rs
-index 2e33ee2..a15f5b5 100644
+index 96d1cbb..a18c8fc 100644
 --- a/crates/codegen/xai-grok-shell/src/session/storage/jsonl/tests.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/storage/jsonl/tests.rs
-@@ -1582,7 +1582,7 @@ fn fork_filter_consecutive_users_with_tool_calls() {
-         ConversationItem::system("sys"), ConversationItem::user("prefix"),
-         ConversationItem::user("query"), ConversationItem::Assistant(AssistantItem {
-         content : String::new().into(), tool_calls : vec![ToolCall { id : "tc1".into(),
--        name : "bash".into(), arguments : "{}".into(), }], model_id : None,
-+        name : "bash".into(), arguments : "{}".into(), }], reasoning_origin : None, model_id : None,
-         model_fingerprint : None, reasoning_effort : None, }),
-         ConversationItem::tool_result("tc1", "output"),
-         ConversationItem::user("follow-up"),
-@@ -1599,7 +1599,7 @@ fn fork_filter_preserves_complete_tool_turn() {
+@@ -2206,24 +2206,25 @@ fn fork_filter_handles_consecutive_user_messages() {
+ fn fork_filter_consecutive_users_with_tool_calls() {
+     use xai_grok_sampling_types::conversation::*;
      let mut items = vec![
-         ConversationItem::user("q"), ConversationItem::Assistant(AssistantItem { content
-         : String::new().into(), tool_calls : vec![ToolCall { id : "tc1".into(), name :
--        "bash".into(), arguments : "{}".into(), }], model_id : None, model_fingerprint :
-+        "bash".into(), arguments : "{}".into(), }], reasoning_origin : None, model_id : None, model_fingerprint :
-         None, reasoning_effort : None, }), ConversationItem::tool_result("tc1",
-         "output"),
-     ];
-@@ -1613,7 +1613,7 @@ fn fork_filter_strips_incomplete_tool_turn() {
-         ConversationItem::user("q1"), ConversationItem::assistant("a1"),
-         ConversationItem::user("q2"), ConversationItem::Assistant(AssistantItem { content
-         : String::new().into(), tool_calls : vec![ToolCall { id : "tc1".into(), name :
--        "bash".into(), arguments : "{}".into(), }], model_id : None, model_fingerprint :
-+        "bash".into(), arguments : "{}".into(), }], reasoning_origin : None, model_id : None, model_fingerprint :
-         None, reasoning_effort : None, }),
-     ];
+-            ConversationItem::system("sys"),
+-            ConversationItem::user("prefix"),
+-            ConversationItem::user("query"),
+-            ConversationItem::Assistant(AssistantItem {
+-                content: String::new().into(),
+-                tool_calls: vec![ToolCall {
+-                    id: "tc1".into(),
+-                    name: "bash".into(),
+-                    arguments: "{}".into(),
+-                }],
+-                model_id: None,
+-                model_fingerprint: None,
+-                reasoning_effort: None,
+-            }),
+-            ConversationItem::tool_result("tc1", "output"),
+-            ConversationItem::user("follow-up"),
+-            // Incomplete turn — no assistant response
+-        ];
++        ConversationItem::system("sys"),
++        ConversationItem::user("prefix"),
++        ConversationItem::user("query"),
++        ConversationItem::Assistant(AssistantItem {
++            content: String::new().into(),
++            tool_calls: vec![ToolCall {
++                id: "tc1".into(),
++                name: "bash".into(),
++                arguments: "{}".into(),
++            }],
++            reasoning_origin: None,
++            model_id: None,
++            model_fingerprint: None,
++            reasoning_effort: None,
++        }),
++        ConversationItem::tool_result("tc1", "output"),
++        ConversationItem::user("follow-up"),
++        // Incomplete turn — no assistant response
++    ];
      super::fork_filter_chat(&mut items);
-@@ -1722,7 +1722,7 @@ fn fork_filter_keeps_multi_tool_cycle_turn_with_reasoning() {
-         ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item("plan",)),
-         ConversationItem::Assistant(AssistantItem { content : String::new().into(),
-         tool_calls : vec![ToolCall { id : "tc1".into(), name : "bash".into(), arguments :
--        "{}".into(), }], model_id : None, model_fingerprint : None, reasoning_effort :
-+        "{}".into(), }], reasoning_origin : None, model_id : None, model_fingerprint : None, reasoning_effort :
-         None, }), ConversationItem::tool_result("tc1", "output"),
-         ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item("reflect",)),
-         ConversationItem::assistant("final text"),
-@@ -1748,7 +1748,7 @@ fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
-         ConversationItem::Assistant(AssistantItem { content : String::new().into(),
-         tool_calls : vec![ToolCall { id : "tc1".into(), name : "bash".into(), arguments :
-         "{}".into(), }, ToolCall { id : "tc2".into(), name : "grep".into(), arguments :
--        "{}".into(), },], model_id : None, model_fingerprint : None, reasoning_effort :
-+        "{}".into(), },], reasoning_origin : None, model_id : None, model_fingerprint : None, reasoning_effort :
-         None, }), ConversationItem::tool_result("tc1", "out1"),
-         ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item("mid")),
-         ConversationItem::tool_result("tc2", "out2"),
+     assert_eq!(
+             items.len(),
+@@ -2235,20 +2236,21 @@ fn fork_filter_consecutive_users_with_tool_calls() {
+ fn fork_filter_preserves_complete_tool_turn() {
+     use xai_grok_sampling_types::conversation::*;
+     let mut items = vec![
+-            ConversationItem::user("q"),
+-            ConversationItem::Assistant(AssistantItem {
+-                content: String::new().into(),
+-                tool_calls: vec![ToolCall {
+-                    id: "tc1".into(),
+-                    name: "bash".into(),
+-                    arguments: "{}".into(),
+-                }],
+-                model_id: None,
+-                model_fingerprint: None,
+-                reasoning_effort: None,
+-            }),
+-            ConversationItem::tool_result("tc1", "output"),
+-        ];
++        ConversationItem::user("q"),
++        ConversationItem::Assistant(AssistantItem {
++            content: String::new().into(),
++            tool_calls: vec![ToolCall {
++                id: "tc1".into(),
++                name: "bash".into(),
++                arguments: "{}".into(),
++            }],
++            reasoning_origin: None,
++            model_id: None,
++            model_fingerprint: None,
++            reasoning_effort: None,
++        }),
++        ConversationItem::tool_result("tc1", "output"),
++    ];
+     super::fork_filter_chat(&mut items);
+     assert_eq!(items.len(), 3, "complete tool turn should be preserved");
+ }
+@@ -2256,22 +2258,23 @@ fn fork_filter_preserves_complete_tool_turn() {
+ fn fork_filter_strips_incomplete_tool_turn() {
+     use xai_grok_sampling_types::conversation::*;
+     let mut items = vec![
+-            ConversationItem::user("q1"),
+-            ConversationItem::assistant("a1"),
+-            ConversationItem::user("q2"),
+-            ConversationItem::Assistant(AssistantItem {
+-                content: String::new().into(),
+-                tool_calls: vec![ToolCall {
+-                    id: "tc1".into(),
+-                    name: "bash".into(),
+-                    arguments: "{}".into(),
+-                }],
+-                model_id: None,
+-                model_fingerprint: None,
+-                reasoning_effort: None,
+-            }),
+-            // Missing tool result — incomplete
+-        ];
++        ConversationItem::user("q1"),
++        ConversationItem::assistant("a1"),
++        ConversationItem::user("q2"),
++        ConversationItem::Assistant(AssistantItem {
++            content: String::new().into(),
++            tool_calls: vec![ToolCall {
++                id: "tc1".into(),
++                name: "bash".into(),
++                arguments: "{}".into(),
++            }],
++            reasoning_origin: None,
++            model_id: None,
++            model_fingerprint: None,
++            reasoning_effort: None,
++        }),
++        // Missing tool result — incomplete
++    ];
+     super::fork_filter_chat(&mut items);
+     assert_eq!(
+             items.len(),
+@@ -2463,28 +2466,29 @@ fn fork_filter_keeps_turn_with_reasoning_between_user_and_assistant() {
+ fn fork_filter_keeps_multi_tool_cycle_turn_with_reasoning() {
+     use xai_grok_sampling_types::conversation::*;
+     let mut items = vec![
+-            ConversationItem::system("sys"),
+-            ConversationItem::user("q"),
+-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
+-                "plan",
+-            )),
+-            ConversationItem::Assistant(AssistantItem {
+-                content: String::new().into(),
+-                tool_calls: vec![ToolCall {
+-                    id: "tc1".into(),
+-                    name: "bash".into(),
+-                    arguments: "{}".into(),
+-                }],
+-                model_id: None,
+-                model_fingerprint: None,
+-                reasoning_effort: None,
+-            }),
+-            ConversationItem::tool_result("tc1", "output"),
+-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
+-                "reflect",
+-            )),
+-            ConversationItem::assistant("final text"),
+-        ];
++        ConversationItem::system("sys"),
++        ConversationItem::user("q"),
++        ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
++            "plan",
++        )),
++        ConversationItem::Assistant(AssistantItem {
++            content: String::new().into(),
++            tool_calls: vec![ToolCall {
++                id: "tc1".into(),
++                name: "bash".into(),
++                arguments: "{}".into(),
++            }],
++            reasoning_origin: None,
++            model_id: None,
++            model_fingerprint: None,
++            reasoning_effort: None,
++        }),
++        ConversationItem::tool_result("tc1", "output"),
++        ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
++            "reflect",
++        )),
++        ConversationItem::assistant("final text"),
++    ];
+     super::fork_filter_chat(&mut items);
+     assert_eq!(
+             items.len(),
+@@ -2502,37 +2506,38 @@ fn fork_filter_keeps_multi_tool_cycle_turn_with_reasoning() {
+ fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
+     use xai_grok_sampling_types::conversation::*;
+     let mut items = vec![
+-            ConversationItem::system("sys"),
+-            ConversationItem::user("q"),
+-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
+-                "plan",
+-            )),
+-            ConversationItem::Assistant(AssistantItem {
+-                content: String::new().into(),
+-                tool_calls: vec![
+-                    ToolCall {
+-                        id: "tc1".into(),
+-                        name: "bash".into(),
+-                        arguments: "{}".into(),
+-                    },
+-                    ToolCall {
+-                        id: "tc2".into(),
+-                        name: "grep".into(),
+-                        arguments: "{}".into(),
+-                    },
+-                ],
+-                model_id: None,
+-                model_fingerprint: None,
+-                reasoning_effort: None,
+-            }),
+-            ConversationItem::tool_result("tc1", "out1"),
+-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item("mid")),
+-            ConversationItem::tool_result("tc2", "out2"),
+-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
+-                "reflect",
+-            )),
+-            ConversationItem::assistant("final"),
+-        ];
++        ConversationItem::system("sys"),
++        ConversationItem::user("q"),
++        ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
++            "plan",
++        )),
++        ConversationItem::Assistant(AssistantItem {
++            content: String::new().into(),
++            tool_calls: vec![
++                ToolCall {
++                    id: "tc1".into(),
++                    name: "bash".into(),
++                    arguments: "{}".into(),
++                },
++                ToolCall {
++                    id: "tc2".into(),
++                    name: "grep".into(),
++                    arguments: "{}".into(),
++                },
++            ],
++            reasoning_origin: None,
++            model_id: None,
++            model_fingerprint: None,
++            reasoning_effort: None,
++        }),
++        ConversationItem::tool_result("tc1", "out1"),
++        ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item("mid")),
++        ConversationItem::tool_result("tc2", "out2"),
++        ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
++            "reflect",
++        )),
++        ConversationItem::assistant("final"),
++    ];
+     super::fork_filter_chat(&mut items);
+     assert_eq!(
+             items.len(),
 diff --git a/crates/codegen/xai-grok-shell/src/session/storage/mod.rs b/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
-index 05ed6ae..be4598b 100644
+index 8988807..7474736 100644
 --- a/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
-@@ -355,6 +355,7 @@ pub(crate) mod chat_rebuild {
+@@ -403,6 +403,7 @@ pub(crate) mod chat_rebuild {
              let item = ConversationItem::Assistant(AssistantItem {
                  content: std::sync::Arc::<str>::from(std::mem::take(&mut self.agent_text)),
                  tool_calls: std::mem::take(&mut self.agent_tool_calls),
@@ -1477,7 +1705,7 @@ index 05ed6ae..be4598b 100644
                  model_fingerprint: None,
                  reasoning_effort: None,
 diff --git a/crates/codegen/xai-grok-shell/src/trace_classifier/mod.rs b/crates/codegen/xai-grok-shell/src/trace_classifier/mod.rs
-index 3e4d9ba..ac20302 100644
+index f033269..1860bf5 100644
 --- a/crates/codegen/xai-grok-shell/src/trace_classifier/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/trace_classifier/mod.rs
 @@ -1368,6 +1368,7 @@ mod tests {
@@ -1488,7 +1716,7 @@ index 3e4d9ba..ac20302 100644
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -1923,6 +1924,7 @@ mod tests {
+@@ -1932,6 +1933,7 @@ mod tests {
              hist.push(ConversationItem::Assistant(AssistantItem {
                  content: format!("a{i}").into(),
                  tool_calls: vec![],
@@ -1496,7 +1724,7 @@ index 3e4d9ba..ac20302 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -2520,6 +2522,7 @@ mod tests {
+@@ -2529,6 +2531,7 @@ mod tests {
              hist.push(ConversationItem::Assistant(AssistantItem {
                  content: format!("a{i}").into(),
                  tool_calls: vec![],
@@ -1505,5 +1733,5 @@ index 3e4d9ba..ac20302 100644
                  model_fingerprint: None,
                  reasoning_effort: None,
 -- 
-2.50.1 (Apple Git-155)
+2.52.0.windows.1
 

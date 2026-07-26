@@ -3,7 +3,7 @@
 **Status:** implemented and exported
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
 **Deliverable:** patches `0001–0004` in `patches/grok-build/`
-**Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc` (Grok `0.2.106`)
+**Implementation base:** `47348d13ec4508dcfe440e34c6d511bb02998fb2` (Grok `0.2.112`)
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
 ## Lifecycle map
@@ -234,15 +234,16 @@ grok -m openai-codex/gpt-5.5:xhigh -p "hello"
 
 ## Evidence and reproduction
 
-- `cargo check --workspace` passes.
+- `cargo check -p xai-grok-pager-bin --locked` and the native Windows
+  pager-bin release build pass.
 - OAuth/JWT/PKCE/expiry and catalog tests: 6 passed.
 - ChatGPT Codex request-shape tests: 2 passed.
 - pi-style model-reference tests: 3 passed.
 - `cargo run -p xai-grok-pager-bin -- openai --help` exposes
   `login|logout|status` as expected.
-- `git diff ba76b0a..HEAD --check` passes.
+- `git diff 47348d1..HEAD --check` passes.
 - All four active IV-0001 patches apply cleanly with `git am` to a fresh detached
-  worktree at `ba76b0a`.
+  worktree at `47348d1`.
 - Live release-binary inference with `openai-codex/gpt-5.6-sol:high` returned
   one answer and exited successfully without retries.
 - Live two-turn resume session `c8fb606f-6b4d-4d8e-8e9e-48080c2bd3d0`
@@ -297,7 +298,7 @@ confirm every loop completed on attempt 1 and no `inference_retry` appears in
 ### Maintenance state
 
 - Patches `0001–0004` are the current IV-0001 slice on base
-  `ba76b0a683fa52e4e60685017b85905451be17bc`.
+  `47348d13ec4508dcfe440e34c6d511bb02998fb2`.
 - Patch `0002` owns the complete Codex transport, including exact
   `response.metadata` and `keepalive` compatibility. Both informational event
   names are accepted from either the SSE `event` field or JSON `type`; all

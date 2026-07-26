@@ -1,4 +1,4 @@
-From 6e66cf30c3a514a24a51e0a0f0af4d10fac80c56 Mon Sep 17 00:00:00 2001
+From 4905d316f08046c058ad905f937d3e6f498e8753 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 06/16] Add Anthropic Claude-plan OAuth flow, storage, and CLI
@@ -13,10 +13,10 @@ Port Anthropic Claude Pro/Max PKCE browser authentication with the code#state pa
  create mode 100644 crates/codegen/xai-grok-shell/src/auth/anthropic.rs
 
 diff --git a/crates/codegen/xai-grok-pager-bin/src/main.rs b/crates/codegen/xai-grok-pager-bin/src/main.rs
-index 03dace5..cf59ba8 100644
+index 53f249c..1ccb2db 100644
 --- a/crates/codegen/xai-grok-pager-bin/src/main.rs
 +++ b/crates/codegen/xai-grok-pager-bin/src/main.rs
-@@ -1929,6 +1929,22 @@ async fn async_main() -> Result<()> {
+@@ -1983,6 +1983,22 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                  }
                  xai_grok_shell::instrumentation::finalize_and_exit(0);
              }
@@ -40,10 +40,10 @@ index 03dace5..cf59ba8 100644
                  init_tracing_simple("cli");
                  let config = xai_grok_shell::config::load_effective_config_disk_only()
 diff --git a/crates/codegen/xai-grok-pager/src/app/cli.rs b/crates/codegen/xai-grok-pager/src/app/cli.rs
-index 5996b56..58563d6 100644
+index 0576542..054185c 100644
 --- a/crates/codegen/xai-grok-pager/src/app/cli.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/cli.rs
-@@ -44,6 +44,8 @@ pub enum Command {
+@@ -46,6 +46,8 @@ pub enum Command {
      },
      /// Manage the OpenAI (ChatGPT) provider credential
      Openai(OpenaiArgs),
@@ -52,7 +52,7 @@ index 5996b56..58563d6 100644
      /// Manage MCP server configurations
      Mcp(crate::mcp_cmd::McpArgs),
      /// Manage plugins and marketplace sources
-@@ -185,6 +187,27 @@ pub enum OpenaiCommand {
+@@ -187,6 +189,27 @@ pub enum OpenaiCommand {
      Status,
  }
  
@@ -672,14 +672,14 @@ index 0000000..0a6b363
 +    }
 +}
 diff --git a/crates/codegen/xai-grok-shell/src/auth/mod.rs b/crates/codegen/xai-grok-shell/src/auth/mod.rs
-index eadb8c9..0bd9ce7 100644
+index 8fe025f..3a7c822 100644
 --- a/crates/codegen/xai-grok-shell/src/auth/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/auth/mod.rs
 @@ -1,3 +1,4 @@
 +pub mod anthropic;
  pub(crate) mod attribution;
+ mod auth_provider;
  mod config;
- pub mod credential_provider;
 -- 
-2.50.1 (Apple Git-155)
+2.52.0.windows.1
 

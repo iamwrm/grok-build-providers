@@ -3,7 +3,7 @@
 **Status:** implemented in consolidated patches `0011–0013` (the sampling-layer panic fix, formerly follow-up patch `0016`, is folded into `0011`); raw-wire grounding and release-profile verification complete; user-guide patch deferred
 **Upstreams:** `checkouts/pi` + `../piagent-config/packages/ren-public-package/0012-last-turn.ts` (reference), `checkouts/grok-build` (patch target)
 **Deliverable:** patches `0011–0013`, continuing the IV-0001–IV-0004 stack
-**Implementation branch:** clean-room series based on `ba76b0a`; current 16-patch series tree `dd6c4ce1ead5b4a91aae81f5f0699d0fa65dee7c`
+**Implementation branch:** clean-room series based on `47348d1`; current 16-patch series tree `a9a11f502de730d7600bb58f42ceb8c5f77a2a32`
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
 ## Lifecycle map
@@ -210,8 +210,9 @@ all other unknown events remain fail-closed.
   `read/(uncached+read+write)`; costs appear only when complete/trusted.
 - Captures context tokens at local and viewer turn boundaries; final context
   comes from the latest streamed context state. Unknown starts render `?`.
-- Parked, bash, subagent, cancelled, failed, and replacement-UX markers remain
-  unchanged.
+- Upstream `0.2.112` no longer creates parked turn markers; stats attach only
+  to the real terminal marker. Bash, subagent, cancelled, failed, and
+  replacement-UX markers remain unchanged.
 
 ### Deferred
 
@@ -248,12 +249,11 @@ all other unknown events remain fail-closed.
   absorption for `response.metadata` and `keepalive`, while unrelated unknown
   events remain rejected.
 - Patch `0013`: pager session-event tests 41/41; turn-completion tests 19/19.
-- Consolidation clean-room: all 13 patches apply to `ba76b0a`, final tree
-  `0a219b73e452c3ce19ea64cd7679dde3bf1e7a89` exactly matches the old 20-patch
-  tree, and `CARGO_INCREMENTAL=0 cargo build --release --locked
-  -p xai-grok-pager-bin` passes.
-- Fold clean-room: the panic fix was folded into patch `0011` via clean-room
-  interactive rebase; the resulting 16-patch series applies to `ba76b0a` with
-  `git am` and reproduces tree `dd6c4ce1ead5b4a91aae81f5f0699d0fa65dee7c` —
-  byte-identical to the previously verified 17-patch tree, so the recorded
-  release-profile test and build results carry over unchanged.
+- `0.2.112` rebase clean-room: all 16 patches apply to `47348d1` with `git am`
+  and reproduce tree `a9a11f502de730d7600bb58f42ceb8c5f77a2a32`, byte-identical to the
+  rebased development branch.
+- Current focused verification: telemetry 154/154; chat-state 351/351; pager
+  turn-completion 67/67, session-usage 11/11, and sampling-control 4/4; shell
+  usage projection 2/2, response accounting 5/5, and subagent folding 16/16.
+  `cargo check -p xai-grok-pager-bin --locked`, the Windows pager-bin release
+  build, `git diff --check`, and `cargo fmt --all -- --check` pass.

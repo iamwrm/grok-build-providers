@@ -1,18 +1,18 @@
-From b98961e9f0fb3a8d384835f665af3b98979b9c2d Mon Sep 17 00:00:00 2001
+From 639cea1eb05137d9fec820d0acdadda999b3c673 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 10/16] Make the release pager link successfully with MSVC
 
-Raise release PDB pages to the supported 16 KiB maximum and enable link.exe long-symbol truncation for both MSVC targets. Both settings are required for the pager's large public-symbol table to link successfully.
+Disable final-link PDB generation for both MSVC targets. The pager exceeds link.exe's PDB public-symbol limit even with release debug info disabled; release archives do not ship a PDB, while forced unwind tables retain panic backtraces.
 ---
- .cargo/config.toml | 20 ++++++++++++++++++--
- 1 file changed, 18 insertions(+), 2 deletions(-)
+ .cargo/config.toml | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
 
 diff --git a/.cargo/config.toml b/.cargo/config.toml
-index 912e93e..c5a08b7 100644
+index 912e93e..e365af4 100644
 --- a/.cargo/config.toml
 +++ b/.cargo/config.toml
-@@ -59,10 +59,26 @@ rustflags = [
+@@ -59,10 +59,21 @@ rustflags = [
  ]
  
  [target.x86_64-pc-windows-msvc]
@@ -20,14 +20,10 @@ index 912e93e..c5a08b7 100644
 +rustflags = [
 +    "-C", "force-unwind-tables=yes",
 +    "-C", "target-feature=+crt-static",
-+    # rustc emits a minimal release PDB even with profile debug info disabled.
-+    # The pager's public-symbol table exceeds the default 4 KiB PDB page
-+    # capacity (fatal LNK4319); 16 KiB is link.exe's supported maximum.
-+    "-C", "link-arg=/PDBPAGESIZE:16384",
-+    # The pager also contains generated/generic symbols long enough to hit
-+    # LNK4318 and exhaust the PDB public-symbol table even at 16 KiB pages.
-+    # Retain useful symbols while truncating only those pathological names.
-+    "-C", "link-arg=/DEBUG:LongSymbolTruncate",
++    # The pager exceeds MSVC's PDB public-symbol limit (LNK4319) even when
++    # release debug info is disabled. Release artifacts do not ship a PDB;
++    # unwind tables above still preserve panic backtraces.
++    "-C", "link-arg=/DEBUG:NONE",
 +]
  
  [target.aarch64-pc-windows-msvc]
@@ -35,12 +31,11 @@ index 912e93e..c5a08b7 100644
 +rustflags = [
 +    "-C", "force-unwind-tables=yes",
 +    "-C", "target-feature=+crt-static",
-+    "-C", "link-arg=/PDBPAGESIZE:16384",
-+    "-C", "link-arg=/DEBUG:LongSymbolTruncate",
++    "-C", "link-arg=/DEBUG:NONE",
 +]
  
  
  # jemalloc page size for Apple Silicon (macOS aarch64 uses 16KB pages = 2^14).
 -- 
-2.50.1 (Apple Git-155)
+2.52.0.windows.1
 

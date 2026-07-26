@@ -13,8 +13,8 @@ horizontal doctrine (`docs/DC-*`).
 ## Release binaries
 
 `.github/workflows/release.yml` applies the complete patch series to pinned
-upstream commit `ba76b0a683fa52e4e60685017b85905451be17bc`
-(Grok `0.2.106`) and builds
+upstream commit `47348d13ec4508dcfe440e34c6d511bb02998fb2`
+(Grok `0.2.112`) and builds
 `xai-grok-pager` for:
 
 - macOS arm64 and x86_64

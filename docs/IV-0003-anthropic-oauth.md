@@ -3,7 +3,7 @@
 **Status:** implemented, exported, and live-verified at the recorded checkpoint
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
 **Deliverable:** patches `0006–0008`, continuing the IV-0001/IV-0002 stack
-**Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc`
+**Implementation base:** `47348d13ec4508dcfe440e34c6d511bb02998fb2` (Grok `0.2.112`)
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
 ## Lifecycle map
@@ -197,25 +197,20 @@ grok-build already had a complete Anthropic Messages transport:
 
 ## Evidence and reproduction
 
-- `cargo check --workspace` passes.
+- `cargo check -p xai-grok-pager-bin --locked` and the native Windows
+  pager-bin release build pass.
 - Unit tests: 3 OAuth-flow tests (paste parsing, authorize URL/PKCE/state,
   expiry window), 2 sampler request-shape tests (identity prepend + cache +
   sampling-param strip; identity-only + idempotency), header-injection test,
-  catalog test — all pass; full sampler lib suite 159/159.
-- `agent::config` shell tests 310/310 — **run with an isolated
-  `GROK_HOME=$(mktemp -d)`**: three prefetch-count tests
-  (`e2e_enterprise_custom_endpoint_skips_xai_defaults`,
-  `resolve_model_list_prefetch_visibility_matches_auth_and_server_list`,
-  `resolve_model_list_empty_prefetch_yields_empty_base`) count catalog
-  entries and fail pre-existing on any machine with a stored
-  `~/.grok/openai_auth.json` (or now `anthropic_auth.json`), independent of
-  this series.
+  and catalog test all pass; the current sampler lib suite passes 69/69.
+- Focused Anthropic shell tests pass 5/5 with an isolated `GROK_HOME`. Keep
+  credential-reading tests isolated because stored OpenAI or Anthropic auth can
+  change catalog visibility independently of this series.
 - `git diff --check` clean.
-- Clean-room patches `0001–0008` apply to `ba76b0a`.
-- After the rebase, the sampling-types suite passes 277/277 (native wire
-  mapping), the pager suite passes 7390 tests with 10 ignored (including the
-  symmetric `xhigh→max` fallback), and the catalog test retains per-model
-  native-xhigh gating.
+- Clean-room patches `0001–0008` apply to `47348d1`.
+- After the rebase, the sampling-types suite passes 285/285 and focused pager
+  reasoning-effort tests pass 9/9; the catalog test retains per-model native
+  `xhigh` gating.
 - **Live verification checkpoint:** `grok anthropic login` browser flow
   completed and stored `~/.grok/anthropic_auth.json`; user-confirmed working
   live inference on the `anthropic/*` catalog (including native `xhigh`

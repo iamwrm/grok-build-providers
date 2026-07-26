@@ -1,18 +1,16 @@
-From ca202d0f390b7ad6768ac0e17a83d7811b7a4fda Mon Sep 17 00:00:00 2001
+From ae01c5940f1504e52f8ef830c582b8487dbd6b20 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 08/16] Add the Anthropic catalog with native xhigh support
 
 Register credential-gated adaptive-thinking anthropic/* models with their final per-model effort menus. Send native xhigh only on supporting models, retain max for older adaptive models with symmetric compatibility fallback, and document OAuth, catalog, and custom Messages behavior.
 ---
- .../docs/user-guide/02-authentication.md      |  44 ++++++
+ .../docs/user-guide/02-authentication.md      |  44 +++++
  .../docs/user-guide/04-slash-commands.md      |  11 +-
- .../docs/user-guide/11-custom-models.md       |  32 ++++-
- .../xai-grok-pager/src/acp/model_state.rs     |  46 ++++++
- .../src/conversation.rs                       |   3 +-
- .../xai-grok-sampling-types/src/types.rs      |  14 +-
- .../xai-grok-shell/src/agent/config.rs        | 133 ++++++++++++++++++
- 7 files changed, 273 insertions(+), 10 deletions(-)
+ .../docs/user-guide/11-custom-models.md       |  32 +++-
+ .../xai-grok-pager/src/acp/model_state.rs     |  46 +++++
+ .../xai-grok-shell/src/agent/config.rs        | 164 +++++++++++++++++-
+ 5 files changed, 288 insertions(+), 9 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
 index eeda4fb..565762e 100644
@@ -70,10 +68,10 @@ index eeda4fb..565762e 100644
  
  For CI/CD, automation, or environments without browser access, use an API key from [console.x.ai](https://console.x.ai):
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-index ea5d78e..d441268 100644
+index b5c94ec..83ae449 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-@@ -140,16 +140,19 @@ colon suffix or a second argument:
+@@ -103,16 +103,19 @@ argument:
  /model Grok Build
  /model Reasoning X high
  /model openai-codex/gpt-5.5:xhigh
@@ -95,10 +93,10 @@ index ea5d78e..d441268 100644
 +its old alias behavior. Symmetrically, `xhigh` resolves to an offered `max`
 +on models without a native `xhigh` level (e.g. Claude Opus 4.6).
  
- Aliases: `/m`
+ Alias: `/m`.
  
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md b/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
-index 4ec9bea..b5eece3 100644
+index 79651de..74836ba 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
 @@ -32,6 +32,23 @@ backend; the optional `:effort` suffix chooses reasoning effort (`low` through
@@ -134,7 +132,7 @@ index 4ec9bea..b5eece3 100644
  temperature = 0.7                         # Sampling temperature
  top_p = 0.95                              # Nucleus sampling parameter
  max_completion_tokens = 8192              # Maximum tokens per response
-@@ -191,7 +208,18 @@ context_window = 200000
+@@ -223,7 +240,18 @@ context_window = 200000
  extra_headers = { "x-api-key" = "sk-ant-...", "anthropic-version" = "2023-06-01" }
  ```
  
@@ -218,58 +216,11 @@ index 9adf91e..45a3c77 100644
      #[test]
      fn resolve_effort_token_legacy_menu_rejects_none() {
          // supportsReasoningEffort without a server list → built-in low..xhigh.
-diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-index c4b162a..32ac83e 100644
---- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-+++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-@@ -5259,7 +5259,8 @@ mod tests {
-             (crate::ReasoningEffort::Low, "low"),
-             (crate::ReasoningEffort::Medium, "medium"),
-             (crate::ReasoningEffort::High, "high"),
--            (crate::ReasoningEffort::Xhigh, "max"),
-+            (crate::ReasoningEffort::Xhigh, "xhigh"),
-+            (crate::ReasoningEffort::Max, "max"),
-         ] {
-             let req = messages_test_request(Some(variant));
-             let msgs = build_messages_request(&req);
-diff --git a/crates/codegen/xai-grok-sampling-types/src/types.rs b/crates/codegen/xai-grok-sampling-types/src/types.rs
-index edebb1a..94725f6 100644
---- a/crates/codegen/xai-grok-sampling-types/src/types.rs
-+++ b/crates/codegen/xai-grok-sampling-types/src/types.rs
-@@ -829,7 +829,14 @@ impl ReasoningEffort {
-             Self::Low => Some("low"),
-             Self::Medium => Some("medium"),
-             Self::High => Some("high"),
--            Self::Xhigh | Self::Max => Some("max"),
-+            // pi parity: `xhigh` and `max` are distinct native adaptive
-+            // efforts. Native `xhigh` exists only on newer Claude models
-+            // (Opus 4.7/4.8, Sonnet 5, Fable 5); catalogs/menus gate which
-+            // levels a model offers, and the effort resolver maps a
-+            // requested `xhigh` to an offered `max` (and vice versa) on
-+            // models that lack one of the two.
-+            Self::Xhigh => Some("xhigh"),
-+            Self::Max => Some("max"),
-         }
-     }
- }
-@@ -1267,9 +1274,10 @@ mod tests {
-             ReasoningEffort::Max.to_responses_api(),
-             crate::rs::ReasoningEffort::Xhigh
-         );
--        // Anthropic Messages: "max" is the ceiling for both top levels.
-+        // Anthropic Messages: native levels pass through verbatim (pi
-+        // parity); menu gating keeps `xhigh` off models that reject it.
-         assert_eq!(ReasoningEffort::Max.to_messages_api(), Some("max"));
--        assert_eq!(ReasoningEffort::Xhigh.to_messages_api(), Some("max"));
-+        assert_eq!(ReasoningEffort::Xhigh.to_messages_api(), Some("xhigh"));
-     }
- 
-     #[test]
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index dffc6e1..7f5b818 100644
+index 3a8b753..2276f47 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
-@@ -3186,6 +3186,14 @@ pub fn resolve_model_list(
+@@ -3545,6 +3545,14 @@ pub fn resolve_model_list(
              resolved.entry(key).or_insert(entry);
          }
      }
@@ -284,7 +235,7 @@ index dffc6e1..7f5b818 100644
      for (key, model_override) in &cfg.config_models {
          let had_base = resolved.contains_key(key);
          let base = resolved.shift_remove(key);
-@@ -3522,6 +3530,89 @@ pub fn openai_codex_model_entries() -> Vec<(String, ModelEntry)> {
+@@ -3923,6 +3931,110 @@ pub fn openai_codex_model_entries() -> Vec<(String, ModelEntry)> {
          .collect()
  }
  
@@ -302,10 +253,30 @@ index dffc6e1..7f5b818 100644
 +    // (id, name, context_window, max_completion_tokens)
 +    const CLAUDE_CONTEXT: u64 = 1_000_000;
 +    let models: [(&str, &str, u64, u32); 6] = [
-+        ("claude-opus-4-8", "Claude Opus 4.8", CLAUDE_CONTEXT, 128_000),
-+        ("claude-opus-4-7", "Claude Opus 4.7", CLAUDE_CONTEXT, 128_000),
-+        ("claude-opus-4-6", "Claude Opus 4.6", CLAUDE_CONTEXT, 128_000),
-+        ("claude-sonnet-5", "Claude Sonnet 5", CLAUDE_CONTEXT, 128_000),
++        (
++            "claude-opus-4-8",
++            "Claude Opus 4.8",
++            CLAUDE_CONTEXT,
++            128_000,
++        ),
++        (
++            "claude-opus-4-7",
++            "Claude Opus 4.7",
++            CLAUDE_CONTEXT,
++            128_000,
++        ),
++        (
++            "claude-opus-4-6",
++            "Claude Opus 4.6",
++            CLAUDE_CONTEXT,
++            128_000,
++        ),
++        (
++            "claude-sonnet-5",
++            "Claude Sonnet 5",
++            CLAUDE_CONTEXT,
++            128_000,
++        ),
 +        (
 +            "claude-sonnet-4-6",
 +            "Claude Sonnet 4.6",
@@ -364,6 +335,7 @@ index dffc6e1..7f5b818 100644
 +                    info,
 +                    api_key: None,
 +                    env_key: None,
++                    auth_provider: None,
 +                    api_base_url: None,
 +                },
 +            )
@@ -374,7 +346,20 @@ index dffc6e1..7f5b818 100644
  #[derive(Debug, Clone, Serialize, Deserialize)]
  pub struct ModelEntryConfig {
      /// Stable unique identifier for this catalog entry. When present,
-@@ -6063,6 +6154,48 @@ reasoning_effort = "low"
+@@ -5354,9 +5466,9 @@ pub fn inject_anthropic_oauth_headers(extra_headers: &mut IndexMap<String, Strin
+     extra_headers
+         .entry("anthropic-beta".to_string())
+         .or_insert_with(|| crate::auth::anthropic::OAUTH_BETA_HEADER.to_string());
+-    extra_headers.entry("user-agent".to_string()).or_insert_with(|| {
+-        format!("claude-cli/{}", crate::auth::anthropic::CLAUDE_CODE_VERSION)
+-    });
++    extra_headers
++        .entry("user-agent".to_string())
++        .or_insert_with(|| format!("claude-cli/{}", crate::auth::anthropic::CLAUDE_CODE_VERSION));
+     extra_headers
+         .entry("x-app".to_string())
+         .or_insert_with(|| "cli".to_string());
+@@ -7125,6 +7237,52 @@ reasoning_effort = "low"
          }
      }
  
@@ -386,7 +371,11 @@ index dffc6e1..7f5b818 100644
 +    fn anthropic_entries_route_to_messages_backend() {
 +        let entries = anthropic_model_entries();
 +        assert!(!entries.is_empty());
-+        assert!(entries.iter().any(|(k, _)| k == "anthropic/claude-opus-4-8"));
++        assert!(
++            entries
++                .iter()
++                .any(|(k, _)| k == "anthropic/claude-opus-4-8")
++        );
 +        for (key, entry) in &entries {
 +            assert_eq!(key, entry.info.id.as_deref().unwrap());
 +            let slug = key.strip_prefix("anthropic/").unwrap();
@@ -424,5 +413,5 @@ index dffc6e1..7f5b818 100644
      #[test]
      fn inject_anthropic_oauth_headers_defaults_and_user_override() {
 -- 
-2.50.1 (Apple Git-155)
+2.52.0.windows.1
 

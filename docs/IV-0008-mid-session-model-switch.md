@@ -1,10 +1,10 @@
 # IV-0008: Safe mid-session model and provider switching
 
-**Status:** implemented in patch `0016` (numbered `0017` before the former sampling-panic fix was folded into patch `0011`); release-profile tests verified
+**Status:** implemented in patch `0016` (numbered `0017` before the former sampling-panic fix was folded into patch `0011`); rebased and locally verified, current cross-platform release CI pending
 
 **Upstream:** `checkouts/grok-build`  
 **Deliverable:** `patches/grok-build/0016-Gate-native-reasoning-replay-by-route-API-and-model.patch`  
-**Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc`
+**Implementation base:** `47348d13ec4508dcfe440e34c6d511bb02998fb2` (Grok `0.2.112`)
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
 ## Lifecycle map
@@ -123,6 +123,11 @@ Release tests cover:
 - non-mutating transforms and switch-back restoration;
 - provenance JSONL backward compatibility;
 - route normalization without credential persistence.
+
+The `0.2.112` clean-room series applies all 16 patches and reproduces tree
+`a9a11f502de730d7600bb58f42ceb8c5f77a2a32`. Sampling-types (285/285), sampler
+(69/69), and chat-state (351/351) library suites pass; the clean-room
+pager-bin Cargo check and native Windows pager-bin release build succeed.
 
 ### Manual cross-provider reproduction
 

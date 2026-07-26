@@ -1,4 +1,4 @@
-From 5c4252b43df03dd139938f798378f8e61505c32d Mon Sep 17 00:00:00 2001
+From 7cfa1f17e8cc7981e9b3c3ab84caf51fa3095ee8 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 04/16] Add and document the built-in OpenAI Codex catalog
@@ -6,11 +6,11 @@ Subject: [PATCH 04/16] Add and document the built-in OpenAI Codex catalog
 Register credential-gated openai-codex/* entries backed by the ChatGPT Codex endpoint. Keep user overrides authoritative, expose supported effort ranges without config edits, and document login, credential isolation, catalog behavior, and provider/model:effort selection.
 ---
  .../docs/user-guide/02-authentication.md      |  39 +++++++
- .../docs/user-guide/04-slash-commands.md      |  13 ++-
+ .../docs/user-guide/04-slash-commands.md      |  16 ++-
  .../docs/user-guide/11-custom-models.md       |  25 ++++-
- .../xai-grok-shell/src/agent/config.rs        | 104 ++++++++++++++++++
+ .../xai-grok-shell/src/agent/config.rs        | 105 ++++++++++++++++++
  .../src/agent/config_model_override_parse.rs  |   1 +
- 5 files changed, 178 insertions(+), 4 deletions(-)
+ 5 files changed, 182 insertions(+), 4 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
 index 08313b9..ae1fdbd 100644
@@ -63,20 +63,20 @@ index 08313b9..ae1fdbd 100644
  
  For CI/CD, automation, or environments without browser access, use an API key from [console.x.ai](https://console.x.ai):
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-index 6c21e2b..6d8a965 100644
+index c642b48..23ceca2 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-@@ -129,16 +129,25 @@ Aliases: `/title`
+@@ -92,16 +92,28 @@ Rename the current session. Alias: `/title`.
  
  ## Model and Mode
  
 -### `/model <name>`
 +### `/model <name>[:effort]`
  
--Switch to a different model. Accepts model IDs or display names (case-insensitive). For reasoning models you can also pass an effort level as a second argument:
-+Switch to a different model. Accepts model IDs or display names
-+(case-insensitive). For reasoning models, pass the effort as either a pi-style
-+colon suffix or a second argument:
+-Switch models. Accepts a model ID or display name (case-insensitive), and for reasoning models you can add an effort level as a second argument. Alias: `/m`.
++Switch models. Accepts model IDs or display names (case-insensitive). For
++reasoning models, pass the effort as either a pi-style colon suffix or a second
++argument:
  
  ```
  /model grok-build
@@ -91,11 +91,14 @@ index 6c21e2b..6d8a965 100644
 +Supported canonical levels are `none`, `minimal`, `low`, `medium`, `high`, and
 +`xhigh` (subject to the selected model's offered levels).
 +
- Aliases: `/m`
- 
++Alias: `/m`.
++
++
  ### `/effort <level>`
+
+ Set reasoning effort on the **current** model without reselecting it. Levels are `low`, `medium`, `high`, and `xhigh`, and it only applies when the active model supports reasoning effort.
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md b/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
-index 0b21694..2015cf6 100644
+index 7bb1012..8573c3d 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
 @@ -16,6 +16,20 @@ grok models
@@ -127,7 +130,7 @@ index 0b21694..2015cf6 100644
  temperature = 0.7                         # Sampling temperature
  top_p = 0.95                              # Nucleus sampling parameter
  max_completion_tokens = 8192              # Maximum tokens per response
-@@ -188,9 +203,9 @@ env_key = "OPENAI_API_KEY"
+@@ -220,9 +235,9 @@ env_key = "OPENAI_API_KEY"
  
  `api_backend` defaults to `"chat_completions"`, so you don't need to set it explicitly for OpenAI.
  
@@ -139,7 +142,7 @@ index 0b21694..2015cf6 100644
  
  ```toml
  [model.gpt-4o-responses]
-@@ -201,6 +216,12 @@ api_backend = "responses"
+@@ -233,6 +248,12 @@ api_backend = "responses"
  env_key = "OPENAI_API_KEY"
  ```
  
@@ -153,10 +156,10 @@ index 0b21694..2015cf6 100644
  
  Run models locally with [Ollama](https://ollama.ai):
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index 6e1ffad..8469962 100644
+index d71a194..990b98b 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
-@@ -3177,6 +3177,15 @@ pub fn resolve_model_list(
+@@ -3536,6 +3536,15 @@ pub fn resolve_model_list(
          }
          resolved = prefetched;
      }
@@ -172,7 +175,7 @@ index 6e1ffad..8469962 100644
      for (key, model_override) in &cfg.config_models {
          let had_base = resolved.contains_key(key);
          let base = resolved.shift_remove(key);
-@@ -3438,6 +3447,74 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
+@@ -3838,6 +3847,75 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
          })
          .collect()
  }
@@ -237,6 +240,7 @@ index 6e1ffad..8469962 100644
 +                    info,
 +                    api_key: None,
 +                    env_key: None,
++                    auth_provider: None,
 +                    api_base_url: None,
 +                },
 +            )
@@ -247,7 +251,7 @@ index 6e1ffad..8469962 100644
  #[derive(Debug, Clone, Serialize, Deserialize)]
  pub struct ModelEntryConfig {
      /// Stable unique identifier for this catalog entry. When present,
-@@ -5891,6 +5968,33 @@ reasoning_effort = "low"
+@@ -6952,6 +7030,33 @@ reasoning_effort = "low"
      /// `try_resolve_model_credentials` — swaps it for the session token. BYOK
      /// (non-x.ai) own keys are preserved. (`try_resolve_model_credentials`
      /// loads global config, so this exercises its resolve + enforce core.)
@@ -282,10 +286,10 @@ index 6e1ffad..8469962 100644
      fn try_resolve_model_credentials_swaps_first_party_own_key_under_kill_switch() {
          use xai_chat_state::AuthType;
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config_model_override_parse.rs b/crates/codegen/xai-grok-shell/src/agent/config_model_override_parse.rs
-index a3d64b3..433bcd5 100644
+index 926f548..6c829a6 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config_model_override_parse.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config_model_override_parse.rs
-@@ -531,6 +531,7 @@ mod tests {
+@@ -706,6 +706,7 @@ mod tests {
                  description: Some("Deep reasoning".to_string()),
                  default: true,
              }],
@@ -294,5 +298,5 @@ index a3d64b3..433bcd5 100644
              compactions_remaining: Some(CompactionsRemaining::Fixed(1)),
              compaction_at_tokens: Some(CompactionAtTokens::Fixed(100_000)),
 -- 
-2.50.1 (Apple Git-155)
+2.52.0.windows.1
 

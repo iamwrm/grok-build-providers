@@ -3,8 +3,8 @@
 **Status:** implemented in durable patch `0014`; historical integration checkpoints recorded below
 **Upstream:** `checkouts/grok-build`
 **Deliverable:** `patches/grok-build/0014-Apply-exact-file-edits-atomically-in-batches.patch`
-**Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc`
-**Patch-0014 checkpoint:** commit `d8312ac`; 14-patch tree `25f2c549b4a3a357a521b60ec66d8b6d05f258d9`
+**Implementation base:** `47348d13ec4508dcfe440e34c6d511bb02998fb2` (Grok `0.2.112`)
+**Patch-0014 checkpoint:** commit `89b85da`; 14-patch tree `90ac009b4f64b731558f6365e60824e2f0643091`
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
 ## Lifecycle map
@@ -129,41 +129,28 @@ empty.
 
 ## Evidence and reproduction
 
-### Patch-0014 publication checkpoint
+### Patch-0014 rebase checkpoint
 
-- Patches `0001–0014` clean-room applied to the pinned base and produced tree
-  `25f2c549b4a3a357a521b60ec66d8b6d05f258d9`.
-- Recorded command:
-  `CARGO_INCREMENTAL=0 cargo test --release --locked -p xai-grok-tools`.
-- Recorded result: 2,672 passed, 6 ignored.
-- Focused coverage included CRLF-preserving multi-edit success and one
-  notification, rollback on a late missing or ambiguous match, dependent
-  edits, missing-file behavior, mixed/empty/incomplete mode rejection, schema
-  compatibility, and concise output.
-- Recorded clean-room pager build:
-  `CARGO_INCREMENTAL=0 cargo build --release --locked -p xai-grok-pager-bin`.
+- Patches `0001–0014` clean-room apply to `47348d1` and produce tree
+  `90ac009b4f64b731558f6365e60824e2f0643091`.
+- Current focused `xai-grok-tools` `search_replace` coverage passes 112/112,
+  including atomic success, dependent edits, rollback on late missing or
+  ambiguous matches, mode/schema validation, and concise output.
+- The previous-base full release suite remains a historical checkpoint: 2,672
+  passed and 6 ignored. It is not asserted as the current upstream total.
 
-Those counts describe the historical series ending at patch `0014`; they are
-not asserted as current test totals after later patches.
+### Integrated 16-patch rebase checkpoint
 
-### Integrated 17-patch verification checkpoint
+- Patch `0014` remains part of the durable `0001–0016` series.
+- All 16 patches clean-room apply to the pinned base and produce tree
+  `a9a11f502de730d7600bb58f42ceb8c5f77a2a32`.
+- Current sampling-types and sampler library suites pass 285/285 and 69/69;
+  shell parallel-dispatch tests pass 13/13; the clean-room pager-bin Cargo
+  check and native Windows pager-bin release build pass.
 
-- Patch `0014` remains part of the durable series — now `0001–0016` after the
-  former patch `0016` panic fix was folded into patch `0011`; that fold does
-  not change the tree hash below.
-- All 17 patches clean-room applied to the pinned base and produced tree
-  `dd6c4ce1ead5b4a91aae81f5f0699d0fa65dee7c`.
-- Recorded commands:
-  `CARGO_INCREMENTAL=0 cargo test -p xai-grok-sampling-types --release --locked`,
-  `CARGO_INCREMENTAL=0 cargo test -p xai-grok-sampler --release --locked`, and
-  `CARGO_INCREMENTAL=0 cargo build -p xai-grok-pager-bin --release --locked`.
-- Recorded results: 292 passing `xai-grok-sampling-types` tests, 188 passing
-  `xai-grok-sampler` unit and integration tests, and a successful pager release
-  build.
-
-This integration checkpoint validates the combined product but does not
-replace the patch-0014-specific `xai-grok-tools` test record above. It is not a
-promise that later revisions will retain the same tree hash or test counts.
+This integration checkpoint validates the rebased product but does not replace
+full cross-platform release CI or the historical patch-0014 release-suite
+record.
 
 ## Non-goals and limitations
 

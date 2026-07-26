@@ -1,4 +1,4 @@
-From f54cd38e1dff75a91eb12c6f598934c474e4c605 Mon Sep 17 00:00:00 2001
+From c7b4dcdcdab160b7a33085051d5772814dedafc6 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 09/16] Make protoc dependency hints portable to Windows
@@ -30,5 +30,5 @@ index 417c4b2..d0a7be5 100644
  
          if let Some(protoc) = protoc {
 -- 
-2.50.1 (Apple Git-155)
+2.52.0.windows.1
 

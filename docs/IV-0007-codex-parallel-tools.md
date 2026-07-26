@@ -3,8 +3,8 @@
 **Status:** implemented in durable patch `0015`; historical integration checkpoints recorded below
 **Upstream:** `checkouts/grok-build`
 **Deliverable:** `patches/grok-build/0015-Improve-Codex-parallel-tool-call-handling.patch`
-**Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc`
-**Patch-0015 checkpoint:** commit `93328fe`; 15-patch tree `0829a441098580595575d3a1ee64195165b6a771`
+**Implementation base:** `47348d13ec4508dcfe440e34c6d511bb02998fb2` (Grok `0.2.112`)
+**Patch-0015 checkpoint:** commit `84c9b7f`; 15-patch tree `4fcba74364770269399a76cb310d3a3305b0cc94`
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
 ## Lifecycle map
@@ -139,34 +139,22 @@ pre-flight failures.
 
 ## Evidence and reproduction
 
-### Patch-0015 publication checkpoint
+### Patch-0015 rebase checkpoint
 
-- Patches `0001–0015` clean-room applied to the pinned base and produced tree
-  `0829a441098580595575d3a1ee64195165b6a771`.
-- Recorded `xai-grok-sampling-types` release result: 279 passed.
-- Focused tests covered compound tool-call ID helpers and Responses replay.
-- Codex request-shape tests asserted `parallel_tool_calls == true`.
-- Existing stream-routing coverage confirmed that multiple function calls and
-  their argument deltas receive distinct local tool indices.
-- A release build of `xai-grok-pager-bin` succeeded.
+- Patches `0001–0015` clean-room apply to `47348d1` and produce tree
+  `4fcba74364770269399a76cb310d3a3305b0cc94`.
+- Current sampling-types and sampler library suites pass 285/285 and 69/69.
+  Coverage includes compound tool-call IDs, Responses replay, request shaping,
+  and stream routing.
+- Shell parallel-dispatch tests pass 13/13 while retaining concurrent execution
+  and the ordered final-result publication contract.
 
-Those counts describe the historical series ending at patch `0015`; they are
-not current suite totals after later patches.
+### Integrated 16-patch rebase checkpoint
 
-### Integrated 17-patch verification checkpoint
-
-- Patch `0015` remains part of the durable series — now `0001–0016` after the
-  former patch `0016` panic fix was folded into patch `0011`; that fold does
-  not change the tree hash below.
-- All 17 patches clean-room applied to the pinned base and produced tree
-  `dd6c4ce1ead5b4a91aae81f5f0699d0fa65dee7c`.
-- Recorded commands:
-  `CARGO_INCREMENTAL=0 cargo test -p xai-grok-sampling-types --release --locked`,
-  `CARGO_INCREMENTAL=0 cargo test -p xai-grok-sampler --release --locked`, and
-  `CARGO_INCREMENTAL=0 cargo build -p xai-grok-pager-bin --release --locked`.
-- Recorded results: 292 passing `xai-grok-sampling-types` tests, 188 passing
-  `xai-grok-sampler` unit and integration tests, and a successful pager release
-  build.
+- Patch `0015` remains part of the durable `0001–0016` series.
+- All 16 patches clean-room apply to the pinned base and produce tree
+  `a9a11f502de730d7600bb58f42ceb8c5f77a2a32`; the clean-room pager-bin Cargo
+  check and native Windows pager-bin release build pass.
 
 This is an integration checkpoint, not a promise that later revisions will
 retain the same tree hash or counts. The recorded suite does not contain a

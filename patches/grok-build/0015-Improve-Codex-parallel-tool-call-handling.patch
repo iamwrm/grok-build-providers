@@ -1,4 +1,4 @@
-From 30710cabbcbf9da375b247dd9cf2add577ed9256 Mon Sep 17 00:00:00 2001
+From 84c9b7fa6adbf3a552bcee5f2098ab4f1ae620bc Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 19:13:11 +0800
 Subject: [PATCH 15/16] Improve Codex parallel tool-call handling
@@ -10,15 +10,15 @@ still execute concurrently.
 ---
  crates/codegen/xai-grok-sampler/src/client.rs |  10 +-
  .../xai-grok-sampler/src/stream/responses.rs  |   5 +-
- .../src/conversation.rs                       | 122 ++++-
- .../session/acp_session_impl/tool_calls.rs    | 430 +++++++++---------
- 4 files changed, 340 insertions(+), 227 deletions(-)
+ .../src/conversation.rs                       | 117 ++++-
+ .../session/acp_session_impl/tool_calls.rs    | 434 +++++++++---------
+ 4 files changed, 341 insertions(+), 225 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index 5132b0f..ed577ca 100644
+index 2af51b3..dd144c4 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
-@@ -456,6 +456,12 @@ fn apply_chatgpt_codex_request_shape(body: &mut serde_json::Value) {
+@@ -549,6 +549,12 @@ fn apply_chatgpt_codex_request_shape(body: &mut serde_json::Value) {
      }
  
      obj.insert("store".to_string(), serde_json::Value::Bool(false));
@@ -31,7 +31,7 @@ index 5132b0f..ed577ca 100644
      if let Some(reasoning) = obj.get_mut("reasoning").and_then(|v| v.as_object_mut()) {
          reasoning.insert(
              "summary".to_string(),
-@@ -3074,6 +3080,7 @@ mod tests {
+@@ -3257,6 +3263,7 @@ mod tests {
          apply_chatgpt_codex_request_shape(&mut body);
          assert_eq!(body["instructions"], "You are a helpful assistant.");
          assert_eq!(body["store"], false);
@@ -39,7 +39,7 @@ index 5132b0f..ed577ca 100644
  
          let mut body = serde_json::json!({
              "input": [
-@@ -3094,8 +3101,7 @@ mod tests {
+@@ -3277,8 +3284,7 @@ mod tests {
      #[test]
      fn anthropic_oauth_shape_prepends_identity_and_strips_sampling_params() {
          use xai_grok_sampling_types::messages::{
@@ -50,10 +50,10 @@ index 5132b0f..ed577ca 100644
  
          let mut request = MessagesRequest {
 diff --git a/crates/codegen/xai-grok-sampler/src/stream/responses.rs b/crates/codegen/xai-grok-sampler/src/stream/responses.rs
-index ec5a650..1433d26 100644
+index 4ce5a03..af116cb 100644
 --- a/crates/codegen/xai-grok-sampler/src/stream/responses.rs
 +++ b/crates/codegen/xai-grok-sampler/src/stream/responses.rs
-@@ -617,7 +617,10 @@ fn inject_streaming_tool_fallback(
+@@ -654,7 +654,10 @@ fn inject_streaming_tool_fallback(
      let tool_calls: Vec<ToolCall> = streamed
          .into_values()
          .map(|call| ToolCall {
@@ -66,10 +66,10 @@ index ec5a650..1433d26 100644
              arguments: Arc::from(call.arguments),
          })
 diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-index ac4fb43..b7af318 100644
+index a5e679f..bcfa979 100644
 --- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
 +++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-@@ -455,7 +455,13 @@ impl ReasoningContent {
+@@ -464,7 +464,13 @@ impl ReasoningContent {
  /// A tool call made by the assistant that the client must execute locally.
  #[derive(Debug, Clone, Serialize, Deserialize)]
  pub struct ToolCall {
@@ -84,7 +84,7 @@ index ac4fb43..b7af318 100644
      pub id: Arc<str>,
      /// Name of the function to call
      pub name: String,
-@@ -463,6 +469,28 @@ pub struct ToolCall {
+@@ -472,6 +478,28 @@ pub struct ToolCall {
      pub arguments: Arc<str>,
  }
  
@@ -113,7 +113,7 @@ index ac4fb43..b7af318 100644
  /// Tool/function definition for the model
  #[derive(Debug, Clone, Serialize, Deserialize)]
  pub struct ToolSpec {
-@@ -1771,8 +1799,10 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
+@@ -1845,8 +1873,10 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
                  .into_iter()
                  .map(|tc| {
                      let arguments = sanitize_tool_arguments(&tc.id, &tc.name, tc.arguments.clone());
@@ -125,7 +125,7 @@ index ac4fb43..b7af318 100644
                  })
                  .collect();
  
-@@ -1792,8 +1822,9 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
+@@ -1866,8 +1896,9 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
              }
          }
          ConversationItem::ToolResult(t) => {
@@ -136,7 +136,7 @@ index ac4fb43..b7af318 100644
              } else {
                  let mut blocks = vec![ChatContentBlock::Text {
                      text: t.content.as_ref().to_owned(),
-@@ -1812,7 +1843,7 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
+@@ -1886,7 +1917,7 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
                      content: MessageContent::Blocks(blocks),
                      name: None,
                      tool_calls: Vec::new(),
@@ -145,7 +145,7 @@ index ac4fb43..b7af318 100644
                      model_id: None,
                      reasoning_content: None,
                  }
-@@ -2002,8 +2033,13 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
+@@ -2067,8 +2098,13 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
                  // Assistant item — they are NOT separate siblings because
                  // their lifecycle is tied to the assistant turn (a
                  // ToolResult must follow each one in conversation order).
@@ -160,7 +160,7 @@ index ac4fb43..b7af318 100644
                      name: fc.name,
                      arguments: Arc::<str>::from(fc.arguments),
                  });
-@@ -2180,7 +2216,10 @@ impl From<&ConversationRequest> for rs::CreateResponse {
+@@ -2245,7 +2281,10 @@ impl From<&ConversationRequest> for rs::CreateResponse {
              max_tool_calls: None,
              metadata: None,
              model: req.model.clone(),
@@ -171,20 +171,8 @@ index ac4fb43..b7af318 100644
 +            parallel_tool_calls: Some(true),
              previous_response_id: None,
              prompt: None,
-             prompt_cache_key: None,
-@@ -2328,10 +2367,7 @@ pub fn sanitize_unknown_reasoning_effort(response: &mut serde_json::Value) {
-             serde_json::Value::String(effort),
-         );
-     }
--    if let Some(e) = obj
--        .get_mut("reasoning")
--        .and_then(|r| r.get_mut("effort"))
--    {
-+    if let Some(e) = obj.get_mut("reasoning").and_then(|r| r.get_mut("effort")) {
-         *e = serde_json::Value::String("xhigh".to_string());
-     }
- }
-@@ -2383,12 +2419,13 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
+             prompt_cache_key: req.prompt_cache_key.clone(),
+@@ -2367,12 +2406,13 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
              // Add each tool call as a FunctionCall item
              for tc in &a.tool_calls {
                  let arguments = sanitize_tool_arguments(&tc.id, &tc.name, tc.arguments.clone());
@@ -200,7 +188,7 @@ index ac4fb43..b7af318 100644
                          status: None,
                      },
                  )));
-@@ -2417,9 +2454,12 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
+@@ -2401,9 +2441,12 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
                  }
                  rs::FunctionCallOutput::Content(parts)
              };
@@ -214,7 +202,7 @@ index ac4fb43..b7af318 100644
                      output,
                      id: None,
                      status: None,
-@@ -3227,8 +3267,10 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+@@ -3216,8 +3259,10 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                  for tc in &a.tool_calls {
                      let input =
                          serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
@@ -226,7 +214,7 @@ index ac4fb43..b7af318 100644
                          name: tc.name.clone(),
                          input,
                      });
-@@ -3266,8 +3308,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+@@ -3255,8 +3300,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                      }
                      ToolResultContent::Blocks(blocks)
                  };
@@ -237,7 +225,7 @@ index ac4fb43..b7af318 100644
                      content,
                      cache_control: None,
                  });
-@@ -4007,7 +4050,7 @@ mod tests {
+@@ -4148,7 +4194,7 @@ mod tests {
                  arguments: r#"{"path": "/bar.txt"}"#.to_string(),
                  call_id: "call_789".to_string(),
                  name: "read_file".to_string(),
@@ -246,7 +234,7 @@ index ac4fb43..b7af318 100644
                  status: None,
              })],
              parallel_tool_calls: None,
-@@ -4038,10 +4081,55 @@ mod tests {
+@@ -4179,10 +4225,55 @@ mod tests {
              panic!("Expected Assistant item");
          };
          assert_eq!(a.tool_calls.len(), 1);
@@ -304,10 +292,10 @@ index ac4fb43..b7af318 100644
      /// trailing Assistant item beside `model_id`/`model_fingerprint`, and
      /// round-trips through the persisted JSON.
 diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
-index d7d91c7..4a3d7ab 100644
+index b10fb40..bf30c68 100644
 --- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
-@@ -489,230 +489,246 @@ impl SessionActor {
+@@ -497,234 +497,250 @@ impl SessionActor {
              }
          });
          let _drainer_guard = crate::util::AbortOnDrop(drainer);
@@ -707,26 +695,30 @@ index d7d91c7..4a3d7ab 100644
 -                },
 -            );
 -            tracing::info_span!(
--                "tool.execution", tool_name = % prepared.tool_name, tool_use_id = %
--                prepared.call_id, tool_input_size_bytes = prepared.raw_arguments.len() as
--                i64, tool_result_size_bytes = tool_result_size_bytes, success =
--                matches!(tool_outcome, crate ::session::events::ToolOutcome::Success),
--                outcome = <&'static str >::from(tool_outcome),
+-                "tool.execution",
+-                tool_name = %prepared.tool_name,
+-                tool_use_id = %prepared.call_id,
+-                tool_input_size_bytes = prepared.raw_arguments.len() as i64,
+-                tool_result_size_bytes = tool_result_size_bytes,
+-                success = matches!(tool_outcome, crate::session::events::ToolOutcome::Success),
+-                outcome = <&'static str>::from(tool_outcome),
 -            )
 -            .in_scope(|| {});
 -            if let Some(artifact) = compaction_artifact_read(&prepared.parsed_args) {
 +                );
                  tracing::info_span!(
--                    "compaction.segment_read", session_id = % self.session_info.id.0,
--                    tool_name = % prepared.tool_name, artifact = % artifact,
--                    segment_index = artifact.segment_index().map(| i | i as i64), success
--                    = matches!(tool_outcome, crate
--                    ::session::events::ToolOutcome::Success),
-+                    "tool.execution", tool_name = % prepared.tool_name, tool_use_id = %
-+                    prepared.call_id, tool_input_size_bytes = prepared.raw_arguments.len() as
-+                    i64, tool_result_size_bytes = tool_result_size_bytes, success =
-+                    matches!(tool_outcome, crate ::session::events::ToolOutcome::Success),
-+                    outcome = <&'static str >::from(tool_outcome),
+-                    "compaction.segment_read",
+-                    session_id = %self.session_info.id.0,
++                    "tool.execution",
+                     tool_name = %prepared.tool_name,
+-                    artifact = %artifact,
+-                    // i64: redact drops u64 (serializes as string). None ⇒ field omitted.
+-                    segment_index = artifact.segment_index().map(|i| i as i64),
++                    tool_use_id = %prepared.call_id,
++                    tool_input_size_bytes = prepared.raw_arguments.len() as i64,
++                    tool_result_size_bytes = tool_result_size_bytes,
+                     success = matches!(tool_outcome, crate::session::events::ToolOutcome::Success),
++                    outcome = <&'static str>::from(tool_outcome),
                  )
                  .in_scope(|| {});
 -            }
@@ -738,11 +730,13 @@ index d7d91c7..4a3d7ab 100644
 -                        final_result = Some(tool_loop);
 +                if let Some(artifact) = compaction_artifact_read(&prepared.parsed_args) {
 +                    tracing::info_span!(
-+                        "compaction.segment_read", session_id = % self.session_info.id.0,
-+                        tool_name = % prepared.tool_name, artifact = % artifact,
-+                        segment_index = artifact.segment_index().map(| i | i as i64), success
-+                        = matches!(tool_outcome, crate
-+                        ::session::events::ToolOutcome::Success),
++                        "compaction.segment_read",
++                        session_id = %self.session_info.id.0,
++                        tool_name = %prepared.tool_name,
++                        artifact = %artifact,
++                        // i64: redact drops u64 (serializes as string). None ⇒ field omitted.
++                        segment_index = artifact.segment_index().map(|i| i as i64),
++                        success = matches!(tool_outcome, crate::session::events::ToolOutcome::Success),
 +                    )
 +                    .in_scope(|| {});
 +                }
@@ -762,5 +756,5 @@ index d7d91c7..4a3d7ab 100644
          }
          {
 -- 
-2.50.1 (Apple Git-155)
+2.52.0.windows.1
 

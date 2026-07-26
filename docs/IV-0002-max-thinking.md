@@ -3,7 +3,7 @@
 **Status:** implemented and exported
 **Upstreams:** `checkouts/pi` (reference semantics), `checkouts/grok-build` (patch target)
 **Deliverable:** patch `0005` in `patches/grok-build/`
-**Implementation base:** `ba76b0a683fa52e4e60685017b85905451be17bc`
+**Implementation base:** `47348d13ec4508dcfe440e34c6d511bb02998fb2` (Grok `0.2.112`)
 **Depends on:** [IV-0001](IV-0001-openai-oauth.md) — OpenAI Codex OAuth provider, patches `0001–0004`
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
@@ -12,14 +12,15 @@
 - **Why this exists:** preserve `max` as a real capability above `xhigh` where
   providers support it, without breaking the historical alias behavior on
   other models.
-- **Durable implementation:** patch `0005`; it owns the canonical enum, wire
-  compatibility workaround, model gating, fallback behavior, and user docs.
+- **Durable implementation:** patch `0005`; upstream now owns the canonical
+  `Max` enum and wire mapping, while the patch owns model gating, fallback
+  behavior, subagent handling, and user docs.
 - **Known consumers:** CLI and pager effort parsing, model menus, Responses and
   Messages conversion, subagent overrides, [IV-0001](IV-0001-openai-oauth.md),
   and [IV-0003](IV-0003-anthropic-oauth.md).
-- **Key assumption:** the pinned `async-openai` type still lacks `Max`; if that
-  changes, retire the documented JSON side channel only after rerunning the
-  request/response provenance tests.
+- **Key assumption:** upstream and its pinned async-openai revision continue to
+  encode `Max` natively; provider catalogs still determine which models may
+  offer it.
 - **Evidence route:** rerun the focused Cargo suites and clean-room application
   under [Evidence and reproduction](#evidence-and-reproduction); the OpenAI
   live `:max` check remains explicitly outstanding.
@@ -33,10 +34,9 @@
 
 ## Anthropic interaction
 
-Patch `0005` introduces the canonical `Max` level and OpenAI Responses wire
-workaround. The Anthropic-specific mapping lives in IV-0003 patch `0008`:
-`Xhigh → "xhigh"` on native-supporting models and `Max → "max"`, with per-model
-menu gating.
+Upstream Grok `0.2.112` already provides the canonical `Max` level and native
+OpenAI Responses mapping. Patch `0005` now supplies the catalog and UX policy.
+The Anthropic-specific per-model menu gating lives in IV-0003 patch `0008`.
 
 ## Intent and lifecycle justification
 
@@ -71,95 +71,32 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
   the effort string is passed through `thinkingLevelMap` and lands on
   `reasoning.effort` verbatim — i.e. the wire value is literally `"max"`.
 
-## grok-build integration points (found in exploration)
+## grok-build integration points on `0.2.112`
 
-- `crates/codegen/xai-grok-sampling-types/src/types.rs` — canonical
-  `ReasoningEffort` enum (`None…Xhigh`). Today `FromStr` maps
-  `"xhigh" | "max" => Xhigh` ("max is a CLI/UX alias of xhigh") and the error
-  message plus `parse_canonical_effort_token` document that alias. Also here:
-  `to_responses_api` / `from_responses_api` (bridges to async-openai),
-  `to_messages_api` (final Anthropic mapping is owned by IV-0003 patch `0008`),
-  `ReasoningEffortOption { id, value, label, … }` (per-model
-  effort menus where `id` is presentation/input and `value` is the wire value).
-- **Hard constraint:** `rs::ReasoningEffort` is
-  `async_openai::types::responses` from crates.io (`async-openai 0.33`,
-  re-exported in `sampling-types/src/lib.rs`). It has `None…Xhigh`, **no
-  `Max`**, no `#[serde(other)]` leniency. We do not fork or patch the dep;
-  instead we use grok-build's existing JSON seams:
-  - requests are serialized to `serde_json::Value` and patched post-serialize
-    (`patch_reasoning_text_types`, `apply_chatgpt_codex_request_shape` in
-    `xai-grok-sampler/src/client.rs`);
-  - `deserialize_response_event` (client.rs) already has a
-    sanitize-JSON-and-retry fallback, and `apply_terminal_event_overrides`
-    already peeks the raw JSON of terminal SSE events;
-  - `CreateResponseWrapper` already carries process-local fields the sampler
-    strips before sending (`trace`) — precedent for a side-channel field.
-- `crates/codegen/xai-grok-shell/src/agent/config.rs` —
-  `openai_codex_model_entries()` (patch `0004`): per-model
-  `reasoning_efforts` menus, currently `low|medium|high|xhigh` for all seven
-  Codex models.
-- `crates/codegen/xai-grok-shell/src/agent/models.rs` —
-  `model_offers_reasoning_effort`: server menu when present, else legacy
-  built-in `low..xhigh` set.
-- `crates/codegen/xai-grok-pager/src/acp/model_state.rs` —
-  `resolve_effort_token_for`: menu-id match first, then canonical-level match
-  **only if the model's menu offers that value** (unsupported levels are
-  rejected, not clamped).
-- `crates/codegen/xai-grok-pager/src/app/cli.rs` +
-  `src/slash/commands/model.rs` — pi-style `provider/model:effort` references
-  (patch `0003`) resolve the suffix via `parse_canonical_effort_token` and
-  `resolve_effort_for_model`; they pick up a new enum variant with no parser
-  changes.
-- `crates/codegen/xai-grok-agent/src/config.rs` — agent-definition `Effort`
-  enum **already has a distinct `Max`** (`VALID_VALUES` includes `"max"`); it
-  currently collapses to xhigh at the sampler boundary via the string parse.
-- `crates/codegen/xai-grok-sampling-types/src/conversation.rs` —
-  `response_to_conversation_items` stamps per-response effort provenance from
-  the echoed `response.reasoning.effort` via `from_responses_api`.
+- `xai-grok-sampling-types::ReasoningEffort` and the pinned async-openai
+  Responses type both support `Max` natively. Requests and echoed responses no
+  longer need a JSON rewrite or process-local effort side channel.
+- `crates/codegen/xai-grok-shell/src/agent/config.rs` adds `max` only to the
+  built-in Codex models whose catalog advertises it.
+- `crates/codegen/xai-grok-pager/src/acp/model_state.rs` resolves menu IDs and
+  preserves the compatibility downgrade from unsupported `max` to offered
+  `xhigh`.
+- `crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs` applies
+  the same downgrade to subagent effort overrides, which bypass pager-side
+  resolution.
+- Pager CLI/model parsing from patch `0003` consumes the upstream canonical
+  enum directly.
 
 ## Implemented patch series
 
 ### Patch 0005 — `max` reasoning effort and user documentation
 
-**A. Canonical enum** — `xai-grok-sampling-types/src/types.rs`
+**A–C. Canonical and wire behavior — upstream-owned on `0.2.112`**
 
-- Add `Max` variant ordered above `Xhigh`.
-- `as_str() → "max"`; serde `lowercase` gives `"max"` for free.
-- `FromStr`: `"max" → Max` (alias removed); update the error string and the
-  `parse_canonical_effort_token` doc comment; rewrite the upstream
-  `reasoning_effort_from_str_accepts_max_as_xhigh` test to the new semantics.
-- `to_messages_api`: `Max → Some("max")`; active IV-0003 patch `0008` owns
-  native `Xhigh → "xhigh"` and per-model gating.
-- `to_responses_api`: `Max → rs::ReasoningEffort::Xhigh` as a **typed
-  placeholder only** (async-openai cannot represent `Max`); the true wire
-  value is restored by the post-serialize patch below. Document this loudly.
-- Exhaustive matches mean the compiler flags every other site that must
-  handle `Max`.
-
-**B. Request encoding** — `xai-grok-sampler/src/client.rs` (+
-`CreateResponseWrapper` in sampling-types)
-
-- Carry the canonical `Option<ReasoningEffort>` on `CreateResponseWrapper` as
-  a process-local field (like `trace`, never serialized).
-- After `serde_json::to_value(&request.inner)`, when the canonical effort is
-  `Max`, patch `body["reasoning"]["effort"] = "max"` — in **both** the
-  non-streaming (`create_response`) and streaming request paths, before the
-  Codex reshape (which preserves `reasoning.effort`).
-- Chat Completions path: grok-build serializes its own enum there, so `"max"`
-  flows natively — verify, no change expected.
-
-**C. Response decoding** — `client.rs` + `conversation.rs`
-
-- `deserialize_response_event` sanitize path and the non-streaming
-  `from_slice::<rs::Response>` path: when `response.reasoning.effort` is a
-  string the typed enum cannot parse (`"max"`), rewrite it to `"xhigh"` so
-  the typed parse succeeds, and stash the raw string into
-  `response.metadata["reasoning_effort_wire"]`
-  (`apply_terminal_event_overrides` precedent).
-- `response_to_conversation_items`: prefer
-  `metadata["reasoning_effort_wire"]` (parsed with the canonical `FromStr`)
-  over the typed echo when stamping effort provenance, so `Max` round-trips
-  onto assistant items and session metadata.
+Upstream now carries `ReasoningEffort::Max` through parsing, async-openai,
+request serialization, response decoding, and provenance. The rebased patch
+therefore removes the former placeholder/rewrite workaround and makes no
+sampling-types or sampler changes for `max`.
 
 **D. Model gating (pi parity)** — `xai-grok-shell/src/agent/config.rs`
 
@@ -188,10 +125,8 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
 
 **F. Tests**
 
-- enum: `FromStr`/`as_str`/serde round-trip; `max` distinct from `xhigh`.
-- request: body patch emits `reasoning.effort: "max"` (plain Responses and
-  ChatGPT-Codex shapes); `Xhigh` still emits `"xhigh"`.
-- response: echoed `"max"` parses via sanitize path; provenance stamps `Max`.
+- upstream compatibility: canonical enum and native request/response mapping
+  remain covered by the sampling-types and sampler suites;
 - catalog: gpt-5.6 entries offer `max`; gpt-5.5 does not.
 - resolution: `max` on an xhigh-only menu downgrades to `Xhigh`; `max` on a
   gpt-5.6 menu resolves to `Max`; `openai-codex/gpt-5.6-sol:max` reference
@@ -205,14 +140,9 @@ and downgrade behavior.
 
 | Repo | File | Change |
 |------|------|--------|
-| grok-build | `crates/codegen/xai-grok-sampling-types/src/types.rs` | `Max` variant, parse/format, Messages mapping, placeholder Responses mapping, wrapper field |
-| grok-build | `crates/codegen/xai-grok-sampling-types/src/conversation.rs` | `patch_reasoning_effort_max`, `sanitize_unknown_reasoning_effort`, provenance from `reasoning_effort_wire` |
-| grok-build | `crates/codegen/xai-grok-sampler/src/client.rs` | request-body `"max"` patch (both Responses paths); response sanitize on the SSE fallback and non-streaming parse |
 | grok-build | `crates/codegen/xai-grok-shell/src/agent/config.rs` | `max` menu option on gpt-5.6 Codex entries + gating test |
-| grok-build | `crates/codegen/xai-grok-shell/src/agent/session_config.rs` | `Max` label (compiler-driven exhaustive match) |
 | grok-build | `crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs` | subagent `effort: max` downgrade for non-max models |
 | grok-build | `crates/codegen/xai-grok-pager/src/acp/model_state.rs` | `Max → Xhigh` downgrade in effort-token resolution + tests |
-| grok-build | `crates/codegen/xai-grok-pager/src/slash/commands/effort_levels.rs` | `Max` description (compiler-driven; legacy fallback menu unchanged) |
 | grok-build | `crates/codegen/xai-grok-pager/docs/user-guide/{02,04,11,14}-*.md` | docs in patch `0005` |
 | this repo | `patches/grok-build/0005-*.patch` | durable patch |
 | this repo | `docs/IV-0002-max-thinking.md` | this doc |
@@ -232,15 +162,13 @@ and downgrade behavior.
 
 Tests that read stored credentials use an isolated `GROK_HOME`.
 
-- `cargo check --workspace --locked`: passes.
-- `cargo test -p xai-grok-sampling-types --lib --locked`: 277 passed (includes
-  patch/sanitize/provenance and enum round-trip tests).
-- `cargo test -p xai-grok-sampler --lib --locked`: 159 passed.
-- `cargo test -p xai-grok-pager --lib --locked`: 7390 passed, 10 ignored
-  (includes `resolve_effort_token_max_downgrades_to_xhigh_unless_offered`).
-- `cargo test -p xai-grok-shell --lib --locked`: 5739 passed, 13 ignored.
-- `git diff --check` clean.
-- Clean-room patches `0001–0005` apply to `ba76b0a`.
+- `cargo check -p xai-grok-pager-bin --locked`: passes.
+- `cargo test -p xai-grok-sampling-types --lib --locked`: 285 passed.
+- `cargo test -p xai-grok-sampler --lib --locked`: 69 passed.
+- Focused pager reasoning-effort tests: 9 passed; focused OpenAI catalog/OAuth
+  shell tests: 6 passed.
+- `git diff --check` and `cargo fmt --all -- --check` are clean.
+- Clean-room patches `0001–0005` apply to `47348d1`.
 
 ### Remaining OpenAI `max` live check
 
@@ -263,21 +191,12 @@ Anthropic work:
    `resolve_effort_token_for` (covers `/effort`, `/model …:max`, `-m`,
    headless) and the shell subagent effort-override parse in
    `handle_request.rs`. A TUI notice remains a possible follow-up.
-2. **async-openai:** stayed on pinned 0.33; the typed `Max` placeholder plus
-   `patch_reasoning_effort_max` / `sanitize_unknown_reasoning_effort` can be
-   deleted wholesale if upstream ever grows a `Max` variant.
-3. **Wire-side notes for maintainers:**
-   - the request-side literal `"max"` is restored **after**
-     `patch_reasoning_text_types` and **before**
-     `apply_chatgpt_codex_request_shape` in both `create_response` and
-     `create_response_stream`; the canonical effort travels on
-     `CreateResponseWrapper.reasoning_effort` (process-local, like `trace`);
-   - response provenance for `max` flows through
-     `metadata["reasoning_effort_wire"]`, so effort stamping is correct even
-     though the typed `rs::Response` says xhigh;
-   - config-level gates already behave: `default_reasoning_effort = "max"`
-     and CLI overrides pass through `model_offers_reasoning_effort`, which
-     only admits `Max` for models whose menu lists it.
+2. **Canonical/wire ownership:** upstream `0.2.112` now carries `Max`
+   natively. Do not reintroduce the former typed-placeholder, JSON rewrite, or
+   response-metadata side channel unless upstream regresses.
+3. **Config-level gate:** `default_reasoning_effort = "max"` and CLI overrides
+   pass through `model_offers_reasoning_effort`, which only admits `Max` for
+   models whose menu lists it.
 4. **Codex backend acceptance:** pi's generated catalog says gpt-5.6 accepts
    `"max"`; confirm against the live backend during the deferred live check
    (a 400 on `reasoning.effort` would show up immediately on the first

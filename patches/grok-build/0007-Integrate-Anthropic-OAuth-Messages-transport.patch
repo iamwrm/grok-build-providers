@@ -1,4 +1,4 @@
-From 26b005a32a5358b6463081f8c6cda2378983df07 Mon Sep 17 00:00:00 2001
+From 52717c4e1672bb6f46955e43831a04945ace5249 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 07/16] Integrate Anthropic OAuth Messages transport
@@ -12,10 +12,10 @@ Add anthropic_oauth bearer resolution, Claude Code identity headers, mandatory i
  4 files changed, 253 insertions(+), 8 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index a103fc8..9372a8e 100644
+index 76f2b7d..ab65bc2 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
-@@ -441,6 +441,83 @@ fn apply_chatgpt_codex_request_shape(body: &mut serde_json::Value) {
+@@ -534,6 +534,83 @@ fn apply_chatgpt_codex_request_shape(body: &mut serde_json::Value) {
      obj.remove("top_p");
  }
  
@@ -99,7 +99,7 @@ index a103fc8..9372a8e 100644
  /// Convert a prior assistant easy-input message into the completed output
  /// message shape used by pi/the Codex client:
  ///
-@@ -588,7 +665,7 @@ impl SamplingClient {
+@@ -681,7 +758,7 @@ impl SamplingClient {
                      })?;
                      headers.insert(HeaderName::from_static("x-api-key"), header_value);
                  }
@@ -108,7 +108,7 @@ index a103fc8..9372a8e 100644
                      let bearer = format!("Bearer {}", api_key);
                      let header_value = HeaderValue::from_str(&bearer).map_err(|_| {
                          tracing::debug!(
-@@ -655,7 +732,9 @@ impl SamplingClient {
+@@ -756,7 +833,9 @@ impl SamplingClient {
          }
  
          // Always set User-Agent: per-session origin if available, else fallback.
@@ -119,16 +119,16 @@ index a103fc8..9372a8e 100644
              let ua_string = match config.origin_client.as_ref() {
                  Some(origin) => user_agent_string_for(origin),
                  None => user_agent_string_for(&OriginClientInfo {
-@@ -731,7 +810,7 @@ impl SamplingClient {
-                         headers.insert(HeaderName::from_static("x-api-key"), v);
+@@ -837,7 +916,7 @@ impl SamplingClient {
+                             headers.insert(HeaderName::from_static("x-api-key"), v);
+                         }
                      }
-                 }
--                AuthScheme::Bearer | AuthScheme::ChatgptOauth => {
-+                AuthScheme::Bearer | AuthScheme::ChatgptOauth | AuthScheme::AnthropicOauth => {
-                     headers.remove(HeaderName::from_static("x-api-key"));
-                     if let Ok(v) = HeaderValue::from_str(&format!("Bearer {fresh}")) {
-                         headers.insert(AUTHORIZATION, v);
-@@ -789,7 +868,7 @@ impl SamplingClient {
+-                    AuthScheme::Bearer | AuthScheme::ChatgptOauth => {
++                    AuthScheme::Bearer | AuthScheme::ChatgptOauth | AuthScheme::AnthropicOauth => {
+                         if let Ok(v) = HeaderValue::from_str(&format!("Bearer {fresh}")) {
+                             headers.insert(AUTHORIZATION, v);
+                         }
+@@ -900,7 +979,7 @@ impl SamplingClient {
                  .get(HeaderName::from_static("x-api-key"))
                  .and_then(|v| v.to_str().ok())
                  .map(|s| s.to_string()),
@@ -137,7 +137,7 @@ index a103fc8..9372a8e 100644
                  .default_headers
                  .get(AUTHORIZATION)
                  .and_then(|v| v.to_str().ok())
-@@ -831,7 +910,10 @@ impl SamplingClient {
+@@ -942,7 +1021,10 @@ impl SamplingClient {
          let auth_prefix = self.current_sent_bearer_prefix();
          let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
              (AuthScheme::XApiKey, Some(_)) => "x-api-key",
@@ -149,7 +149,7 @@ index a103fc8..9372a8e 100644
              (_, None) => "none",
          };
          crate::sampling_log::AuthInfo {
-@@ -1579,6 +1661,10 @@ impl SamplingClient {
+@@ -1659,6 +1741,10 @@ impl SamplingClient {
              request.inner.top_p = self.defaults.top_p;
          }
  
@@ -160,7 +160,7 @@ index a103fc8..9372a8e 100644
          Ok(())
      }
  
-@@ -2931,4 +3017,73 @@ mod tests {
+@@ -3114,4 +3200,73 @@ mod tests {
          assert_eq!(body["instructions"], "part one\npart two");
          assert!(body["input"].as_array().unwrap().is_empty());
      }
@@ -235,7 +235,7 @@ index a103fc8..9372a8e 100644
 +    }
  }
 diff --git a/crates/codegen/xai-grok-sampler/src/config.rs b/crates/codegen/xai-grok-sampler/src/config.rs
-index a2445bf..fb3143d 100644
+index 41e1928..db81fff 100644
 --- a/crates/codegen/xai-grok-sampler/src/config.rs
 +++ b/crates/codegen/xai-grok-sampler/src/config.rs
 @@ -28,6 +28,15 @@ pub enum AuthScheme {
@@ -255,10 +255,10 @@ index a2445bf..fb3143d 100644
  
  /// All knobs that control a single sampling request.
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index 286aaa2..dffc6e1 100644
+index 8fc1a76..3a8b753 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
-@@ -4019,6 +4019,9 @@ impl ModelEntry {
+@@ -4456,6 +4456,9 @@ impl ModelEntry {
          if self.info.auth_scheme == AuthScheme::ChatgptOauth {
              return crate::auth::openai_codex::current_bearer_blocking();
          }
@@ -267,8 +267,8 @@ index 286aaa2..dffc6e1 100644
 +        }
          first_own_credential(self.api_key.as_deref(), self.env_key.as_ref())
      }
-     /// `true` when the model has a non-empty `api_key` or an `env_key` that
-@@ -4417,6 +4420,19 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
+     /// The provider governing this model's bearer: `None` when a static
+@@ -4870,6 +4873,19 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
              );
          }
          (key, info.base_url.clone(), xai_chat_state::AuthType::ApiKey)
@@ -288,7 +288,7 @@ index 286aaa2..dffc6e1 100644
      } else if let Some(key) = model.own_credential() {
          (
              Some(key),
-@@ -4552,10 +4568,15 @@ pub fn resolve_model_auth_facts(model_id: &str) -> ModelAuthFacts {
+@@ -5029,10 +5045,15 @@ pub fn resolve_model_auth_facts_and_provider(
  fn byok_from_lookup(lookup: &ModelLookup) -> ModelByok {
      match lookup {
          ModelLookup::ConfigUnavailable => ModelByok::Unknown,
@@ -307,7 +307,7 @@ index 286aaa2..dffc6e1 100644
          {
              ModelByok::Byok
          }
-@@ -4758,6 +4779,11 @@ pub fn sampling_config_for_model(
+@@ -5251,6 +5272,11 @@ pub fn sampling_config_for_model(
              Some(std::sync::Arc::new(
                  crate::auth::openai_codex::OpenAiCodexBearerResolver,
              ))
@@ -319,7 +319,7 @@ index 286aaa2..dffc6e1 100644
          } else {
              None
          };
-@@ -4816,6 +4842,30 @@ pub fn inject_openai_codex_headers(extra_headers: &mut IndexMap<String, String>)
+@@ -5311,6 +5337,30 @@ pub fn inject_openai_codex_headers(extra_headers: &mut IndexMap<String, String>)
          .entry("OpenAI-Beta".to_string())
          .or_insert_with(|| "responses=experimental".to_string());
  }
@@ -350,7 +350,7 @@ index 286aaa2..dffc6e1 100644
  /// Fold URL-derived headers into `extra_headers`.
  ///
  /// The sampler crate is intentionally URL-agnostic: it does not inspect
-@@ -6013,6 +6063,30 @@ reasoning_effort = "low"
+@@ -7075,6 +7125,30 @@ reasoning_effort = "low"
          }
      }
  
@@ -382,10 +382,10 @@ index 286aaa2..dffc6e1 100644
      fn try_resolve_model_credentials_swaps_first_party_own_key_under_kill_switch() {
          use xai_chat_state::AuthType;
 diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
-index e3f7b74..27c6fda 100644
+index 2704a2e..f5450af 100644
 --- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs
-@@ -284,8 +284,11 @@ impl SessionActor {
+@@ -463,8 +463,11 @@ impl SessionActor {
              &cfg.base_url,
          );
          let is_chatgpt_oauth = auth_scheme == xai_grok_sampler::AuthScheme::ChatgptOauth;
@@ -397,7 +397,7 @@ index e3f7b74..27c6fda 100644
          }
          let compaction_at_tokens = self.compaction_at_tokens.get();
          let compactions_remaining = self.compactions_remaining.get();
-@@ -344,6 +347,10 @@ impl SessionActor {
+@@ -525,6 +528,10 @@ impl SessionActor {
                  Some(std::sync::Arc::new(
                      crate::auth::openai_codex::OpenAiCodexBearerResolver,
                  ))
@@ -409,5 +409,5 @@ index e3f7b74..27c6fda 100644
                  self.auth_manager
                      .as_ref()
 -- 
-2.50.1 (Apple Git-155)
+2.52.0.windows.1
 

@@ -28,8 +28,8 @@ on:
     tags: ["v*"]
 
 env:
-  # Base commit the patch series applies onto (docs/i0001..i0003).
-  GROK_BUILD_BASE: ba76b0a683fa52e4e60685017b85905451be17bc
+  # Base commit the patch series applies onto (docs/IV-0001..IV-0008).
+  GROK_BUILD_BASE: 47348d13ec4508dcfe440e34c6d511bb02998fb2
   CARGO_INCREMENTAL: "0"
   # No debug info in release artifacts: the workspace is large enough that
   # MSVC's PDB hits its public-symbol limit at link time (fatal LNK4319 on
