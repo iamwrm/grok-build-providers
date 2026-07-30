@@ -1,5 +1,6 @@
 # grok-build-providers
 
+[![build](https://github.com/iamwrm/grok-build-providers/actions/workflows/build.yml/badge.svg)](https://github.com/iamwrm/grok-build-providers/actions/workflows/build.yml)
 [![release](https://github.com/iamwrm/grok-build-providers/actions/workflows/release.yml/badge.svg)](https://github.com/iamwrm/grok-build-providers/actions/workflows/release.yml)
 
 Patches and tooling on top of [xai-org/grok-build](https://github.com/xai-org/grok-build)
@@ -10,11 +11,17 @@ See [docs/repo.md](docs/repo.md) for the repo layout and workflow
 Repository work is organized by lifecycle initiatives (`docs/IV-*`) and
 horizontal doctrine (`docs/DC-*`).
 
+## Continuous builds
+
+`.github/workflows/build.yml` applies the complete patch series and compiles
+the native pager binary on Linux, macOS, and Windows for branch pushes and
+pull requests. It does not publish artifacts.
+
 ## Release binaries
 
 `.github/workflows/release.yml` applies the complete patch series to pinned
-upstream commit `47348d13ec4508dcfe440e34c6d511bb02998fb2`
-(Grok `0.2.112`) and builds
+upstream commit `500129c714ad1b10e6095481f4a8387a2ec52649`
+(Grok `0.2.114`) and builds
 `xai-grok-pager` for:
 
 - macOS arm64 and x86_64

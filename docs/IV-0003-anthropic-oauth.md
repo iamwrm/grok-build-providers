@@ -3,7 +3,7 @@
 **Status:** implemented, exported, and live-verified at the recorded checkpoint
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
 **Deliverable:** patches `0006–0008`, continuing the IV-0001/IV-0002 stack
-**Implementation base:** `47348d13ec4508dcfe440e34c6d511bb02998fb2` (Grok `0.2.112`)
+**Implementation base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
 ## Lifecycle map
@@ -197,18 +197,20 @@ grok-build already had a complete Anthropic Messages transport:
 
 ## Evidence and reproduction
 
-- `cargo check -p xai-grok-pager-bin --locked` and the native Windows
-  pager-bin release build pass.
+- On the current base, `cargo check -p xai-grok-pager-bin --locked` passes.
+  The native Windows pager-bin release build remains previous-base evidence
+  until the refreshed cross-platform workflows run.
 - Unit tests: 3 OAuth-flow tests (paste parsing, authorize URL/PKCE/state,
   expiry window), 2 sampler request-shape tests (identity prepend + cache +
   sampling-param strip; identity-only + idempotency), header-injection test,
-  and catalog test all pass; the current sampler lib suite passes 69/69.
-- Focused Anthropic shell tests pass 5/5 with an isolated `GROK_HOME`. Keep
+  and catalog test all pass; the current sampler lib suite passes 174/174.
+- At the recorded previous-base checkpoint, focused Anthropic shell tests
+  passed 5/5 with an isolated `GROK_HOME`. Keep
   credential-reading tests isolated because stored OpenAI or Anthropic auth can
   change catalog visibility independently of this series.
 - `git diff --check` clean.
-- Clean-room patches `0001–0008` apply to `47348d1`.
-- After the rebase, the sampling-types suite passes 285/285 and focused pager
+- Clean-room patches `0001–0008` apply to `500129c`.
+- After the rebase, the sampling-types suite passes 299/299 and focused pager
   reasoning-effort tests pass 9/9; the catalog test retains per-model native
   `xhigh` gating.
 - **Live verification checkpoint:** `grok anthropic login` browser flow

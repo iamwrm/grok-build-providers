@@ -3,7 +3,7 @@
 **Status:** implemented in durable patch `0014`; historical integration checkpoints recorded below
 **Upstream:** `checkouts/grok-build`
 **Deliverable:** `patches/grok-build/0014-Apply-exact-file-edits-atomically-in-batches.patch`
-**Implementation base:** `47348d13ec4508dcfe440e34c6d511bb02998fb2` (Grok `0.2.112`)
+**Implementation base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
 **Patch-0014 checkpoint:** commit `89b85da`; 14-patch tree `90ac009b4f64b731558f6365e60824e2f0643091`
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
@@ -129,12 +129,12 @@ empty.
 
 ## Evidence and reproduction
 
-### Patch-0014 rebase checkpoint
+### Historical patch-0014 rebase checkpoint
 
 - Patches `0001–0014` clean-room apply to `47348d1` and produce tree
   `90ac009b4f64b731558f6365e60824e2f0643091`.
-- Current focused `xai-grok-tools` `search_replace` coverage passes 112/112,
-  including atomic success, dependent edits, rollback on late missing or
+- At that checkpoint, focused `xai-grok-tools` `search_replace` coverage
+  passed 112/112, including atomic success, dependent edits, rollback on late missing or
   ambiguous matches, mode/schema validation, and concise output.
 - The previous-base full release suite remains a historical checkpoint: 2,672
   passed and 6 ignored. It is not asserted as the current upstream total.
@@ -142,15 +142,19 @@ empty.
 ### Integrated 16-patch rebase checkpoint
 
 - Patch `0014` remains part of the durable `0001–0016` series.
-- All 16 patches clean-room apply to the pinned base and produce tree
-  `a9a11f502de730d7600bb58f42ceb8c5f77a2a32`.
-- Current sampling-types and sampler library suites pass 285/285 and 69/69;
-  shell parallel-dispatch tests pass 13/13; the clean-room pager-bin Cargo
-  check and native Windows pager-bin release build pass.
+- All 16 patches clean-room apply to base `500129c` and produce tree
+  `f54122409a429e1071f6bb2a19bfcf984346adb6`.
+- Current focused `xai-grok-tools` `search_replace` coverage passes 116/116;
+  sampling-types and sampler library suites pass 299/299 and 174/174; the
+  clean-room pager-bin Cargo check passes.
+- Shell parallel-dispatch tests (13/13) remain a previous-base checkpoint; the
+  new build workflow compiles but does not run test suites. The native Windows
+  release build is also previous-base evidence until the refreshed workflows
+  run.
 
-This integration checkpoint validates the rebased product but does not replace
-full cross-platform release CI or the historical patch-0014 release-suite
-record.
+This integration checkpoint validates the current Linux build and clean-room
+series but does not replace refreshed cross-platform CI or the historical
+patch-0014 release-suite record.
 
 ## Non-goals and limitations
 

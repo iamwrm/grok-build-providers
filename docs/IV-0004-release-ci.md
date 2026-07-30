@@ -1,21 +1,21 @@
-# IV-0004: Public repository and cross-platform release CI
+# IV-0004: Public repository and cross-platform build/release CI
 
-**Status:** implemented; current base locally verified, prior base verified on all five CI targets; `v*` tag publication configured but not yet exercised
+**Status:** implemented; current base locally verified, refreshed three-OS build CI pending its first run, prior base verified on all five release targets; `v*` tag publication configured but not yet exercised
 **Upstream:** `checkouts/grok-build` (patch target for Windows portability)
-**Deliverable:** `.github/workflows/release.yml` plus consolidated patches `0009–0010`
-**Upstream base:** `47348d13ec4508dcfe440e34c6d511bb02998fb2` (Grok `0.2.112`)
-**Current IV-0004 boundary:** commit `639cea1`, tree `2ebe20d81cfbeeadbae2e41ad8802bba66fd5886` (10 active patches)
+**Deliverable:** `.github/workflows/build.yml`, `.github/workflows/release.yml`, and consolidated patches `0009–0010`
+**Upstream base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
+**Historical IV-0004 boundary:** commit `639cea1`, tree `2ebe20d81cfbeeadbae2e41ad8802bba66fd5886` (10 active patches at that checkpoint)
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
 ## Lifecycle map
 
-- **Why this exists:** turn the complete local patch stack into reproducible,
-  downloadable release binaries across the supported desktop targets.
-- **Durable implementation:** `.github/workflows/release.yml` and portability
-  patches `0009–0010`.
-- **Known consumers:** every initiative that contributes a Grok patch, manual
-  artifact users, tag-driven GitHub releases, and maintainers rebasing the
-  pinned upstream base.
+- **Why this exists:** continuously compile the complete local patch stack on
+  each desktop OS and produce reproducible, downloadable release binaries.
+- **Durable implementation:** `.github/workflows/build.yml`,
+  `.github/workflows/release.yml`, and portability patches `0009–0010`.
+- **Known consumers:** every initiative that contributes a Grok patch, branch
+  pushes and pull requests, manual artifact users, tag-driven GitHub releases,
+  and maintainers rebasing the pinned upstream base.
 - **Key assumption:** the selected GitHub runner labels, protoc/NASM setup, and
   target toolchains remain available; tag publication is configured but still
   unexercised.
@@ -25,12 +25,21 @@
 
 ## Intent and lifecycle justification
 
-Make `https://github.com/iamwrm/grok-build-providers` public and build the
-fully patched `xai-grok-pager` release binary for macOS, Linux, and Windows.
-Manual runs should retain downloadable Actions artifacts; `v*` tags should
-publish a GitHub release with checksums.
+Make `https://github.com/iamwrm/grok-build-providers` public, compile every
+ordinary change on macOS, Linux, and Windows, and build the fully patched
+`xai-grok-pager` release binaries. Manual release runs should retain
+downloadable Actions artifacts; `v*` tags should publish a GitHub release with
+checksums.
 
 ## Approach
+
+`.github/workflows/build.yml` runs on every branch push, pull request, and
+manual dispatch. Its Linux, macOS, and Windows jobs independently check out the
+same pinned upstream base, apply the complete series with `git am`, install
+protoc (plus NASM on Windows), and run
+`cargo build -p xai-grok-pager-bin --locked`. It compiles native development
+binaries with debug information disabled, but does not package, upload, or
+publish them.
 
 `.github/workflows/release.yml`:
 
@@ -44,7 +53,7 @@ publish a GitHub release with checksums.
 7. Uploads one artifact per target; on `v*` tags, downloads all artifacts,
    writes `SHA256SUMS`, and publishes a GitHub release.
 
-Targets:
+Release targets:
 
 | Runner | Rust target |
 |---|---|
@@ -90,19 +99,20 @@ panic backtraces.
 
 ## Evidence and reproduction
 
-Current `47348d1` base:
+Current `500129c` base:
 
 - All 16 patches apply cleanly in a detached clean-room worktree and reproduce
-  tree `a9a11f502de730d7600bb58f42ceb8c5f77a2a32`, exactly matching the
+  tree `f54122409a429e1071f6bb2a19bfcf984346adb6`, exactly matching the
   rebased development branch.
-- `cargo check -p xai-grok-pager-bin --locked` passes in the clean-room tree.
-- A native Windows release build passes with `CARGO_INCREMENTAL=0`,
-  `CARGO_PROFILE_RELEASE_DEBUG=false`, and `--locked`; `/DEBUG:NONE` avoids the
-  PDB linker limit and the resulting binary reports `grok 0.2.112 (d560c35)`.
-- Sampling-types, sampler, chat-state, and telemetry library suites pass 285,
-  69, 351, and 154 tests respectively. Focused pager, shell, tool, and
-  parallel-dispatch coverage is recorded in IV-0002 and IV-0005–IV-0007.
-- Cross-platform CI for the rebased stack has not yet been run.
+- `cargo check -p xai-grok-pager-bin --locked` passes. The exact build-workflow
+  command, `cargo build -p xai-grok-pager-bin --locked`, also passes locally on
+  Linux with incremental and development debug info disabled.
+  `git diff --check` and `cargo fmt --all -- --check` are clean.
+- Sampling-types and sampler library suites pass 299/299 and 174/174; focused
+  `search_replace` coverage passes 116/116. Additional focused evidence is
+  recorded in IV-0002 and IV-0005–IV-0008.
+- The refreshed three-OS build workflow and five-target release workflow have
+  not yet run. Native Windows release success remains previous-base evidence.
 
 Prior-base CI validation:
 
@@ -126,7 +136,8 @@ Prior-base CI validation:
 
 ## Maintenance notes
 
-- Keep `GROK_BUILD_BASE` synchronized with the documented/exported patch base.
+- Keep `GROK_BUILD_BASE` in both workflows synchronized with the
+  documented/exported patch base.
 - `git am` is an intentional CI drift guard: if upstream or patch ordering
   changes, fail before compiling rather than silently building another tree.
 - Use the currently supported `macos-15-intel` label for x86_64. The legacy

@@ -1,4 +1,4 @@
-From 2d6a500481cb4acf910634ff889918f68e93ef6e Mon Sep 17 00:00:00 2001
+From 9f0b37fab9c7a2d56a8248dc5b3ce698ae437b33 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 11/16] Add dynamically controllable raw sampling logs
@@ -21,7 +21,7 @@ The JSON fmt formatter walks every ancestor when writing the spans array and pan
  11 files changed, 634 insertions(+), 20 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager/src/app/actions.rs b/crates/codegen/xai-grok-pager/src/app/actions.rs
-index 1fb61a2..183c182 100644
+index b888d3f..21a36b4 100644
 --- a/crates/codegen/xai-grok-pager/src/app/actions.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/actions.rs
 @@ -33,6 +33,23 @@ pub enum SwitchModelError {
@@ -48,7 +48,7 @@ index 1fb61a2..183c182 100644
  #[derive(Debug)]
  #[allow(clippy::large_enum_variant)]
  pub enum Action {
-@@ -311,6 +328,9 @@ pub enum Action {
+@@ -316,6 +333,9 @@ pub enum Action {
      /// Toggle the scroll flight recorder at runtime (`/debug log`;
      /// `GROK_SCROLL_LOG=1` enables it from startup).
      ToggleScrollLog,
@@ -58,7 +58,7 @@ index 1fb61a2..183c182 100644
      /// Print the `/debug` toggles and their on/off state to the transcript.
      ShowDebugStatus,
      /// Copy selected block's content to clipboard.
-@@ -1533,6 +1553,11 @@ pub enum Effect {
+@@ -1545,6 +1565,11 @@ pub enum Effect {
          agent_id: AgentId,
          session_id: acp::SessionId,
      },
@@ -70,7 +70,7 @@ index 1fb61a2..183c182 100644
      /// Kill a background task.
      KillBgTask {
          session_id: acp::SessionId,
-@@ -2357,6 +2382,12 @@ pub enum TaskResult {
+@@ -2387,6 +2412,12 @@ pub enum TaskResult {
          agent_id: AgentId,
          result: Result<(), String>,
      },
@@ -84,10 +84,10 @@ index 1fb61a2..183c182 100644
      /// returned an error envelope or an unparseable payload (treated as
      /// "clear pending state, keep the row").
 diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs
-index cfa1e56..1bed725 100644
+index 65e7c6d..5a548f1 100644
 --- a/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs
-@@ -543,13 +543,20 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
+@@ -547,13 +547,20 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
              }
              vec![]
          }
@@ -110,10 +110,10 @@ index cfa1e56..1bed725 100644
              if let Some(agent) = get_active_agent_mut(app) {
                  agent
 diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
-index 151aeac..ab7d441 100644
+index 239c96d..32235c8 100644
 --- a/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
-@@ -517,6 +517,33 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
+@@ -529,6 +529,33 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
          TaskResult::CompactComplete { agent_id, result } => {
              handle_compact_complete(app, agent_id, result)
          }
@@ -182,10 +182,10 @@ index b7388c0..421a033 100644
  #[test]
  fn toggle_scroll_log_flips_recorder_and_reports_path() {
 diff --git a/crates/codegen/xai-grok-pager/src/app/effects/mod.rs b/crates/codegen/xai-grok-pager/src/app/effects/mod.rs
-index d9f63f6..d9bedda 100644
+index 70bb99b..158686d 100644
 --- a/crates/codegen/xai-grok-pager/src/app/effects/mod.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/effects/mod.rs
-@@ -1518,6 +1518,36 @@ pub(crate) fn execute(
+@@ -1529,6 +1529,36 @@ pub(crate) fn execute(
                      }
                  });
          }
@@ -223,10 +223,10 @@ index d9f63f6..d9bedda 100644
              let tx = acp_tx.clone();
              tasks
 diff --git a/crates/codegen/xai-grok-pager/src/app/event_loop.rs b/crates/codegen/xai-grok-pager/src/app/event_loop.rs
-index f9e858a..d9393cc 100644
+index 0f44df3..03af1cf 100644
 --- a/crates/codegen/xai-grok-pager/src/app/event_loop.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/event_loop.rs
-@@ -734,6 +734,11 @@ pub(crate) async fn run(
+@@ -740,6 +740,11 @@ pub(crate) async fn run(
      if args.log_sampling {
          // SAFETY: called before any threads are spawned by init_tracing.
          unsafe { std::env::set_var("GROK_LOG_SAMPLING", "1") };
@@ -963,5 +963,5 @@ index e846169..c9d7853 100644
 +    }
  }
 -- 
-2.52.0.windows.1
+2.47.3
 

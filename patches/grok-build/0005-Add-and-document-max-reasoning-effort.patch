@@ -1,4 +1,4 @@
-From 5eaf2890a90f37fe94670ccbd9476538ec02580a Mon Sep 17 00:00:00 2001
+From a1f110888fe0e10e77977ed53d0f553ecb3cd44f Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 05/16] Add and document max reasoning effort
@@ -15,7 +15,7 @@ Make max a distinct canonical reasoning-effort level above xhigh. Work around th
  7 files changed, 130 insertions(+), 23 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
-index ae1fdbd..eeda4fb 100644
+index c96554e..1c5807d 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
 @@ -66,6 +66,7 @@ level:
@@ -37,10 +37,10 @@ index ae1fdbd..eeda4fb 100644
  remove it. OpenAI login does not replace or modify the normal `grok login`
  session.
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-index 23ceca2..b5c94ec 100644
+index 7bfce03..7dcec56 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-@@ -108,18 +108,24 @@ argument:
+@@ -120,18 +120,24 @@ argument:
  Provider-prefixed IDs such as `openai-codex/gpt-5.5` explicitly select the
  provider. The suffix is parsed from the last colon only after trying the whole
  string as an exact model ID, so IDs that contain colons continue to work.
@@ -190,10 +190,10 @@ index aa30792..9adf91e 100644
      fn resolve_effort_token_legacy_menu_rejects_none() {
          // supportsReasoningEffort without a server list → built-in low..xhigh.
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index 990b98b..8fc1a76 100644
+index 7118623..2fdedc8 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
-@@ -3887,21 +3887,28 @@ pub fn openai_codex_model_entries() -> Vec<(String, ModelEntry)> {
+@@ -3936,21 +3936,28 @@ pub fn openai_codex_model_entries() -> Vec<(String, ModelEntry)> {
                  NonZeroU64::new(context_window).expect("codex context windows are non-zero");
              info.supports_reasoning_effort = true;
              info.reasoning_effort = Some(ReasoningEffort::Medium);
@@ -233,7 +233,7 @@ index 990b98b..8fc1a76 100644
              (
                  key,
                  ModelEntry {
-@@ -7032,7 +7039,8 @@ reasoning_effort = "low"
+@@ -7081,7 +7088,8 @@ reasoning_effort = "low"
      /// loads global config, so this exercises its resolve + enforce core.)
      /// Built-in Codex catalog: every entry is keyed `openai-codex/<slug>`,
      /// routes to the ChatGPT Codex backend over the Responses API with the
@@ -243,7 +243,7 @@ index 990b98b..8fc1a76 100644
      #[test]
      fn openai_codex_entries_route_to_chatgpt_codex_backend() {
          let entries = openai_codex_model_entries();
-@@ -7053,6 +7061,16 @@ reasoning_effort = "low"
+@@ -7102,6 +7110,16 @@ reasoning_effort = "low"
                      .iter()
                      .any(|o| o.value == ReasoningEffort::Xhigh)
              );
@@ -261,10 +261,10 @@ index 990b98b..8fc1a76 100644
          }
      }
 diff --git a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
-index 2feda57..effcb01 100644
+index 613b6fe..e12dcfa 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/subagent/handle_request.rs
-@@ -472,7 +472,22 @@ pub(crate) async fn run_shell_child(
+@@ -471,7 +471,22 @@ pub(crate) async fn run_shell_child(
              .model_supports_reasoning_effort(effective_model_id.0.as_ref())
      {
          match raw.parse::<ReasoningEffort>() {
@@ -289,5 +289,5 @@ index 2feda57..effcb01 100644
                  tracing::warn!(
                      value = raw,
 -- 
-2.52.0.windows.1
+2.47.3
 

@@ -1,4 +1,4 @@
-From 84c9b7fa6adbf3a552bcee5f2098ab4f1ae620bc Mon Sep 17 00:00:00 2001
+From 0cb80668321f84b1448e70c7385c3a3eee25c45c Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 19:13:11 +0800
 Subject: [PATCH 15/16] Improve Codex parallel tool-call handling
@@ -66,7 +66,7 @@ index 4ce5a03..af116cb 100644
              arguments: Arc::from(call.arguments),
          })
 diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-index a5e679f..bcfa979 100644
+index 5801f04..48efe4c 100644
 --- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
 +++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
 @@ -464,7 +464,13 @@ impl ReasoningContent {
@@ -202,7 +202,7 @@ index a5e679f..bcfa979 100644
                      output,
                      id: None,
                      status: None,
-@@ -3216,8 +3259,10 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+@@ -3283,8 +3326,10 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                  for tc in &a.tool_calls {
                      let input =
                          serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
@@ -213,8 +213,8 @@ index a5e679f..bcfa979 100644
 +                        id: sanitize_tool_call_id(call_id),
                          name: tc.name.clone(),
                          input,
-                     });
-@@ -3255,8 +3300,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+                         cache_control: None,
+@@ -3326,8 +3371,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                      }
                      ToolResultContent::Blocks(blocks)
                  };
@@ -225,7 +225,7 @@ index a5e679f..bcfa979 100644
                      content,
                      cache_control: None,
                  });
-@@ -4148,7 +4194,7 @@ mod tests {
+@@ -4216,7 +4262,7 @@ mod tests {
                  arguments: r#"{"path": "/bar.txt"}"#.to_string(),
                  call_id: "call_789".to_string(),
                  name: "read_file".to_string(),
@@ -234,7 +234,7 @@ index a5e679f..bcfa979 100644
                  status: None,
              })],
              parallel_tool_calls: None,
-@@ -4179,10 +4225,55 @@ mod tests {
+@@ -4247,10 +4293,55 @@ mod tests {
              panic!("Expected Assistant item");
          };
          assert_eq!(a.tool_calls.len(), 1);
@@ -292,10 +292,10 @@ index a5e679f..bcfa979 100644
      /// trailing Assistant item beside `model_id`/`model_fingerprint`, and
      /// round-trips through the persisted JSON.
 diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
-index b10fb40..bf30c68 100644
+index 2f5a5ba..e9bbc6b 100644
 --- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
-@@ -497,234 +497,250 @@ impl SessionActor {
+@@ -563,234 +563,250 @@ impl SessionActor {
              }
          });
          let _drainer_guard = crate::util::AbortOnDrop(drainer);
@@ -727,7 +727,7 @@ index b10fb40..bf30c68 100644
 -                | ToolLoop::Cancelled
 -                | ToolLoop::FollowupMessage(_) => {
 -                    if final_result.is_none() {
--                        final_result = Some(tool_loop);
+-                        *final_result = Some(tool_loop);
 +                if let Some(artifact) = compaction_artifact_read(&prepared.parsed_args) {
 +                    tracing::info_span!(
 +                        "compaction.segment_read",
@@ -745,7 +745,7 @@ index b10fb40..bf30c68 100644
 +                    | ToolLoop::Cancelled
 +                    | ToolLoop::FollowupMessage(_) => {
 +                        if final_result.is_none() {
-+                            final_result = Some(tool_loop);
++                            *final_result = Some(tool_loop);
 +                        }
                      }
 +                    _ => {}
@@ -754,7 +754,7 @@ index b10fb40..bf30c68 100644
 +                next_source_idx += 1;
              }
          }
-         {
+         Ok(())
 -- 
-2.52.0.windows.1
+2.47.3
 

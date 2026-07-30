@@ -1,4 +1,4 @@
-From 7cfa1f17e8cc7981e9b3c3ab84caf51fa3095ee8 Mon Sep 17 00:00:00 2001
+From 917fbe761fe71713a241c72f250797f454e86930 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 04/16] Add and document the built-in OpenAI Codex catalog
@@ -13,7 +13,7 @@ Register credential-gated openai-codex/* entries backed by the ChatGPT Codex end
  5 files changed, 182 insertions(+), 4 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
-index 08313b9..ae1fdbd 100644
+index 3e23ca4..c96554e 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
 @@ -41,6 +41,45 @@ To sign out, run `grok logout`. It takes no flags and clears your cached credent
@@ -63,10 +63,10 @@ index 08313b9..ae1fdbd 100644
  
  For CI/CD, automation, or environments without browser access, use an API key from [console.x.ai](https://console.x.ai):
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-index c642b48..23ceca2 100644
+index 05947f0..7bfce03 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-@@ -92,16 +92,28 @@ Rename the current session. Alias: `/title`.
+@@ -104,16 +104,28 @@ Rename the current session. Alias: `/title`.
  
  ## Model and Mode
  
@@ -95,7 +95,7 @@ index c642b48..23ceca2 100644
 +
 +
  ### `/effort <level>`
-
+ 
  Set reasoning effort on the **current** model without reselecting it. Levels are `low`, `medium`, `high`, and `xhigh`, and it only applies when the active model supports reasoning effort.
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md b/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md
 index 7bb1012..8573c3d 100644
@@ -156,10 +156,10 @@ index 7bb1012..8573c3d 100644
  
  Run models locally with [Ollama](https://ollama.ai):
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index d71a194..990b98b 100644
+index 2f8e9a6..7118623 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
-@@ -3536,6 +3536,15 @@ pub fn resolve_model_list(
+@@ -3585,6 +3585,15 @@ pub fn resolve_model_list(
          }
          resolved = prefetched;
      }
@@ -175,7 +175,7 @@ index d71a194..990b98b 100644
      for (key, model_override) in &cfg.config_models {
          let had_base = resolved.contains_key(key);
          let base = resolved.shift_remove(key);
-@@ -3838,6 +3847,75 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
+@@ -3887,6 +3896,75 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
          })
          .collect()
  }
@@ -251,7 +251,7 @@ index d71a194..990b98b 100644
  #[derive(Debug, Clone, Serialize, Deserialize)]
  pub struct ModelEntryConfig {
      /// Stable unique identifier for this catalog entry. When present,
-@@ -6952,6 +7030,33 @@ reasoning_effort = "low"
+@@ -7001,6 +7079,33 @@ reasoning_effort = "low"
      /// `try_resolve_model_credentials` — swaps it for the session token. BYOK
      /// (non-x.ai) own keys are preserved. (`try_resolve_model_credentials`
      /// loads global config, so this exercises its resolve + enforce core.)
@@ -286,10 +286,10 @@ index d71a194..990b98b 100644
      fn try_resolve_model_credentials_swaps_first_party_own_key_under_kill_switch() {
          use xai_chat_state::AuthType;
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config_model_override_parse.rs b/crates/codegen/xai-grok-shell/src/agent/config_model_override_parse.rs
-index 926f548..6c829a6 100644
+index 126696c..d94b578 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config_model_override_parse.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config_model_override_parse.rs
-@@ -706,6 +706,7 @@ mod tests {
+@@ -721,6 +721,7 @@ mod tests {
                  description: Some("Deep reasoning".to_string()),
                  default: true,
              }],
@@ -298,5 +298,5 @@ index 926f548..6c829a6 100644
              compactions_remaining: Some(CompactionsRemaining::Fixed(1)),
              compaction_at_tokens: Some(CompactionAtTokens::Fixed(100_000)),
 -- 
-2.52.0.windows.1
+2.47.3
 

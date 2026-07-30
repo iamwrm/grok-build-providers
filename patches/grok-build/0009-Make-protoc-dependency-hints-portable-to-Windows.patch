@@ -1,4 +1,4 @@
-From c7b4dcdcdab160b7a33085051d5772814dedafc6 Mon Sep 17 00:00:00 2001
+From d135d3b44fd4d9d4989833362e9206d4c663423f Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 09/16] Make protoc dependency hints portable to Windows
@@ -9,10 +9,10 @@ Skip the optional Unix-device-based protoc dependency-hint helper on Windows, wh
  1 file changed, 10 insertions(+)
 
 diff --git a/crates/build/xai-proto-build/src/lib.rs b/crates/build/xai-proto-build/src/lib.rs
-index 417c4b2..d0a7be5 100644
+index 66613d0..88e9cbe 100644
 --- a/crates/build/xai-proto-build/src/lib.rs
 +++ b/crates/build/xai-proto-build/src/lib.rs
-@@ -103,6 +103,16 @@ impl XaiProtoBuilder {
+@@ -107,6 +107,16 @@ impl XaiProtoBuilder {
          protos: impl IntoIterator<Item = &'a Path>,
          includes: impl IntoIterator<Item = &'a Path>,
      ) -> anyhow::Result<()> {
@@ -30,5 +30,5 @@ index 417c4b2..d0a7be5 100644
  
          if let Some(protoc) = protoc {
 -- 
-2.52.0.windows.1
+2.47.3
 

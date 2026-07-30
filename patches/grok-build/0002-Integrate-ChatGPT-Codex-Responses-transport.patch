@@ -1,4 +1,4 @@
-From 2a1c5f149063142482e9afd740a4a881e96e1ce1 Mon Sep 17 00:00:00 2001
+From fff3746cf29ec302a18fdd48e5addb76a87ed8a4 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:00 +0800
 Subject: [PATCH 02/16] Integrate ChatGPT Codex Responses transport
@@ -639,10 +639,10 @@ index d0fda0d..00f5915 100644
      async fn response_failed_yields_failed_500() {
          let failed = rs::ResponseStreamEvent::ResponseFailed(rs_types::ResponseFailedEvent {
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index 35f0cc7..d71a194 100644
+index 6e92cee..2f8e9a6 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
-@@ -4015,6 +4015,9 @@ pub struct ConfigModelOverride {
+@@ -4064,6 +4064,9 @@ pub struct ConfigModelOverride {
      pub reasoning_effort: Option<ReasoningEffort>,
      pub supports_reasoning_effort: Option<bool>,
      pub reasoning_efforts: Vec<ReasoningEffortOption>,
@@ -652,7 +652,7 @@ index 35f0cc7..d71a194 100644
      pub supports_backend_search: Option<bool>,
      /// Aliases must be registered in `config_model_override_parse::ALIASES`;
      /// serde rejects a table that contains both spellings otherwise.
-@@ -4102,6 +4105,9 @@ impl ConfigModelOverride {
+@@ -4151,6 +4154,9 @@ impl ConfigModelOverride {
          if !self.reasoning_efforts.is_empty() {
              entry.info.reasoning_efforts = self.reasoning_efforts.clone();
          }
@@ -662,7 +662,7 @@ index 35f0cc7..d71a194 100644
          if let Some(v) = self.supports_backend_search {
              entry.info.supports_backend_search = v;
          }
-@@ -4362,6 +4368,9 @@ impl ModelEntry {
+@@ -4411,6 +4417,9 @@ impl ModelEntry {
      /// `None` → fall through to session / global key. Static only: never
      /// consults auth-provider tokens.
      pub(crate) fn own_credential(&self) -> Option<String> {
@@ -672,7 +672,7 @@ index 35f0cc7..d71a194 100644
          first_own_credential(self.api_key.as_deref(), self.env_key.as_ref())
      }
      /// The provider governing this model's bearer: `None` when a static
-@@ -4764,7 +4773,19 @@ pub(crate) fn first_own_credential(
+@@ -4813,7 +4822,19 @@ pub(crate) fn first_own_credential(
  /// token > XAI_API_KEY.
  pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> ResolvedCredentials {
      let info = model.info();
@@ -693,7 +693,7 @@ index 35f0cc7..d71a194 100644
          (
              Some(key),
              info.base_url.clone(),
-@@ -4923,7 +4944,13 @@ pub fn resolve_model_auth_facts_and_provider(
+@@ -4972,7 +4993,13 @@ pub fn resolve_model_auth_facts_and_provider(
  fn byok_from_lookup(lookup: &ModelLookup) -> ModelByok {
      match lookup {
          ModelLookup::ConfigUnavailable => ModelByok::Unknown,
@@ -708,7 +708,7 @@ index 35f0cc7..d71a194 100644
          ModelLookup::Loaded(_) => ModelByok::NotByok,
      }
  }
-@@ -5133,6 +5160,15 @@ pub fn sampling_config_for_model(
+@@ -5182,6 +5209,15 @@ pub fn sampling_config_for_model(
          alpha_test_key.as_deref(),
          &credentials.base_url,
      );
@@ -724,7 +724,7 @@ index 35f0cc7..d71a194 100644
      let api_backend = info.api_backend.clone();
      SamplerConfig {
          api_key: credentials.api_key,
-@@ -5158,7 +5194,7 @@ pub fn sampling_config_for_model(
+@@ -5207,7 +5243,7 @@ pub fn sampling_config_for_model(
          user_id,
          origin_client: None,
          attribution_callback: None,
@@ -733,7 +733,7 @@ index 35f0cc7..d71a194 100644
          supports_backend_search: info.supports_backend_search,
          compactions_remaining: info.compactions_remaining,
          compaction_at_tokens: info.compaction_at_tokens,
-@@ -5166,6 +5202,30 @@ pub fn sampling_config_for_model(
+@@ -5215,6 +5251,30 @@ pub fn sampling_config_for_model(
          header_injector: None,
      }
  }
@@ -825,5 +825,5 @@ index 3c319ec..2704a2e 100644
                      .as_ref()
                      .map(|am| -> xai_grok_sampler::SharedBearerResolver {
 -- 
-2.52.0.windows.1
+2.47.3
 

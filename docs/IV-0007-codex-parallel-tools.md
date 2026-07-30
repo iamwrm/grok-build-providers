@@ -3,7 +3,7 @@
 **Status:** implemented in durable patch `0015`; historical integration checkpoints recorded below
 **Upstream:** `checkouts/grok-build`
 **Deliverable:** `patches/grok-build/0015-Improve-Codex-parallel-tool-call-handling.patch`
-**Implementation base:** `47348d13ec4508dcfe440e34c6d511bb02998fb2` (Grok `0.2.112`)
+**Implementation base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
 **Patch-0015 checkpoint:** commit `84c9b7f`; 15-patch tree `4fcba74364770269399a76cb310d3a3305b0cc94`
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
@@ -139,22 +139,27 @@ pre-flight failures.
 
 ## Evidence and reproduction
 
-### Patch-0015 rebase checkpoint
+### Historical patch-0015 rebase checkpoint
 
 - Patches `0001–0015` clean-room apply to `47348d1` and produce tree
   `4fcba74364770269399a76cb310d3a3305b0cc94`.
-- Current sampling-types and sampler library suites pass 285/285 and 69/69.
-  Coverage includes compound tool-call IDs, Responses replay, request shaping,
-  and stream routing.
-- Shell parallel-dispatch tests pass 13/13 while retaining concurrent execution
-  and the ordered final-result publication contract.
+- At that checkpoint, sampling-types and sampler library suites passed 285/285
+  and 69/69. Coverage included compound tool-call IDs, Responses replay,
+  request shaping, and stream routing.
+- Shell parallel-dispatch tests passed 13/13 while retaining concurrent
+  execution and the ordered final-result publication contract.
 
 ### Integrated 16-patch rebase checkpoint
 
 - Patch `0015` remains part of the durable `0001–0016` series.
-- All 16 patches clean-room apply to the pinned base and produce tree
-  `a9a11f502de730d7600bb58f42ceb8c5f77a2a32`; the clean-room pager-bin Cargo
-  check and native Windows pager-bin release build pass.
+- All 16 patches clean-room apply to base `500129c` and produce tree
+  `f54122409a429e1071f6bb2a19bfcf984346adb6`; the clean-room pager-bin Cargo
+  check passes.
+- Current sampling-types and sampler library suites pass 299/299 and 174/174.
+  Shell parallel-dispatch tests remain a previous-base checkpoint; the new
+  build workflow compiles but does not run test suites. The native Windows
+  release build is also previous-base evidence until the refreshed workflows
+  run.
 
 This is an integration checkpoint, not a promise that later revisions will
 retain the same tree hash or counts. The recorded suite does not contain a

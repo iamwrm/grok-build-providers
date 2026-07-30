@@ -3,7 +3,7 @@
 **Status:** implemented and exported
 **Upstreams:** `checkouts/pi` (reference semantics), `checkouts/grok-build` (patch target)
 **Deliverable:** patch `0005` in `patches/grok-build/`
-**Implementation base:** `47348d13ec4508dcfe440e34c6d511bb02998fb2` (Grok `0.2.112`)
+**Implementation base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
 **Depends on:** [IV-0001](IV-0001-openai-oauth.md) — OpenAI Codex OAuth provider, patches `0001–0004`
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
@@ -34,7 +34,7 @@
 
 ## Anthropic interaction
 
-Upstream Grok `0.2.112` already provides the canonical `Max` level and native
+Upstream Grok `0.2.114` already provides the canonical `Max` level and native
 OpenAI Responses mapping. Patch `0005` now supplies the catalog and UX policy.
 The Anthropic-specific per-model menu gating lives in IV-0003 patch `0008`.
 
@@ -71,7 +71,7 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
   the effort string is passed through `thinkingLevelMap` and lands on
   `reasoning.effort` verbatim — i.e. the wire value is literally `"max"`.
 
-## grok-build integration points on `0.2.112`
+## grok-build integration points on `0.2.114`
 
 - `xai-grok-sampling-types::ReasoningEffort` and the pinned async-openai
   Responses type both support `Max` natively. Requests and echoed responses no
@@ -91,7 +91,7 @@ grok -m openai-codex/gpt-5.6-sol:max -p "hello"
 
 ### Patch 0005 — `max` reasoning effort and user documentation
 
-**A–C. Canonical and wire behavior — upstream-owned on `0.2.112`**
+**A–C. Canonical and wire behavior — upstream-owned on `0.2.114`**
 
 Upstream now carries `ReasoningEffort::Max` through parsing, async-openai,
 request serialization, response decoding, and provenance. The rebased patch
@@ -163,12 +163,12 @@ and downgrade behavior.
 Tests that read stored credentials use an isolated `GROK_HOME`.
 
 - `cargo check -p xai-grok-pager-bin --locked`: passes.
-- `cargo test -p xai-grok-sampling-types --lib --locked`: 285 passed.
-- `cargo test -p xai-grok-sampler --lib --locked`: 69 passed.
-- Focused pager reasoning-effort tests: 9 passed; focused OpenAI catalog/OAuth
-  shell tests: 6 passed.
+- `cargo test -p xai-grok-sampling-types --lib --locked`: 299 passed.
+- `cargo test -p xai-grok-sampler --lib --locked`: 174 passed.
+- Previous-base focused pager reasoning-effort tests passed 9/9; focused OpenAI
+  catalog/OAuth shell tests passed 6/6.
 - `git diff --check` and `cargo fmt --all -- --check` are clean.
-- Clean-room patches `0001–0005` apply to `47348d1`.
+- Clean-room patches `0001–0005` apply to `500129c`.
 
 ### Remaining OpenAI `max` live check
 
@@ -191,7 +191,7 @@ Anthropic work:
    `resolve_effort_token_for` (covers `/effort`, `/model …:max`, `-m`,
    headless) and the shell subagent effort-override parse in
    `handle_request.rs`. A TUI notice remains a possible follow-up.
-2. **Canonical/wire ownership:** upstream `0.2.112` now carries `Max`
+2. **Canonical/wire ownership:** upstream `0.2.114` carries `Max`
    natively. Do not reintroduce the former typed-placeholder, JSON rewrite, or
    response-metadata side channel unless upstream regresses.
 3. **Config-level gate:** `default_reasoning_effort = "max"` and CLI overrides

@@ -40,7 +40,7 @@ git clone https://github.com/earendil-works/pi checkouts/pi
 1. Hack inside `checkouts/<project>/` on a branch or dirty tree.
 2. Export the change as the next numbered patch in the existing stack. The
    grok-build series is based on pinned commit
-   `47348d13ec4508dcfe440e34c6d511bb02998fb2`, not whatever `origin/main`
+   `500129c714ad1b10e6095481f4a8387a2ec52649`, not whatever `origin/main`
    happens to contain:
 
    ```bash
@@ -63,14 +63,14 @@ Use the same pinned base as CI, then apply the complete ordered series:
 cd checkouts/grok-build
 git fetch origin
 
-git switch --detach 47348d13ec4508dcfe440e34c6d511bb02998fb2
+git switch --detach 500129c714ad1b10e6095481f4a8387a2ec52649
 git am ../../patches/grok-build/*.patch
 ```
 
-`.github/workflows/release.yml` performs this exact clean-room operation before
-every build. `GROK_BUILD_BASE` in that workflow is the operational source of
-truth for the base SHA; keep this document and initiative headers synchronized
-with it.
+Both `.github/workflows/build.yml` and `.github/workflows/release.yml` perform
+this exact clean-room operation before compiling. Their matching
+`GROK_BUILD_BASE` values are the operational source of truth for the base SHA;
+keep both workflows, this document, and initiative headers synchronized.
 
 ## Rebasing onto newer upstream
 
@@ -78,9 +78,9 @@ Moving the series to `origin/main` is an intentional rebase, not the normal
 apply procedure. Use a temporary branch/worktree, apply or rebase each commit
 in order, resolve and test conflicts, then re-export **all affected patches**
 with their existing numbers. Finally, clean-room `git am` the complete series
-onto the new base and update `GROK_BUILD_BASE`, initiative docs, and validation
-hashes together. Do not reset a working checkout to `origin/main` and assume
-the pinned series will still apply unchanged.
+onto the new base and update `GROK_BUILD_BASE` in both workflows, initiative
+docs, and validation hashes together. Do not reset a working checkout to
+`origin/main` and assume the pinned series will still apply unchanged.
 
 ## Agentic workspace documents
 
@@ -121,7 +121,7 @@ complete replacement series before deleting old patch files.
 | [IV-0001](IV-0001-openai-oauth.md) | `0001–0004` | OpenAI ChatGPT-plan OAuth and Codex transport |
 | [IV-0002](IV-0002-max-thinking.md) | `0005` | Distinct `max` reasoning level |
 | [IV-0003](IV-0003-anthropic-oauth.md) | `0006–0008` | Anthropic OAuth, Claude catalog, native `xhigh` |
-| [IV-0004](IV-0004-release-ci.md) | `0009–0010` | Cross-platform release CI and Windows portability |
+| [IV-0004](IV-0004-release-ci.md) | `0009–0010` | Cross-platform build/release CI and Windows portability |
 | [IV-0005](IV-0005-last-turn-stats.md) | `0011–0013` | Raw sampling diagnostics (incl. sampling-layer panic fix), turn-end metrics |
 | [IV-0006](IV-0006-batch-file-edits.md) | `0014` | Atomic multi-edit search/replace for one file |
 | [IV-0007](IV-0007-codex-parallel-tools.md) | `0015` | Codex parallel tool-call wire + result ordering |

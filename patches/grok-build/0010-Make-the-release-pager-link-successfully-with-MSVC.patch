@@ -1,4 +1,4 @@
-From 639cea1eb05137d9fec820d0acdadda999b3c673 Mon Sep 17 00:00:00 2001
+From 0a60009115fbdddbdf3fb5a8598cd25112aad90b Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 10/16] Make the release pager link successfully with MSVC
@@ -37,5 +37,5 @@ index 912e93e..e365af4 100644
  
  # jemalloc page size for Apple Silicon (macOS aarch64 uses 16KB pages = 2^14).
 -- 
-2.52.0.windows.1
+2.47.3
 

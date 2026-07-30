@@ -1,4 +1,4 @@
-From ae01c5940f1504e52f8ef830c582b8487dbd6b20 Mon Sep 17 00:00:00 2001
+From 2d93b76ecf6dc49c771283b869729e2acdcfdb08 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 08/16] Add the Anthropic catalog with native xhigh support
@@ -13,7 +13,7 @@ Register credential-gated adaptive-thinking anthropic/* models with their final 
  5 files changed, 288 insertions(+), 9 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
-index eeda4fb..565762e 100644
+index 1c5807d..716b64c 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
 @@ -84,6 +84,50 @@ session.
@@ -68,10 +68,10 @@ index eeda4fb..565762e 100644
  
  For CI/CD, automation, or environments without browser access, use an API key from [console.x.ai](https://console.x.ai):
 diff --git a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-index b5c94ec..83ae449 100644
+index 7dcec56..568cbea 100644
 --- a/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
 +++ b/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
-@@ -103,16 +103,19 @@ argument:
+@@ -115,16 +115,19 @@ argument:
  /model Grok Build
  /model Reasoning X high
  /model openai-codex/gpt-5.5:xhigh
@@ -217,10 +217,10 @@ index 9adf91e..45a3c77 100644
      fn resolve_effort_token_legacy_menu_rejects_none() {
          // supportsReasoningEffort without a server list → built-in low..xhigh.
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index 3a8b753..2276f47 100644
+index 700e945..780b960 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
-@@ -3545,6 +3545,14 @@ pub fn resolve_model_list(
+@@ -3594,6 +3594,14 @@ pub fn resolve_model_list(
              resolved.entry(key).or_insert(entry);
          }
      }
@@ -235,7 +235,7 @@ index 3a8b753..2276f47 100644
      for (key, model_override) in &cfg.config_models {
          let had_base = resolved.contains_key(key);
          let base = resolved.shift_remove(key);
-@@ -3923,6 +3931,110 @@ pub fn openai_codex_model_entries() -> Vec<(String, ModelEntry)> {
+@@ -3972,6 +3980,110 @@ pub fn openai_codex_model_entries() -> Vec<(String, ModelEntry)> {
          .collect()
  }
  
@@ -346,7 +346,7 @@ index 3a8b753..2276f47 100644
  #[derive(Debug, Clone, Serialize, Deserialize)]
  pub struct ModelEntryConfig {
      /// Stable unique identifier for this catalog entry. When present,
-@@ -5354,9 +5466,9 @@ pub fn inject_anthropic_oauth_headers(extra_headers: &mut IndexMap<String, Strin
+@@ -5403,9 +5515,9 @@ pub fn inject_anthropic_oauth_headers(extra_headers: &mut IndexMap<String, Strin
      extra_headers
          .entry("anthropic-beta".to_string())
          .or_insert_with(|| crate::auth::anthropic::OAUTH_BETA_HEADER.to_string());
@@ -359,7 +359,7 @@ index 3a8b753..2276f47 100644
      extra_headers
          .entry("x-app".to_string())
          .or_insert_with(|| "cli".to_string());
-@@ -7125,6 +7237,52 @@ reasoning_effort = "low"
+@@ -7174,6 +7286,52 @@ reasoning_effort = "low"
          }
      }
  
@@ -413,5 +413,5 @@ index 3a8b753..2276f47 100644
      #[test]
      fn inject_anthropic_oauth_headers_defaults_and_user_override() {
 -- 
-2.52.0.windows.1
+2.47.3
 

@@ -1,4 +1,4 @@
-From 52717c4e1672bb6f46955e43831a04945ace5249 Mon Sep 17 00:00:00 2001
+From 29b70ccffaa7a5a675f0d1b55af65c4d26ae12ba Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 07/16] Integrate Anthropic OAuth Messages transport
@@ -255,10 +255,10 @@ index 41e1928..db81fff 100644
  
  /// All knobs that control a single sampling request.
 diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
-index 8fc1a76..3a8b753 100644
+index 2fdedc8..700e945 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/config.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
-@@ -4456,6 +4456,9 @@ impl ModelEntry {
+@@ -4505,6 +4505,9 @@ impl ModelEntry {
          if self.info.auth_scheme == AuthScheme::ChatgptOauth {
              return crate::auth::openai_codex::current_bearer_blocking();
          }
@@ -268,7 +268,7 @@ index 8fc1a76..3a8b753 100644
          first_own_credential(self.api_key.as_deref(), self.env_key.as_ref())
      }
      /// The provider governing this model's bearer: `None` when a static
-@@ -4870,6 +4873,19 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
+@@ -4919,6 +4922,19 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
              );
          }
          (key, info.base_url.clone(), xai_chat_state::AuthType::ApiKey)
@@ -288,7 +288,7 @@ index 8fc1a76..3a8b753 100644
      } else if let Some(key) = model.own_credential() {
          (
              Some(key),
-@@ -5029,10 +5045,15 @@ pub fn resolve_model_auth_facts_and_provider(
+@@ -5078,10 +5094,15 @@ pub fn resolve_model_auth_facts_and_provider(
  fn byok_from_lookup(lookup: &ModelLookup) -> ModelByok {
      match lookup {
          ModelLookup::ConfigUnavailable => ModelByok::Unknown,
@@ -307,7 +307,7 @@ index 8fc1a76..3a8b753 100644
          {
              ModelByok::Byok
          }
-@@ -5251,6 +5272,11 @@ pub fn sampling_config_for_model(
+@@ -5300,6 +5321,11 @@ pub fn sampling_config_for_model(
              Some(std::sync::Arc::new(
                  crate::auth::openai_codex::OpenAiCodexBearerResolver,
              ))
@@ -319,7 +319,7 @@ index 8fc1a76..3a8b753 100644
          } else {
              None
          };
-@@ -5311,6 +5337,30 @@ pub fn inject_openai_codex_headers(extra_headers: &mut IndexMap<String, String>)
+@@ -5360,6 +5386,30 @@ pub fn inject_openai_codex_headers(extra_headers: &mut IndexMap<String, String>)
          .entry("OpenAI-Beta".to_string())
          .or_insert_with(|| "responses=experimental".to_string());
  }
@@ -350,7 +350,7 @@ index 8fc1a76..3a8b753 100644
  /// Fold URL-derived headers into `extra_headers`.
  ///
  /// The sampler crate is intentionally URL-agnostic: it does not inspect
-@@ -7075,6 +7125,30 @@ reasoning_effort = "low"
+@@ -7124,6 +7174,30 @@ reasoning_effort = "low"
          }
      }
  
@@ -409,5 +409,5 @@ index 2704a2e..f5450af 100644
                  self.auth_manager
                      .as_ref()
 -- 
-2.52.0.windows.1
+2.47.3
 

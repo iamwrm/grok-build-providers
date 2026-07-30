@@ -1,4 +1,4 @@
-From c6e0e17352e5b9bd013415e153881ab71c0f4122 Mon Sep 17 00:00:00 2001
+From ce4d46f803d386c0b5c2cb5a25ed18d7b98ab91a Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 12/16] Track prompt cache writes through usage accounting
@@ -233,10 +233,10 @@ index 5737563..2af51b3 100644
      fn deserialize_response_event_stashes_cost_in_metadata() {
          let make = |ticks: i64| {
 diff --git a/crates/codegen/xai-grok-sampler/src/stream/messages.rs b/crates/codegen/xai-grok-sampler/src/stream/messages.rs
-index f153eac..75e9ef7 100644
+index f8347f4..6f73ff1 100644
 --- a/crates/codegen/xai-grok-sampler/src/stream/messages.rs
 +++ b/crates/codegen/xai-grok-sampler/src/stream/messages.rs
-@@ -474,6 +474,7 @@ pub fn stream_messages<'a>(
+@@ -470,6 +470,7 @@ pub fn stream_messages<'a>(
                  total_tokens: total_prompt_tokens.saturating_add(final_output_tokens),
                  reasoning_tokens: 0,
                  cached_prompt_tokens: final_cache_read_input_tokens,
@@ -245,10 +245,10 @@ index f153eac..75e9ef7 100644
          } else {
              None
 diff --git a/crates/codegen/xai-grok-sampler/src/stream/messages_tests.rs b/crates/codegen/xai-grok-sampler/src/stream/messages_tests.rs
-index b70eb72..4deec75 100644
+index 60a7616..71804fe 100644
 --- a/crates/codegen/xai-grok-sampler/src/stream/messages_tests.rs
 +++ b/crates/codegen/xai-grok-sampler/src/stream/messages_tests.rs
-@@ -618,6 +618,7 @@ async fn prompt_tokens_sums_all_three_anthropic_buckets() {
+@@ -621,6 +621,7 @@ async fn prompt_tokens_sums_all_three_anthropic_buckets() {
  
      assert_eq!(usage.prompt_tokens, 100 + 5000 + 200);
      assert_eq!(usage.cached_prompt_tokens, 5000);
@@ -256,7 +256,7 @@ index b70eb72..4deec75 100644
      assert_eq!(usage.completion_tokens, 7);
      assert_eq!(usage.total_tokens, 100 + 5000 + 200 + 7);
  }
-@@ -635,6 +636,7 @@ async fn message_delta_cache_fields_override_message_start() {
+@@ -638,6 +639,7 @@ async fn message_delta_cache_fields_override_message_start() {
  
      assert_eq!(usage.prompt_tokens, 10 + 900 + 50);
      assert_eq!(usage.cached_prompt_tokens, 900);
@@ -264,7 +264,7 @@ index b70eb72..4deec75 100644
      assert_eq!(usage.completion_tokens, 4);
  }
  
-@@ -651,5 +653,6 @@ async fn pure_cache_hit_with_zero_uncached_still_emits_usage() {
+@@ -654,5 +656,6 @@ async fn pure_cache_hit_with_zero_uncached_still_emits_usage() {
  
      assert_eq!(usage.prompt_tokens, 2500);
      assert_eq!(usage.cached_prompt_tokens, 2500);
@@ -296,7 +296,7 @@ index 00f5915..4ce5a03 100644
  
          let cost_usd_ticks = response
 diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-index ff06349..a5e679f 100644
+index d6389fb..5801f04 100644
 --- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
 +++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
 @@ -686,10 +686,17 @@ pub struct TokenUsage {
@@ -340,10 +340,10 @@ index ff06349..a5e679f 100644
      }
  }
 diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
-index 1c7e1fb..ba5b423 100644
+index f2e7779..429a6a5 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/mod.rs
-@@ -407,6 +407,8 @@ pub(crate) struct PromptResponseMeta {
+@@ -409,6 +409,8 @@ pub(crate) struct PromptResponseMeta {
      #[serde(skip_serializing_if = "Option::is_none")]
      pub cached_read_tokens: Option<u32>,
      #[serde(skip_serializing_if = "Option::is_none")]
@@ -352,7 +352,7 @@ index 1c7e1fb..ba5b423 100644
      pub reasoning_tokens: Option<u32>,
      /// Whole-prompt billing (sibling token fields are last call only).
      #[serde(skip_serializing_if = "Option::is_none")]
-@@ -477,6 +479,7 @@ pub(crate) fn build_prompt_response_meta(
+@@ -479,6 +481,7 @@ pub(crate) fn build_prompt_response_meta(
          input_tokens: last_turn_usage.map(|u| u.prompt_tokens),
          output_tokens: last_turn_usage.map(|u| u.completion_tokens),
          cached_read_tokens: last_turn_usage.map(|u| u.cached_prompt_tokens),
@@ -552,7 +552,7 @@ index 90106f0..e7433fe 100644
 +            cache_creation_prompt_tokens: 0,
          }
      }
-
+ 
 diff --git a/crates/codegen/xai-grok-shell/src/sampling/error.rs b/crates/codegen/xai-grok-shell/src/sampling/error.rs
 index a6725dc..ea30d51 100644
 --- a/crates/codegen/xai-grok-shell/src/sampling/error.rs
@@ -654,5 +654,5 @@ index 89b6957..56e76a2 100644
                  None,
                  None,
 -- 
-2.52.0.windows.1
+2.47.3
 

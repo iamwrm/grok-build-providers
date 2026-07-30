@@ -1,4 +1,4 @@
-From 89b85dafc2ac09b0ec74fc70ab1cf795e6d97842 Mon Sep 17 00:00:00 2001
+From 95d87a2d803baa234de581a42dc06422f910b350 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 18:01:00 +0800
 Subject: [PATCH 14/16] Apply exact file edits atomically in batches
@@ -6,16 +6,16 @@ Subject: [PATCH 14/16] Apply exact file edits atomically in batches
 Let search_replace accept an ordered edits array for multiple exact changes to one file. Validate every replacement against evolving in-memory content and write only once after the complete batch succeeds, so a late miss or ambiguity leaves the file untouched. Preserve the legacy single-edit wire shape, exact matching, CRLF handling, Unicode fallback, concise output, and one FileWritten notification.
 ---
  .../session/acp_session_impl/tool_calls.rs    |  56 +-
- .../grok_build/search_replace/mod.rs          | 776 +++++++++++++++---
+ .../grok_build/search_replace/mod.rs          | 778 +++++++++++++++---
  .../grok_build_concise/search_replace.rs      |  65 +-
  .../src/permission/types.rs                   |   5 +-
- 4 files changed, 774 insertions(+), 128 deletions(-)
+ 4 files changed, 775 insertions(+), 129 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
-index 806e4f0..b10fb40 100644
+index 5577069..2f5a5ba 100644
 --- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
-@@ -1597,32 +1597,41 @@ impl SessionActor {
+@@ -1643,32 +1643,41 @@ impl SessionActor {
              ),
              ToolInput::SearchReplace(sr) => {
                  let display_path = self.tool_context.cwd.join(&sr.file_path).to_path_buf();
@@ -78,7 +78,7 @@ index 806e4f0..b10fb40 100644
                  )
              }
              ToolInput::Bash(bash_tool) => execute_tool_call_parts(
-@@ -2861,9 +2870,10 @@ mod plan_mode_edit_gate_tests {
+@@ -2962,9 +2971,10 @@ mod plan_mode_edit_gate_tests {
          use xai_grok_tools::implementations::grok_build::search_replace::SearchReplaceInput;
          ToolInput::SearchReplace(SearchReplaceInput {
              file_path: path.into(),
@@ -92,22 +92,31 @@ index 806e4f0..b10fb40 100644
      }
      fn write(path: &str) -> ToolInput {
 diff --git a/crates/codegen/xai-grok-tools/src/implementations/grok_build/search_replace/mod.rs b/crates/codegen/xai-grok-tools/src/implementations/grok_build/search_replace/mod.rs
-index d171dd2..dcd35ee 100644
+index 2139a07..b00995a 100644
 --- a/crates/codegen/xai-grok-tools/src/implementations/grok_build/search_replace/mod.rs
 +++ b/crates/codegen/xai-grok-tools/src/implementations/grok_build/search_replace/mod.rs
-@@ -56,11 +56,27 @@ impl SearchReplaceVersion {
+@@ -56,19 +56,35 @@ impl SearchReplaceVersion {
  /// - `${{ tools.by_kind.read }}` — client-facing name for the Read tool
  /// - `${{ params.edit.old_string }}` — client-facing param name
  /// - `${{ params.edit.replace_all }}` — client-facing param name
 -pub(crate) const DESCRIPTION_FULL: &str = r#"Replace an exact string in a file.
 +pub(crate) const DESCRIPTION_FULL: &str = r#"Replace exact strings in one file.
  
- - Read the file with `${{ tools.by_kind.read }}` before editing it.
+ ${% if tools.by_kind.read -%}
  - `${{ tools.by_kind.read }}` prefixes each line with "LINE_NUMBER→". That prefix is not part of the file: match only what comes after the →, with its exact indentation.
--- `${{ params.edit.old_string }}` must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set `${{ params.edit.replace_all }}` to change every occurrence (handy for renaming an identifier)."#;
+ ${% endif -%}
+-- `${{ params.edit.old_string }}` must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set `${{ params.edit.replace_all }}` to change every occurrence (handy for renaming an identifier).
+-- To create a new file, set `${{ params.edit.old_string }}` to an empty string. An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file."#;
 +- For multiple independent changes to the same file, prefer one call with `edits`; the edits run in order and the file is written only if every edit succeeds.
 +- For one change, use `${{ params.edit.old_string }}` and `new_string`. The old string must match exactly one place. If it appears more than once, add surrounding context or set `${{ params.edit.replace_all }}` to change every occurrence.
++- To create a new file, set `${{ params.edit.old_string }}` to an empty string. An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file.
 +- Supply either `edits` or the single-edit fields, never both."#;
+ /// The overwrite-guard sentence in [`DESCRIPTION_FULL`]. Only accurate while
+ /// `empty_old_string_does_not_override` is enabled (opt-in; the default is the
+ /// legacy overwrite behavior); `versioned_definition` strips it unless a
+ /// config enables the guard.
+ pub(crate) const EMPTY_OLD_STRING_GUARD_SENTENCE: &str =
+     " An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file.";
 +/// One exact replacement in an atomic batch.
 +#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 +pub struct SearchReplaceEdit {
@@ -125,7 +134,7 @@ index d171dd2..dcd35ee 100644
  /// Input for the search_replace tool.
  #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
  pub struct SearchReplaceInput {
-@@ -68,20 +84,66 @@ pub struct SearchReplaceInput {
+@@ -76,20 +92,66 @@ pub struct SearchReplaceInput {
          description = "The path to the file to modify. You can use either a relative path in the workspace or an absolute path."
      )]
      pub file_path: String,
@@ -197,7 +206,7 @@ index d171dd2..dcd35ee 100644
  }
  fn default_true() -> bool {
      true
-@@ -184,10 +246,31 @@ pub(crate) async fn run_search_replace(
+@@ -206,10 +268,31 @@ pub(crate) async fn run_search_replace(
              )));
          }
      }
@@ -233,7 +242,7 @@ index d171dd2..dcd35ee 100644
      }
      let (empty_old_string_does_not_override, include_user_edit_hint);
      {
-@@ -200,35 +283,57 @@ pub(crate) async fn run_search_replace(
+@@ -222,35 +305,57 @@ pub(crate) async fn run_search_replace(
              .map(|p| p.0.include_user_edit_hint)
              .unwrap_or(true);
      }
@@ -320,7 +329,7 @@ index d171dd2..dcd35ee 100644
      };
      if let SearchReplaceOutput::EditsApplied(applied) = &result {
          let (mut added, mut removed) = (0i64, 0i64);
-@@ -271,7 +376,8 @@ fn validate_path_length(file_path: &str) -> Option<SearchReplaceOutput> {
+@@ -293,7 +398,8 @@ fn validate_path_length(file_path: &str) -> Option<SearchReplaceOutput> {
  }
  /// Handle new file creation when `old_string` is empty.
  async fn handle_new_file_creation(
@@ -330,7 +339,7 @@ index d171dd2..dcd35ee 100644
      resources: SharedResources,
      fs: &std::sync::Arc<dyn crate::computer::types::AsyncFileSystem>,
      notification_handle: &ToolNotificationHandle,
-@@ -304,11 +410,11 @@ async fn handle_new_file_creation(
+@@ -326,11 +432,11 @@ async fn handle_new_file_creation(
              old_string_name
          )));
      }
@@ -344,7 +353,7 @@ index d171dd2..dcd35ee 100644
                  let msg = crate::util::format_not_found_error(
                      &display_path,
                      path,
-@@ -320,8 +426,7 @@ async fn handle_new_file_creation(
+@@ -342,8 +448,7 @@ async fn handle_new_file_creation(
                  SearchReplaceOutput::FileNotFound(msg)
              }
              Some(std::io::ErrorKind::AlreadyExists) => SearchReplaceOutput::InvalidInput(format!(
@@ -354,7 +363,7 @@ index d171dd2..dcd35ee 100644
              )),
              Some(std::io::ErrorKind::InvalidFilename) => {
                  SearchReplaceOutput::FilenameTooLong(format!(
-@@ -330,8 +435,7 @@ async fn handle_new_file_creation(
+@@ -352,8 +457,7 @@ async fn handle_new_file_creation(
                  ))
              }
              _ => SearchReplaceOutput::InvalidInput(format!(
@@ -364,7 +373,7 @@ index d171dd2..dcd35ee 100644
              )),
          });
      }
-@@ -342,7 +446,7 @@ async fn handle_new_file_creation(
+@@ -364,7 +468,7 @@ async fn handle_new_file_creation(
          notification_handle.send_file_written(FileWritten {
              tool_call_id: tool_call_id.to_string(),
              absolute_path: path.to_path_buf(),
@@ -373,7 +382,7 @@ index d171dd2..dcd35ee 100644
              previous_content: Some(old_text.clone()),
              is_new_file: false,
          });
-@@ -350,20 +454,17 @@ async fn handle_new_file_creation(
+@@ -372,20 +476,17 @@ async fn handle_new_file_creation(
          notification_handle.send_file_written(FileWritten {
              tool_call_id: tool_call_id.to_string(),
              absolute_path: path.to_path_buf(),
@@ -399,7 +408,7 @@ index d171dd2..dcd35ee 100644
          new_line: 1,
          context_before: String::new(),
          context_after: String::new(),
-@@ -371,8 +472,8 @@ async fn handle_new_file_creation(
+@@ -393,8 +494,8 @@ async fn handle_new_file_creation(
      }];
      Ok(SearchReplaceOutput::EditsApplied(
          SearchReplaceEditsApplied {
@@ -410,7 +419,7 @@ index d171dd2..dcd35ee 100644
              tool_output_for_prompt,
              tool_output_for_prompt_concise: Some(tool_output_for_prompt_concise),
              absolute_path: path.to_path_buf(),
-@@ -497,9 +598,274 @@ fn build_confusable_hint(
+@@ -519,9 +620,274 @@ fn build_confusable_hint(
          line_summary, read_qualifier, old_string_param, terminal_fallback
      ))
  }
@@ -686,7 +695,7 @@ index d171dd2..dcd35ee 100644
      resources: SharedResources,
      fs: &std::sync::Arc<dyn crate::computer::types::AsyncFileSystem>,
      notification_handle: &ToolNotificationHandle,
-@@ -517,7 +883,7 @@ async fn handle_replacement(
+@@ -539,7 +905,7 @@ async fn handle_replacement(
              let output = match e.io_error_kind() {
                  Some(std::io::ErrorKind::NotFound) => {
                      let display_dcwd = display_cwd_or_cwd(cwd, display_cwd);
@@ -695,7 +704,7 @@ index d171dd2..dcd35ee 100644
                      let msg = crate::util::format_not_found_error(
                          &display_path,
                          path,
-@@ -529,7 +895,7 @@ async fn handle_replacement(
+@@ -551,7 +917,7 @@ async fn handle_replacement(
                      SearchReplaceOutput::FileNotFound(msg)
                  }
                  Some(std::io::ErrorKind::IsADirectory) => SearchReplaceOutput::InvalidInput(
@@ -704,7 +713,7 @@ index d171dd2..dcd35ee 100644
                  ),
                  Some(std::io::ErrorKind::InvalidFilename) => {
                      SearchReplaceOutput::FilenameTooLong(format!(
-@@ -538,7 +904,7 @@ async fn handle_replacement(
+@@ -560,7 +926,7 @@ async fn handle_replacement(
                      ))
                  }
                  Some(std::io::ErrorKind::PermissionDenied) => SearchReplaceOutput::InvalidInput(
@@ -713,7 +722,7 @@ index d171dd2..dcd35ee 100644
                  ),
                  _ => {
                      return Err(xai_tool_runtime::ToolError::execution(
-@@ -558,7 +924,7 @@ async fn handle_replacement(
+@@ -580,7 +946,7 @@ async fn handle_replacement(
          std::borrow::Cow::Borrowed(&old_text)
      };
      let mut positions: Vec<usize> = match_text
@@ -722,7 +731,7 @@ index d171dd2..dcd35ee 100644
          .map(|(index, _)| index)
          .collect();
      let mut used_normalized_fallback = false;
-@@ -569,9 +935,9 @@ async fn handle_replacement(
+@@ -591,9 +957,9 @@ async fn handle_replacement(
                  .is_some_and(|p| p.0.unicode_normalized_fallback)
          };
          if fallback_enabled {
@@ -734,7 +743,7 @@ index d171dd2..dcd35ee 100644
                          let replace_all_name =
                              TemplateRenderer::resolve(&resources, "${{ params.edit.replace_all }}")
                                  .await?;
-@@ -621,14 +987,14 @@ async fn handle_replacement(
+@@ -643,14 +1009,14 @@ async fn handle_replacement(
          let hint = if is_legacy {
              String::new()
          } else {
@@ -751,7 +760,7 @@ index d171dd2..dcd35ee 100644
                  crate::util::query_tools::QueryTools::detect(),
                  &read_name,
                  &old_string_param,
-@@ -652,7 +1018,7 @@ async fn handle_replacement(
+@@ -674,7 +1040,7 @@ async fn handle_replacement(
              },
          ));
      }
@@ -760,7 +769,7 @@ index d171dd2..dcd35ee 100644
          let replace_all_name =
              TemplateRenderer::resolve(&resources, "${{ params.edit.replace_all }}").await?;
          return Ok(SearchReplaceOutput::MultipleMatchesFound(format!(
-@@ -662,7 +1028,7 @@ async fn handle_replacement(
+@@ -684,7 +1050,7 @@ async fn handle_replacement(
      }
      let (new_text, new_positions) = if used_normalized_fallback {
          let normalized_matches =
@@ -769,7 +778,7 @@ index d171dd2..dcd35ee 100644
                  NormalizedMatchResult::Matches(m) => m,
                  _ => {
                      return Ok(SearchReplaceOutput::NoMatchesFound(
-@@ -676,14 +1042,9 @@ async fn handle_replacement(
+@@ -698,14 +1064,9 @@ async fn handle_replacement(
                      ));
                  }
              };
@@ -786,7 +795,7 @@ index d171dd2..dcd35ee 100644
      };
      let write_text = if has_crlf {
          new_text.replace("\r\n", "\n").replace('\n', "\r\n")
-@@ -694,7 +1055,7 @@ async fn handle_replacement(
+@@ -716,7 +1077,7 @@ async fn handle_replacement(
          return Ok(match e.io_error_kind() {
              Some(std::io::ErrorKind::AlreadyExists) => SearchReplaceOutput::InvalidInput(format!(
                  "Error: cannot write {}. A component of the path already exists as a file where a directory is expected.",
@@ -795,7 +804,7 @@ index d171dd2..dcd35ee 100644
              )),
              Some(std::io::ErrorKind::InvalidFilename) => {
                  SearchReplaceOutput::FilenameTooLong(format!(
-@@ -703,7 +1064,7 @@ async fn handle_replacement(
+@@ -725,7 +1086,7 @@ async fn handle_replacement(
              }
              _ => SearchReplaceOutput::InvalidInput(format!(
                  "Error: failed to write {}: {e}",
@@ -804,7 +813,7 @@ index d171dd2..dcd35ee 100644
              )),
          });
      }
-@@ -716,33 +1077,30 @@ async fn handle_replacement(
+@@ -738,33 +1099,30 @@ async fn handle_replacement(
      });
      let edits = build_edit_details(
          &new_text,
@@ -846,7 +855,7 @@ index d171dd2..dcd35ee 100644
              tool_output_for_prompt,
              tool_output_for_prompt_concise: Some(tool_output_for_prompt_concise),
              absolute_path: path.to_path_buf(),
-@@ -785,6 +1143,7 @@ impl crate::types::tool_metadata::ToolMetadata for SearchReplaceTool {
+@@ -846,6 +1204,7 @@ impl crate::types::tool_metadata::ToolMetadata for SearchReplaceTool {
              Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "old_string")),
              Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "new_string")),
              Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "replace_all")),
@@ -854,7 +863,7 @@ index d171dd2..dcd35ee 100644
          ])
      }
  }
-@@ -813,7 +1172,11 @@ impl xai_tool_runtime::Tool for SearchReplaceTool {
+@@ -874,7 +1233,11 @@ impl xai_tool_runtime::Tool for SearchReplaceTool {
      #[tracing::instrument(
          name = "tool.search_replace",
          skip_all,
@@ -867,7 +876,7 @@ index d171dd2..dcd35ee 100644
      )]
      async fn run(
          &self,
-@@ -825,8 +1188,9 @@ impl xai_tool_runtime::Tool for SearchReplaceTool {
+@@ -886,8 +1249,9 @@ impl xai_tool_runtime::Tool for SearchReplaceTool {
          let bv = crate::types::tool_metadata::behavior_version(&ctx);
          let is_legacy = SearchReplaceVersion::from_contract(bv.as_deref()).is_legacy();
          let file_path = input.file_path.clone();
@@ -878,7 +887,7 @@ index d171dd2..dcd35ee 100644
              versions::legacy_0_4_10::downgrade_structured_errors(result, &resources, &file_path)
                  .await
          } else {
-@@ -864,6 +1228,23 @@ mod tests {
+@@ -925,6 +1289,23 @@ mod tests {
      fn make_input(file_path: &str, old_string: &str, new_string: &str) -> SearchReplaceInput {
          SearchReplaceInput {
              file_path: file_path.to_string(),
@@ -902,7 +911,7 @@ index d171dd2..dcd35ee 100644
              old_string: old_string.to_string(),
              new_string: new_string.to_string(),
              replace_all: false,
-@@ -890,6 +1271,209 @@ mod tests {
+@@ -1039,6 +1420,209 @@ mod tests {
              other => panic!("Expected EditsApplied, got {:?}", other),
          }
      }
@@ -1112,7 +1121,7 @@ index d171dd2..dcd35ee 100644
      #[tokio::test]
      async fn new_file_creation() {
          let tmp = TempDir::new().unwrap();
-@@ -1112,9 +1696,10 @@ mod tests {
+@@ -1261,9 +1845,10 @@ mod tests {
          }));
          let input = SearchReplaceInput {
              file_path: "test.txt".to_string(),
@@ -1125,7 +1134,7 @@ index d171dd2..dcd35ee 100644
          };
          let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
              .await
-@@ -2444,9 +3029,10 @@ neutTest_set);
+@@ -2616,9 +3201,10 @@ neutTest_set);
          }));
          let input = SearchReplaceInput {
              file_path: "test.txt".to_string(),
@@ -1139,7 +1148,7 @@ index d171dd2..dcd35ee 100644
          let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
              .await
 diff --git a/crates/codegen/xai-grok-tools/src/implementations/grok_build_concise/search_replace.rs b/crates/codegen/xai-grok-tools/src/implementations/grok_build_concise/search_replace.rs
-index fac8b9d..56d8276 100644
+index 396e394..0bd72b9 100644
 --- a/crates/codegen/xai-grok-tools/src/implementations/grok_build_concise/search_replace.rs
 +++ b/crates/codegen/xai-grok-tools/src/implementations/grok_build_concise/search_replace.rs
 @@ -3,11 +3,13 @@
@@ -1277,5 +1286,5 @@ index cfda896..1401395 100644
          let access = AccessKind::from(&input);
          assert!(
 -- 
-2.52.0.windows.1
+2.47.3
 

@@ -1,4 +1,4 @@
-From d560c3574e61791b802ff153e674d390e878b5cf Mon Sep 17 00:00:00 2001
+From 3e52abbc81089e5659fad06fe49e25de37b5cc92 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 22:17:03 +0800
 Subject: [PATCH 16/16] Gate native reasoning replay by route, API, and model
@@ -348,10 +348,10 @@ index 6218f81..752985b 100644
                  model_fingerprint,
                  // Chat Completions does not echo the applied reasoning effort.
 diff --git a/crates/codegen/xai-grok-sampler/src/stream/messages.rs b/crates/codegen/xai-grok-sampler/src/stream/messages.rs
-index 75e9ef7..eb730a4 100644
+index 6f73ff1..c500e8a 100644
 --- a/crates/codegen/xai-grok-sampler/src/stream/messages.rs
 +++ b/crates/codegen/xai-grok-sampler/src/stream/messages.rs
-@@ -491,6 +491,7 @@ pub fn stream_messages<'a>(
+@@ -487,6 +487,7 @@ pub fn stream_messages<'a>(
          let assistant_item = ConversationItem::Assistant(AssistantItem {
              content: std::sync::Arc::<str>::from(assistant_text),
              tool_calls: assistant_tool_calls,
@@ -360,7 +360,7 @@ index 75e9ef7..eb730a4 100644
              model_fingerprint: None,
              // The Messages API does not echo the applied reasoning effort.
 diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
-index bcfa979..b4b240f 100644
+index 48efe4c..168ffa3 100644
 --- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
 +++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
 @@ -249,6 +249,10 @@ pub struct AssistantItem {
@@ -600,15 +600,15 @@ index bcfa979..b4b240f 100644
  /// Walk a serialized Responses API request body and inject the
  /// `type: "reasoning_text"` discriminator that the API requires on
  /// `reasoning.content[*]` items.
-@@ -3128,6 +3275,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
-         ToolResultContent,
+@@ -3193,6 +3340,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+         OutputConfig, SystemParam, TextBlock, ToolChoiceParam, ToolParam, ToolResultContent,
      };
  
 +    let sanitized_items = sanitize_reasoning_for_origin(&req.items, req.reasoning_origin.as_ref());
      let mut system_blocks: Vec<TextBlock> = Vec::new();
      let mut messages: Vec<Message> = Vec::new();
      let mut pending_assistant: Vec<ContentBlock> = Vec::new();
-@@ -3219,8 +3367,10 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+@@ -3286,8 +3434,10 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
          }
      };
  
@@ -621,7 +621,7 @@ index bcfa979..b4b240f 100644
          match item {
              ConversationItem::System(s) => {
                  flush_assistant(&mut pending_assistant, &mut messages);
-@@ -3471,6 +3621,7 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
+@@ -3539,6 +3689,7 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
          ConversationItem::Assistant(AssistantItem {
              content: Arc::<str>::from(content),
              tool_calls,
@@ -629,7 +629,7 @@ index bcfa979..b4b240f 100644
              model_id: Some(resp.model),
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -3606,6 +3757,34 @@ mod tests {
+@@ -3674,6 +3825,34 @@ mod tests {
      use crate::tool_overrides::*;
      use assert_matches::assert_matches;
  
@@ -664,7 +664,7 @@ index bcfa979..b4b240f 100644
      #[test]
      fn prior_turn_interrupt_serde_round_trip_and_unknown_fallback() {
          for (variant, wire) in [
-@@ -4422,6 +4601,7 @@ mod tests {
+@@ -4490,6 +4669,7 @@ mod tests {
                  name: "read_file".to_string(),
                  arguments: r#"{"path": "/test.txt"}"#.into(),
              }],
@@ -672,7 +672,7 @@ index bcfa979..b4b240f 100644
              model_id: Some("grok-3".to_string()),
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -4877,6 +5057,7 @@ mod tests {
+@@ -4945,6 +5125,7 @@ mod tests {
          let assistant_item = ConversationItem::Assistant(AssistantItem {
              content: "The answer is 42.".into(),
              tool_calls: vec![],
@@ -680,7 +680,7 @@ index bcfa979..b4b240f 100644
              model_id: Some("grok-3".to_string()),
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -4909,6 +5090,7 @@ mod tests {
+@@ -4977,6 +5158,7 @@ mod tests {
              ConversationItem::Assistant(AssistantItem {
                  content: "The answer is 4.".into(),
                  tool_calls: vec![],
@@ -688,7 +688,7 @@ index bcfa979..b4b240f 100644
                  model_id: Some("grok-3".to_string()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -4969,6 +5151,7 @@ mod tests {
+@@ -5037,6 +5219,7 @@ mod tests {
              ConversationItem::Assistant(AssistantItem {
                  content: "Hi!".into(),
                  tool_calls: vec![],
@@ -696,7 +696,7 @@ index bcfa979..b4b240f 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -5610,6 +5793,7 @@ mod tests {
+@@ -5848,6 +6031,7 @@ mod tests {
          let with_reasoning = ConversationItem::Assistant(AssistantItem {
              content: "Here is the answer.".into(),
              tool_calls: vec![],
@@ -704,7 +704,7 @@ index bcfa979..b4b240f 100644
              model_id: Some("messages-compatible-model".into()),
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -5806,6 +5990,7 @@ mod tests {
+@@ -6044,6 +6228,7 @@ mod tests {
              ConversationItem::Assistant(AssistantItem {
                  content: "I'll look at the code.".into(),
                  tool_calls: vec![],
@@ -712,7 +712,7 @@ index bcfa979..b4b240f 100644
                  model_id: Some("messages-compatible-model".into()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -5818,6 +6003,7 @@ mod tests {
+@@ -6056,6 +6241,7 @@ mod tests {
                      name: "read_file".to_string(),
                      arguments: r#"{"path":"src/main.rs"}"#.into(),
                  }],
@@ -720,7 +720,7 @@ index bcfa979..b4b240f 100644
                  model_id: Some("messages-compatible-model".into()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -5826,6 +6012,7 @@ mod tests {
+@@ -6064,6 +6250,7 @@ mod tests {
              ConversationItem::Assistant(AssistantItem {
                  content: "I see the issue.".into(),
                  tool_calls: vec![],
@@ -728,7 +728,7 @@ index bcfa979..b4b240f 100644
                  model_id: Some("messages-compatible-model".into()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -5838,6 +6025,7 @@ mod tests {
+@@ -6076,6 +6263,7 @@ mod tests {
                      name: "search_replace".to_string(),
                      arguments: "{}".into(),
                  }],
@@ -736,7 +736,7 @@ index bcfa979..b4b240f 100644
                  model_id: Some("messages-compatible-model".into()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -6573,6 +6761,7 @@ mod tests {
+@@ -6811,6 +6999,7 @@ mod tests {
                      ).into(),
                  },
              ],
@@ -744,7 +744,7 @@ index bcfa979..b4b240f 100644
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -6639,6 +6828,7 @@ mod tests {
+@@ -6877,6 +7066,7 @@ mod tests {
              ConversationItem::Assistant(AssistantItem {
                  content: format!("I edited {worktree}/src/main.rs").into(),
                  tool_calls: vec![],
@@ -752,7 +752,7 @@ index bcfa979..b4b240f 100644
                  model_id: Some("grok-3".to_string()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -6696,6 +6886,7 @@ mod tests {
+@@ -6934,6 +7124,7 @@ mod tests {
                          r#"{{"file_path":"{worktree}/src/main.rs","old_string":"fn main() {{}}","new_string":"fn main() {{\n    println!(\"Hello\");\n}}"}}"#
                      ).into(),
                  }],
@@ -760,7 +760,7 @@ index bcfa979..b4b240f 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -6747,6 +6938,7 @@ mod tests {
+@@ -6985,6 +7176,7 @@ mod tests {
                      name: "read_file".to_string(),
                      arguments: format!(r#"{{"target_file":"{root}/src/main.rs"}}"#).into(),
                  }],
@@ -768,7 +768,7 @@ index bcfa979..b4b240f 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -6855,6 +7047,7 @@ mod tests {
+@@ -7093,6 +7285,7 @@ mod tests {
                  name: "run_terminal_cmd".to_string(),
                  arguments: r#"{"command":"echo hello"}"#.into(),
              }],
@@ -776,7 +776,7 @@ index bcfa979..b4b240f 100644
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -6970,6 +7163,7 @@ mod tests {
+@@ -7208,6 +7401,7 @@ mod tests {
              items: vec![ConversationItem::Assistant(AssistantItem {
                  content: String::new().into(),
                  tool_calls: vec![],
@@ -784,7 +784,7 @@ index bcfa979..b4b240f 100644
                  model_id: Some("test-model".to_string()),
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -6991,6 +7185,7 @@ mod tests {
+@@ -7229,6 +7423,7 @@ mod tests {
              items: vec![ConversationItem::Assistant(AssistantItem {
                  content: "Here is my answer.".into(),
                  tool_calls: vec![],
@@ -792,7 +792,7 @@ index bcfa979..b4b240f 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -7016,6 +7211,7 @@ mod tests {
+@@ -7254,6 +7449,7 @@ mod tests {
                      name: "read_file".to_string(),
                      arguments: "{}".into(),
                  }],
@@ -800,7 +800,7 @@ index bcfa979..b4b240f 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -7213,6 +7409,7 @@ mod tests {
+@@ -7451,6 +7647,7 @@ mod tests {
          let item = AssistantItem {
              content: "Hello".into(),
              tool_calls: vec![],
@@ -808,7 +808,7 @@ index bcfa979..b4b240f 100644
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -7302,6 +7499,7 @@ mod tests {
+@@ -7540,6 +7737,7 @@ mod tests {
                      arguments: "{}".into(),
                  })
                  .collect(),
@@ -816,7 +816,7 @@ index bcfa979..b4b240f 100644
              model_id: None,
              model_fingerprint: None,
              reasoning_effort: None,
-@@ -8004,6 +8202,7 @@ mod tests {
+@@ -8242,6 +8440,7 @@ mod tests {
                      name: "read_file".to_string(),
                      arguments: "{}".into(),
                  }],
@@ -824,7 +824,7 @@ index bcfa979..b4b240f 100644
                  model_id: None,
                  model_fingerprint: None,
                  reasoning_effort: None,
-@@ -8538,6 +8737,7 @@ mod tests {
+@@ -8776,6 +8975,7 @@ mod tests {
                  ConversationItem::Assistant(AssistantItem {
                      content: String::new().into(),
                      tool_calls: Vec::new(),
@@ -832,7 +832,7 @@ index bcfa979..b4b240f 100644
                      model_id: None,
                      model_fingerprint: None,
                      reasoning_effort: None,
-@@ -9371,6 +9571,42 @@ mod tests {
+@@ -9609,6 +9809,42 @@ mod tests {
          })
      }
  
@@ -875,7 +875,7 @@ index bcfa979..b4b240f 100644
      /// Helper: serialise the wire `input` array to a Vec of JSON values.
      fn input_items_json(req: &ConversationRequest) -> Vec<serde_json::Value> {
          let cr: rs::CreateResponse = req.into();
-@@ -9556,6 +9792,358 @@ mod tests {
+@@ -9794,6 +10030,358 @@ mod tests {
          assert_eq!(enc_seen, vec!["enc1", "enc2", "enc3"]);
      }
  
@@ -1234,7 +1234,7 @@ index bcfa979..b4b240f 100644
      /// INVARIANT: prefix stability across turns without reasoning.
      /// Context and instructions must be prefixed once and consistently
      /// across requests.
-@@ -9771,6 +10359,7 @@ mod tests {
+@@ -10009,6 +10597,7 @@ mod tests {
                      name: "read_file".to_string(),
                      arguments: Arc::<str>::from("{}"),
                  }],
@@ -1693,10 +1693,10 @@ index 96d1cbb..a18c8fc 100644
      assert_eq!(
              items.len(),
 diff --git a/crates/codegen/xai-grok-shell/src/session/storage/mod.rs b/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
-index 8988807..7474736 100644
+index b742a7a..1b22687 100644
 --- a/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/storage/mod.rs
-@@ -403,6 +403,7 @@ pub(crate) mod chat_rebuild {
+@@ -404,6 +404,7 @@ pub(crate) mod chat_rebuild {
              let item = ConversationItem::Assistant(AssistantItem {
                  content: std::sync::Arc::<str>::from(std::mem::take(&mut self.agent_text)),
                  tool_calls: std::mem::take(&mut self.agent_tool_calls),
@@ -1733,5 +1733,5 @@ index f033269..1860bf5 100644
                  model_fingerprint: None,
                  reasoning_effort: None,
 -- 
-2.52.0.windows.1
+2.47.3
 

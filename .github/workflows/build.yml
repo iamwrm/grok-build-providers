@@ -1,0 +1,81 @@
+# Compile the complete patched grok-build stack on the three desktop OSes.
+# Unlike release.yml, this workflow runs for ordinary branch pushes and pull
+# requests. It verifies native compilation only: it does not package, upload,
+# or publish binaries.
+
+name: build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Keep synchronized with release.yml and the exported patch baseline.
+  GROK_BUILD_BASE: 500129c714ad1b10e6095481f4a8387a2ec52649
+  CARGO_INCREMENTAL: "0"
+  # CI does not retain these development binaries, so omit debug information
+  # to reduce linker memory, build time, and runner disk use.
+  CARGO_PROFILE_DEV_DEBUG: "false"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: compile (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: Linux
+            runner: ubuntu-latest
+          - os: macOS
+            runner: macos-latest
+          - os: Windows
+            runner: windows-latest
+    steps:
+      - name: Checkout patches repo
+        uses: actions/checkout@v4
+
+      - name: Checkout upstream grok-build at pinned base
+        uses: actions/checkout@v4
+        with:
+          repository: xai-org/grok-build
+          ref: ${{ env.GROK_BUILD_BASE }}
+          path: checkouts/grok-build
+
+      - name: Apply patch series
+        shell: bash
+        working-directory: checkouts/grok-build
+        run: |
+          git config user.name "grok-build-providers-ci"
+          git config user.email "ci@invalid"
+          git am ../../patches/grok-build/*.patch
+          git log --oneline "${GROK_BUILD_BASE:0:12}..HEAD"
+
+      # aws-lc-sys (rustls crypto backend) assembles with NASM on Windows.
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      # xai-grok-tools-api's build.rs needs protoc (upstream pins v29.3 via
+      # a dotslash wrapper that is not available on Actions runners).
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compile pager binary
+        shell: bash
+        working-directory: checkouts/grok-build
+        # rustup auto-installs the toolchain pinned in rust-toolchain.toml.
+        run: cargo build -p xai-grok-pager-bin --locked

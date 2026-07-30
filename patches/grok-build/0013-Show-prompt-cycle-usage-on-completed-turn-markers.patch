@@ -1,4 +1,4 @@
-From d930b7a6aa504c6006ab3fdf7c980f0a7505b003 Mon Sep 17 00:00:00 2001
+From 1a6ebb0bbd9ff9de01f934e5cf60f042987daac4 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
 Subject: [PATCH 13/16] Show prompt-cycle usage on completed-turn markers
@@ -109,7 +109,7 @@ index abfefae..7290c31 100644
                  false
              }
 diff --git a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/mod.rs b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/mod.rs
-index 7cb9f7f..47b767d 100644
+index e5eb6a1..0c56b85 100644
 --- a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/mod.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/mod.rs
 @@ -925,6 +925,7 @@ pub(super) fn prompt_complete_ext_with_prompt_id(
@@ -121,10 +121,10 @@ index 7cb9f7f..47b767d 100644
                  meta: None,
              },
 diff --git a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/queue_and_adoption.rs b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/queue_and_adoption.rs
-index 96f91c4..0946ea9 100644
+index dfa21eb..473a316 100644
 --- a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/queue_and_adoption.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/queue_and_adoption.rs
-@@ -2355,6 +2355,7 @@
+@@ -2360,6 +2360,7 @@
          match last_session_event(&agent.scrollback) {
              Some(SessionEvent::TurnCompleted {
                  elapsed: Some(elapsed),
@@ -133,7 +133,7 @@ index 96f91c4..0946ea9 100644
                  elapsed.as_secs() >= 4,
                  "completion marker must reflect the back-dated start, got {elapsed:?}"
 diff --git a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/turn_completion.rs b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/turn_completion.rs
-index f5fa74d..c6663fe 100644
+index 2bbe3ec..05ab8a3 100644
 --- a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/turn_completion.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/turn_completion.rs
 @@ -541,7 +541,10 @@
@@ -147,12 +147,12 @@ index f5fa74d..c6663fe 100644
 +            })
          ));
      }
-
+ 
 diff --git a/crates/codegen/xai-grok-pager/src/app/agent_view/mod.rs b/crates/codegen/xai-grok-pager/src/app/agent_view/mod.rs
-index 93c14f3..798a86d 100644
+index 5307c3a..05380cc 100644
 --- a/crates/codegen/xai-grok-pager/src/app/agent_view/mod.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/agent_view/mod.rs
-@@ -573,6 +573,9 @@ pub(crate) struct PendingTurnEnd {
+@@ -576,6 +576,9 @@ pub(crate) struct PendingTurnEnd {
      /// cancel-and-send whose "Turn cancelled" marker is suppressed). `None`
      /// on older shells / non-cancel ends.
      pub cancel_trigger: Option<String>,
@@ -162,7 +162,7 @@ index 93c14f3..798a86d 100644
      /// When the broadcast arrived; the reconcile fires after
      /// [`super::dispatch::TURN_END_RECONCILE_GRACE`].
      pub received_at: std::time::Instant,
-@@ -917,6 +920,9 @@ pub struct AgentView {
+@@ -920,6 +923,9 @@ pub struct AgentView {
      /// Set by `maybe_drain_queue` when a prompt is sent. Used to compute
      /// elapsed time for "Worked for Xm Ys" system messages.
      pub turn_started_at: Option<Instant>,
@@ -173,7 +173,7 @@ index 93c14f3..798a86d 100644
      pub first_activity_logged_for: Option<Instant>,
      /// Accumulated duration the turn timer was paused (while the user was
 diff --git a/crates/codegen/xai-grok-pager/src/app/agent_view/session.rs b/crates/codegen/xai-grok-pager/src/app/agent_view/session.rs
-index f21d3f6..9d0610f 100644
+index 011573b..f246ab2 100644
 --- a/crates/codegen/xai-grok-pager/src/app/agent_view/session.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/agent_view/session.rs
 @@ -132,6 +132,7 @@ impl AgentView {
@@ -184,7 +184,7 @@ index f21d3f6..9d0610f 100644
              first_activity_logged_for: None,
              turn_paused_duration: std::time::Duration::ZERO,
              self_interjection_ids: std::collections::HashSet::new(),
-@@ -356,6 +357,7 @@ impl AgentView {
+@@ -357,6 +358,7 @@ impl AgentView {
      /// across `dispatch.rs` and `event_loop.rs`.
      pub fn mark_turn_finished(&mut self) {
          self.turn_started_at = None;
@@ -192,7 +192,7 @@ index f21d3f6..9d0610f 100644
          self.turn_paused_duration = std::time::Duration::ZERO;
          self.last_active_at = Some(Instant::now());
      }
-@@ -462,6 +464,7 @@ impl AgentView {
+@@ -463,6 +465,7 @@ impl AgentView {
          {
              self.expect_send_now_cancel = None;
          }
@@ -201,10 +201,10 @@ index f21d3f6..9d0610f 100644
      }
      /// Adopt the in-flight turn another client is driving, conveyed by the
 diff --git a/crates/codegen/xai-grok-pager/src/app/app_view.rs b/crates/codegen/xai-grok-pager/src/app/app_view.rs
-index aca4db0..9a537e4 100644
+index d532c4c..2fd87ee 100644
 --- a/crates/codegen/xai-grok-pager/src/app/app_view.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/app_view.rs
-@@ -6845,6 +6845,7 @@ pub(crate) mod tests {
+@@ -6896,6 +6896,7 @@ pub(crate) mod tests {
                  stop_reason: Some("end_turn".into()),
                  agent_result: None,
                  cancel_trigger: None,
@@ -213,10 +213,10 @@ index aca4db0..9a537e4 100644
                      - (TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1)),
              });
 diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs
-index 4932364..48a5417 100644
+index 3bd7150..b61e2ce 100644
 --- a/crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs
-@@ -1247,6 +1247,19 @@ pub(super) fn handle_prompt_response(
+@@ -1253,6 +1253,19 @@ pub(super) fn handle_prompt_response(
                      .err()
                      .is_some_and(|e| e.contains("Unauthorized (401)")));
          let elapsed = agent.turn_elapsed();
@@ -236,7 +236,7 @@ index 4932364..48a5417 100644
  
          {
              let sid = agent.session.session_id.as_ref().map(|s| s.0.as_ref());
-@@ -1322,6 +1335,7 @@ pub(super) fn handle_prompt_response(
+@@ -1328,6 +1341,7 @@ pub(super) fn handle_prompt_response(
                  // Legacy copy on purpose: unknown elapsed keeps the "in 0.0s"
                  // form here — only wake markers use the honest `None` form.
                  elapsed: Some(elapsed.unwrap_or_default()),
@@ -257,10 +257,10 @@ index bf0bc9b..26e699c 100644
          ));
          agent
 diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/tests/mod.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/tests/mod.rs
-index 5131813..d452ca3 100644
+index d49ac34..11c0db4 100644
 --- a/crates/codegen/xai-grok-pager/src/app/dispatch/tests/mod.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/dispatch/tests/mod.rs
-@@ -479,6 +479,7 @@ fn arm_reconcile_with_trigger(
+@@ -482,6 +482,7 @@ fn arm_reconcile_with_trigger(
              stop_reason: Some(stop_reason.into()),
              agent_result: None,
              cancel_trigger: cancel_trigger.map(str::to_string),
@@ -294,10 +294,10 @@ index 0e9d135..7c5a5cd 100644
              }
          };
 diff --git a/crates/codegen/xai-grok-pager/src/app/subagent.rs b/crates/codegen/xai-grok-pager/src/app/subagent.rs
-index a5d0f99..1be8a81 100644
+index 8c118e0..4c40c08 100644
 --- a/crates/codegen/xai-grok-pager/src/app/subagent.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/subagent.rs
-@@ -303,6 +303,7 @@ pub(crate) fn finalize_finished_child_view(
+@@ -305,6 +305,7 @@ pub(crate) fn finalize_finished_child_view(
          .push_block(crate::scrollback::block::RenderBlock::session_event(
              crate::scrollback::blocks::SessionEvent::TurnCompleted {
                  elapsed: Some(elapsed),
@@ -1066,10 +1066,10 @@ index 07d1b96..e9e3493 100644
          assert!(settled.event.is_turn_terminal());
          let recap = SessionEventBlock::new(SessionEvent::Recap {
 diff --git a/crates/codegen/xai-grok-pager/src/scrollback/state/mod.rs b/crates/codegen/xai-grok-pager/src/scrollback/state/mod.rs
-index dd019f3..56d0e5d 100644
+index 396d008..4500add 100644
 --- a/crates/codegen/xai-grok-pager/src/scrollback/state/mod.rs
 +++ b/crates/codegen/xai-grok-pager/src/scrollback/state/mod.rs
-@@ -2200,6 +2200,7 @@ mod tests {
+@@ -2247,6 +2247,7 @@ mod tests {
          let mut state = ScrollbackState::new();
          let marker = state.push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
              elapsed: Some(std::time::Duration::from_secs(2)),
@@ -1077,7 +1077,7 @@ index dd019f3..56d0e5d 100644
          }));
          // An unstamped marker can't confirm a stamped batch — refused; an
          // unstamped batch keeps the tail-only heuristic.
-@@ -2246,6 +2247,7 @@ mod tests {
+@@ -2293,6 +2294,7 @@ mod tests {
              SessionEventBlock::with_stop_hooks(
                  SessionEvent::TurnCompleted {
                      elapsed: Some(std::time::Duration::from_secs(2)),
@@ -1085,7 +1085,7 @@ index dd019f3..56d0e5d 100644
                  },
                  Vec::new(),
                  Some("pid-new".into()),
-@@ -2290,6 +2292,7 @@ mod tests {
+@@ -2337,6 +2339,7 @@ mod tests {
              SessionEventBlock::with_stop_hooks(
                  SessionEvent::TurnCompleted {
                      elapsed: Some(std::time::Duration::from_secs(2)),
@@ -1093,7 +1093,7 @@ index dd019f3..56d0e5d 100644
                  },
                  Vec::new(),
                  Some("pid-new".into()),
-@@ -2324,6 +2327,7 @@ mod tests {
+@@ -2371,6 +2374,7 @@ mod tests {
              SessionEventBlock::with_stop_hooks(
                  SessionEvent::TurnCompleted {
                      elapsed: Some(std::time::Duration::from_secs(3)),
@@ -1102,10 +1102,10 @@ index dd019f3..56d0e5d 100644
                  Vec::new(),
                  Some("pid-newer".into()),
 diff --git a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
-index 3de532e..9712a83 100644
+index 2ad8ec6..efd12c3 100644
 --- a/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
 +++ b/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
-@@ -2547,6 +2547,10 @@ impl acp::Agent for MvpAgent {
+@@ -2572,6 +2572,10 @@ impl acp::Agent for MvpAgent {
                      ),
              );
          }
@@ -1116,7 +1116,7 @@ index 3de532e..9712a83 100644
          let cancel_trigger: Option<String> = stop_result
              .as_ref()
              .ok()
-@@ -2579,6 +2583,13 @@ impl acp::Agent for MvpAgent {
+@@ -2604,6 +2608,13 @@ impl acp::Agent for MvpAgent {
              if let Some(tid) = turn_id {
                  payload["turnId"] = serde_json::json!(tid);
              }
@@ -1131,5 +1131,5 @@ index 3de532e..9712a83 100644
                  payload["cancelTrigger"] = serde_json::json!(t);
              }
 -- 
-2.52.0.windows.1
+2.47.3
 

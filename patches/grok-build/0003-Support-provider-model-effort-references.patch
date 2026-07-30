@@ -1,4 +1,4 @@
-From fe1b9c066380630eedf660595e4639ab8995496a Mon Sep 17 00:00:00 2001
+From b5701f3aac47b1638f34d743b15b2b78ebe9e408 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:00 +0800
 Subject: [PATCH 03/16] Support provider/model:effort references
@@ -11,10 +11,10 @@ Parse provider-qualified model references and optional reasoning effort in both 
  3 files changed, 126 insertions(+), 3 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager-bin/src/main.rs b/crates/codegen/xai-grok-pager-bin/src/main.rs
-index 48b3f9b..53f249c 100644
+index 34427f3..a7fdddc 100644
 --- a/crates/codegen/xai-grok-pager-bin/src/main.rs
 +++ b/crates/codegen/xai-grok-pager-bin/src/main.rs
-@@ -1066,10 +1066,15 @@ async fn run_agent_command(
+@@ -1089,10 +1089,15 @@ async fn run_agent_command(
          .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
      let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
          .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
@@ -31,7 +31,7 @@ index 48b3f9b..53f249c 100644
          .and_then(xai_grok_shell::sampling::types::parse_canonical_effort_token);
      let launch_yolo = xai_grok_shell::util::config::effective_yolo_for_launch(
          agent_args.yolo,
-@@ -2027,6 +2032,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
+@@ -2161,6 +2166,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
          {
              args.output_format = xai_grok_pager::headless::OutputFormat::Json;
          }
@@ -42,7 +42,7 @@ index 48b3f9b..53f249c 100644
          return xai_grok_pager::headless::run_single_turn(
              prompt,
              args.verbatim,
-@@ -2039,7 +2048,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
+@@ -2173,7 +2182,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                  trust: args.trust,
                  output_format: args.output_format,
                  json_schema,
@@ -51,7 +51,7 @@ index 48b3f9b..53f249c 100644
                  rules: args.rules,
                  system_prompt_override: args.system_prompt_override.clone(),
                  continue_last_session: args.continue_last_session,
-@@ -2055,7 +2064,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
+@@ -2189,7 +2198,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                  deny_rules: args.deny_rules.clone(),
                  max_turns: args.max_turns,
                  permission_mode_flag: args.permission_mode_flag.clone(),
@@ -211,5 +211,5 @@ index f8ff8c5..dfde3bd 100644
      fn run_rejects_unoffered_effort_with_effort_error_not_unknown_model() {
          // Regression: previously `resolve_effort_token_for` returned None and
 -- 
-2.52.0.windows.1
+2.47.3
 
