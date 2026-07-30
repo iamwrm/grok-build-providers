@@ -199,7 +199,8 @@ grok-build already had a complete Anthropic Messages transport:
 
 - On the current base, `cargo check -p xai-grok-pager-bin --locked` passes.
   The native Windows pager-bin release build remains previous-base evidence
-  until the refreshed cross-platform workflows run.
+  until the refreshed release workflow runs; native Windows development
+  compilation passes in the current build workflow.
 - Unit tests: 3 OAuth-flow tests (paste parsing, authorize URL/PKCE/state,
   expiry window), 2 sampler request-shape tests (identity prepend + cache +
   sampling-param strip; identity-only + idempotency), header-injection test,

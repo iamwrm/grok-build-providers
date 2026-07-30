@@ -158,8 +158,8 @@ pre-flight failures.
 - Current sampling-types and sampler library suites pass 299/299 and 174/174.
   Shell parallel-dispatch tests remain a previous-base checkpoint; the new
   build workflow compiles but does not run test suites. The native Windows
-  release build is also previous-base evidence until the refreshed workflows
-  run.
+  release build is also previous-base evidence until the refreshed release
+  workflow runs; native Windows development compilation passes.
 
 This is an integration checkpoint, not a promise that later revisions will
 retain the same tree hash or counts. The recorded suite does not contain a

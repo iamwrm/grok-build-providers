@@ -259,4 +259,5 @@ all other unknown events remain fail-closed.
 - Current-base verification: sampling-types 299/299, sampler 174/174, and
   focused `search_replace` coverage 116/116 pass. `cargo check -p
   xai-grok-pager-bin --locked`, `git diff --check`, and
-  `cargo fmt --all -- --check` pass; refreshed cross-platform CI is pending.
+  `cargo fmt --all -- --check` pass. Refreshed native Linux, macOS, and Windows
+  build CI passes; five-target release CI remains pending.

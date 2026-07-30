@@ -71,10 +71,10 @@ jobs:
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - name: Checkout patches repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout upstream grok-build at pinned base
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: xai-org/grok-build
           ref: ${{ env.GROK_BUILD_BASE }}
@@ -97,10 +97,9 @@ jobs:
       # xai-grok-tools-api's build.rs needs protoc (upstream pins v29.3 via
       # a dotslash wrapper that isn't available on CI runners).
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: taiki-e/install-action@v2.85.4
         with:
-          version: "29.x"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.29.3
 
       - name: Build release binary
         shell: bash

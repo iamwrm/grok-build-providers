@@ -1,6 +1,6 @@
 # IV-0004: Public repository and cross-platform build/release CI
 
-**Status:** implemented; current base locally verified, refreshed three-OS build CI pending its first run, prior base verified on all five release targets; `v*` tag publication configured but not yet exercised
+**Status:** implemented; current base verified by three-OS build CI, prior base verified on all five release targets; refreshed release CI and `v*` tag publication remain pending
 **Upstream:** `checkouts/grok-build` (patch target for Windows portability)
 **Deliverable:** `.github/workflows/build.yml`, `.github/workflows/release.yml`, and consolidated patches `0009–0010`
 **Upstream base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
@@ -111,8 +111,10 @@ Current `500129c` base:
 - Sampling-types and sampler library suites pass 299/299 and 174/174; focused
   `search_replace` coverage passes 116/116. Additional focused evidence is
   recorded in IV-0002 and IV-0005–IV-0008.
-- The refreshed three-OS build workflow and five-target release workflow have
-  not yet run. Native Windows release success remains previous-base evidence.
+- The refreshed three-OS build workflow passed on Linux, macOS, and Windows:
+  https://github.com/iamwrm/grok-build-providers/actions/runs/30522515636
+- The five-target release workflow has not yet run on this base. Native Windows
+  release success remains previous-base evidence.
 
 Prior-base CI validation:
 

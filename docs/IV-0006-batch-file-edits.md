@@ -149,8 +149,8 @@ empty.
   clean-room pager-bin Cargo check passes.
 - Shell parallel-dispatch tests (13/13) remain a previous-base checkpoint; the
   new build workflow compiles but does not run test suites. The native Windows
-  release build is also previous-base evidence until the refreshed workflows
-  run.
+  release build is also previous-base evidence until the refreshed release
+  workflow runs; native Windows development compilation passes.
 
 This integration checkpoint validates the current Linux build and clean-room
 series but does not replace refreshed cross-platform CI or the historical

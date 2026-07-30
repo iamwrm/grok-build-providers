@@ -1,6 +1,6 @@
 # IV-0008: Safe mid-session model and provider switching
 
-**Status:** implemented in patch `0016` (numbered `0017` before the former sampling-panic fix was folded into patch `0011`); rebased and locally verified, refreshed cross-platform build and release CI pending
+**Status:** implemented in patch `0016` (numbered `0017` before the former sampling-panic fix was folded into patch `0011`); rebased and verified by refreshed three-OS build CI, five-target release CI pending
 
 **Upstream:** `checkouts/grok-build`  
 **Deliverable:** `patches/grok-build/0016-Gate-native-reasoning-replay-by-route-API-and-model.patch`  
@@ -130,7 +130,8 @@ sampling-types (299/299) and sampler (174/174) library suites pass, as does the
 clean-room pager-bin Cargo check. Chat-state (351/351) remains a previous-base
 test checkpoint; the new build workflow compiles but does not run test suites.
 The native Windows pager-bin release build is also previous-base evidence until
-the refreshed workflows run.
+the refreshed release workflow runs; native Windows development compilation
+passes in the current build workflow.
 
 ### Manual cross-provider reproduction
 
