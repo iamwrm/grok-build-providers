@@ -112,7 +112,7 @@ Current `500129c` base:
   `search_replace` coverage passes 116/116. Additional focused evidence is
   recorded in IV-0002 and IV-0005–IV-0008.
 - The refreshed three-OS build workflow passed on Linux, macOS, and Windows:
-  https://github.com/iamwrm/grok-build-providers/actions/runs/30522515636
+  https://github.com/iamwrm/grok-build-providers/actions/runs/30523485961
 - The five-target release workflow has not yet run on this base. Native Windows
   release success remains previous-base evidence.
 
