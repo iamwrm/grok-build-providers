@@ -17,7 +17,8 @@
 - **Known consumers:** Responses, Anthropic Messages, and Chat Completions
   conversion; session JSONL compatibility; every model-switch path; provider
   initiatives [IV-0001](IV-0001-openai-oauth.md) and
-  [IV-0003](IV-0003-anthropic-oauth.md).
+  [IV-0003](IV-0003-anthropic-oauth.md); and opaque checkpoint replay in
+  [IV-0010](IV-0010-openai-server-compaction.md).
 - **Key assumption:** normalized route + API backend + wire model identifies a
   native reasoning trust domain closely enough; mismatches deliberately fail
   closed without mutating saved history.

@@ -1,0 +1,2155 @@
+From e555274de8504dcc22d178bd7f063142582077b6 Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Fri, 31 Jul 2026 13:28:16 +0800
+Subject: [PATCH 17/17] Prefer Responses remote compaction for GPT models
+
+---
+ .../xai-chat-state/src/actor/mutations.rs     |   4 +
+ .../xai-chat-state/src/actor/queries.rs       |   1 +
+ .../codegen/xai-chat-state/src/actor/state.rs |   6 +
+ .../src/compaction_transcript.rs              |   2 +-
+ .../xai-chat-state/src/compaction_utils.rs    |  99 +++-
+ .../codegen/xai-grok-pager/src/acp/tracker.rs |  31 +-
+ .../app/acp_handler/session_notification.rs   |   4 +-
+ .../app/acp_handler/tests/session_events.rs   |  60 +++
+ .../src/app/acp_handler/tests/subagents.rs    |   1 +
+ .../app/acp_handler/tests/turn_completion.rs  |   1 +
+ .../codegen/xai-grok-pager/src/app/agent.rs   |   8 +-
+ .../xai-grok-pager/src/app/dispatch/prompt.rs |  19 +-
+ crates/codegen/xai-grok-pager/src/headless.rs |  19 +-
+ .../src/scrollback/blocks/session_event.rs    |  48 +-
+ .../src/scrollback/state/mod.rs               |   1 +
+ crates/codegen/xai-grok-sampler/src/client.rs | 425 +++++++++++++++++-
+ .../src/conversation.rs                       | 258 ++++++++++-
+ .../xai-grok-sampling-types/src/types.rs      |   6 +
+ .../src/extensions/notification.rs            |  65 +++
+ .../acp_session_impl/laziness_classifier.rs   |   1 +
+ .../xai-grok-shell/src/session/compaction.rs  | 129 +++++-
+ .../src/session/goal_evaluator.rs             |   4 +-
+ .../src/session/helpers/session_compact.rs    |  46 +-
+ .../src/context.rs                            |   7 +-
+ 24 files changed, 1155 insertions(+), 90 deletions(-)
+
+diff --git a/crates/codegen/xai-chat-state/src/actor/mutations.rs b/crates/codegen/xai-chat-state/src/actor/mutations.rs
+index 030ede8..b91be7c 100644
+--- a/crates/codegen/xai-chat-state/src/actor/mutations.rs
++++ b/crates/codegen/xai-chat-state/src/actor/mutations.rs
+@@ -20,6 +20,7 @@ fn item_kind_str(item: &ConversationItem) -> &'static str {
+         ConversationItem::ToolResult(_) => "tool_result",
+         ConversationItem::BackendToolCall(_) => "backend_tool_call",
+         ConversationItem::Reasoning(_) => "reasoning",
++        ConversationItem::ResponsesCompaction(_) => "responses_compaction",
+     }
+ }
+ 
+@@ -333,6 +334,9 @@ impl ChatStateActor {
+                     xai_grok_sampling_types::reasoning_item_text(r).len()
+                         + r.encrypted_content.as_deref().map(str::len).unwrap_or(0)
+                 }
++                ConversationItem::ResponsesCompaction(compaction) => {
++                    compaction.encrypted_content.len()
++                }
+             })
+             .sum()
+     }
+diff --git a/crates/codegen/xai-chat-state/src/actor/queries.rs b/crates/codegen/xai-chat-state/src/actor/queries.rs
+index 92b8125..adaa480 100644
+--- a/crates/codegen/xai-chat-state/src/actor/queries.rs
++++ b/crates/codegen/xai-chat-state/src/actor/queries.rs
+@@ -242,6 +242,7 @@ impl ChatStateActor {
+                 xai_grok_sampling_types::ConversationItem::System(_) => {}
+                 xai_grok_sampling_types::ConversationItem::BackendToolCall(_) => {}
+                 xai_grok_sampling_types::ConversationItem::Reasoning(_) => {}
++                xai_grok_sampling_types::ConversationItem::ResponsesCompaction(_) => {}
+             }
+         }
+         counts
+diff --git a/crates/codegen/xai-chat-state/src/actor/state.rs b/crates/codegen/xai-chat-state/src/actor/state.rs
+index cde5e59..2be7330 100644
+--- a/crates/codegen/xai-chat-state/src/actor/state.rs
++++ b/crates/codegen/xai-chat-state/src/actor/state.rs
+@@ -75,6 +75,12 @@ pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
+             let enc_bytes = r.encrypted_content.as_deref().map(str::len).unwrap_or(0);
+             ((text_bytes + enc_bytes) as u64) / xai_token_estimation::BYTES_PER_TOKEN
+         }
++        ConversationItem::ResponsesCompaction(compaction) => {
++            // The provider expands this opaque checkpoint internally. Its
++            // encrypted byte size is the best local approximation until the
++            // next response reports the live context total.
++            (compaction.encrypted_content.len() as u64) / xai_token_estimation::BYTES_PER_TOKEN
++        }
+     }
+ }
+ 
+diff --git a/crates/codegen/xai-chat-state/src/compaction_transcript.rs b/crates/codegen/xai-chat-state/src/compaction_transcript.rs
+index 0ea271c..3418195 100644
+--- a/crates/codegen/xai-chat-state/src/compaction_transcript.rs
++++ b/crates/codegen/xai-chat-state/src/compaction_transcript.rs
+@@ -68,7 +68,7 @@ fn role_label(item: &ConversationItem) -> &'static str {
+         ConversationItem::Assistant(_) => "Assistant",
+         ConversationItem::ToolResult(_) => "Function",
+         ConversationItem::BackendToolCall(_) => "Assistant",
+-        ConversationItem::Reasoning(_) => "Assistant",
++        ConversationItem::Reasoning(_) | ConversationItem::ResponsesCompaction(_) => "Assistant",
+     }
+ }
+ 
+diff --git a/crates/codegen/xai-chat-state/src/compaction_utils.rs b/crates/codegen/xai-chat-state/src/compaction_utils.rs
+index 3fcefb9..fa8358e 100644
+--- a/crates/codegen/xai-chat-state/src/compaction_utils.rs
++++ b/crates/codegen/xai-chat-state/src/compaction_utils.rs
+@@ -90,11 +90,16 @@ pub fn prepare_conversation_for_summarization(
+         strip_tool_messages_for_conversation_item(conversation),
+     ))
+ }
+-/// Segment-store prep (`segments` mode): keep tool I/O verbatim, strip only images + reasoning.
++/// Segment-store prep (`segments` mode): keep tool I/O verbatim, but strip
++/// images and provider-native opaque items that have no portable transcript.
+ pub fn prepare_conversation_for_segment(
+     conversation: Vec<ConversationItem>,
+ ) -> Vec<ConversationItem> {
+-    strip_images(strip_reasoning_blocks(conversation))
++    let conversation = strip_reasoning_blocks(conversation)
++        .into_iter()
++        .filter(|item| !matches!(item, ConversationItem::ResponsesCompaction(_)))
++        .collect();
++    strip_images(conversation)
+ }
+ /// Drop a trailing assistant turn whose `tool_calls` lack a `ToolResult` (else strict backends reject the dangling `tool_use`).
+ pub fn truncate_trailing_incomplete_tool_call(
+@@ -846,6 +851,26 @@ pub fn build_compacted_history(input: CompactedHistoryInput<'_>) -> Vec<Conversa
+         }
+         ConversationItem::user_meta(formatted_summary)
+     });
++    build_compacted_history_with_item_inner(input, summary_item, summary_first, true)
++}
++
++/// Build the normal post-compaction scaffold around a provider-native opaque
++/// checkpoint instead of a portable text summary. Remote compaction v2 uses
++/// the regular Grok prefix, retained real-user query, and state reminder while
++/// keeping the checkpoint as the final pre-reminder context item.
++pub fn build_compacted_history_with_item(
++    input: CompactedHistoryInput<'_>,
++    summary_item: ConversationItem,
++) -> Vec<ConversationItem> {
++    build_compacted_history_with_item_inner(input, summary_item, false, false)
++}
++
++fn build_compacted_history_with_item_inner(
++    input: CompactedHistoryInput<'_>,
++    summary_item: ConversationItem,
++    summary_first: bool,
++    include_recent_messages: bool,
++) -> Vec<ConversationItem> {
+     let mut compacted: Vec<ConversationItem> = vec![
+         input.system_message,
+         ConversationItem::user_meta(input.user_message_prefix),
+@@ -866,12 +891,12 @@ pub fn build_compacted_history(input: CompactedHistoryInput<'_>) -> Vec<Conversa
+     }
+     if summary_first {
+         compacted.push(summary_item);
+-        for msg in input.state_context.recent_messages.iter().cloned() {
+-            compacted.push(msg);
++        if include_recent_messages {
++            compacted.extend(input.state_context.recent_messages.iter().cloned());
+         }
+     } else {
+-        for msg in input.state_context.recent_messages.iter().cloned() {
+-            compacted.push(msg);
++        if include_recent_messages {
++            compacted.extend(input.state_context.recent_messages.iter().cloned());
+         }
+         compacted.push(summary_item);
+     }
+@@ -2580,6 +2605,55 @@ actual user question";
+         }
+     }
+     #[tokio::test]
++    async fn build_compacted_history_with_remote_item_keeps_user_context_before_checkpoint() {
++        let conversation = vec![
++            ConversationItem::system("sys"),
++            ConversationItem::user("<user_query>\nremember this\n</user_query>"),
++            ConversationItem::assistant("working"),
++        ];
++        let state_context =
++            CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
++        let checkpoint = ConversationItem::ResponsesCompaction(
++            xai_grok_sampling_types::ResponsesCompactionItem {
++                id: Some("cmp_1".to_owned()),
++                encrypted_content: "sealed".to_owned(),
++                internal_chat_message_metadata_passthrough: None,
++                origin: None,
++            },
++        );
++        let compacted = build_compacted_history_with_item(
++            CompactedHistoryInput {
++                system_message: ConversationItem::system("sys"),
++                user_message_prefix: "prefix".to_owned(),
++                agents_md_reminder: None,
++                state_context: &state_context,
++                compaction_summary: String::new(),
++                system_reminder: Some("state reminder".to_owned()),
++                summary_before_recent: false,
++                transcript_hint: None,
++                summary_count: 1,
++            },
++            checkpoint,
++        );
++
++        assert_eq!(
++            compacted[2].text_content(),
++            "<user_query>\nremember this\n</user_query>"
++        );
++        assert!(matches!(
++            &compacted[3],
++            ConversationItem::ResponsesCompaction(item)
++                if item.encrypted_content == "sealed"
++        ));
++        assert_eq!(compacted[4].text_content(), "state reminder");
++        assert!(
++            compacted
++                .iter()
++                .all(|item| item.text_content() != "working"),
++            "assistant/tool tail is represented by the opaque checkpoint, not duplicated"
++        );
++    }
++    #[tokio::test]
+     async fn build_compacted_history_minimal_no_reminder() {
+         let conversation = vec![
+             ConversationItem::system("sys"),
+@@ -3421,6 +3495,14 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+                 arguments: r#"{"target_file":"a.rs"}"#.into(),
+             }]),
+             ConversationItem::tool_result("c1", "fn main() {}"),
++            ConversationItem::ResponsesCompaction(
++                xai_grok_sampling_types::ResponsesCompactionItem {
++                    id: Some("cmp_1".to_owned()),
++                    encrypted_content: "sealed".to_owned(),
++                    internal_chat_message_metadata_passthrough: None,
++                    origin: None,
++                },
++            ),
+         ];
+         let has_tool_calls = |items: &[ConversationItem]| {
+             items
+@@ -3445,6 +3527,11 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
+         );
+         assert!(has_tool_result(&seg), "segment view must keep tool results");
+         assert!(!has_image(&seg), "segment view must strip base64 images");
++        assert!(
++            !seg.iter()
++                .any(|item| matches!(item, ConversationItem::ResponsesCompaction(_))),
++            "opaque checkpoints have no portable segment representation"
++        );
+         let summ = prepare_conversation_for_summarization(conv);
+         assert!(!has_tool_calls(&summ), "summary view flattens tool calls");
+         assert!(!has_tool_result(&summ), "summary view drops tool results");
+diff --git a/crates/codegen/xai-grok-pager/src/acp/tracker.rs b/crates/codegen/xai-grok-pager/src/acp/tracker.rs
+index 0df9be1..2a2addc 100644
+--- a/crates/codegen/xai-grok-pager/src/acp/tracker.rs
++++ b/crates/codegen/xai-grok-pager/src/acp/tracker.rs
+@@ -25,6 +25,7 @@ use std::borrow::Cow;
+ use std::collections::HashMap;
+ use std::path::{Path, PathBuf};
+ use tracing::debug;
++use xai_grok_shell::extensions::notification::CompactionStrategy;
+ use xai_grok_tools::types::output::{BashOutput, ToolOutput};
+ use xai_grok_tools::types::output::{ReadFileOutput, SearchToolOutput, WebFetchOutput};
+ use xai_grok_tools::util::strip_redundant_session_cd;
+@@ -204,6 +205,7 @@ pub struct PendingCompaction {
+     pub tokens_before: Option<u64>,
+     pub estimate_after: u64,
+     pub elapsed_ms: Option<i64>,
++    pub strategy: Option<CompactionStrategy>,
+     pub last_used: Option<u64>,
+ }
+ /// Tracks in-flight streaming state for one agent's turn.
+@@ -529,14 +531,33 @@ impl AcpUpdateTracker {
+         tokens_before: Option<u64>,
+         estimate_after: u64,
+         elapsed_ms: Option<i64>,
++        strategy: Option<CompactionStrategy>,
+     ) {
+         self.pending_compaction = Some(PendingCompaction {
+             tokens_before,
+             estimate_after,
+             elapsed_ms,
++            strategy,
+             last_used: None,
+         });
+     }
++    /// Render and clear a deferred compaction completion. Auto-compaction
++    /// flushes this at turn end after the provider confirms context usage;
++    /// manual `/compact` flushes it when the command response arrives.
++    pub fn flush_pending_compaction(&mut self, scrollback: &mut ScrollbackState) -> bool {
++        let Some(pending) = self.pending_compaction.take() else {
++            return false;
++        };
++        scrollback.push_block(RenderBlock::session_event(
++            SessionEvent::CompactionCompleted {
++                tokens_before: pending.tokens_before,
++                tokens_after: pending.last_used.unwrap_or(pending.estimate_after),
++                elapsed_ms: pending.elapsed_ms,
++                strategy: pending.strategy,
++            },
++        ));
++        true
++    }
+     pub fn note_context_used(&mut self, used: u64) {
+         if let Some(pending) = self.pending_compaction.as_mut() {
+             pending.last_used = Some(used);
+@@ -844,15 +865,7 @@ impl AcpUpdateTracker {
+                 scrollback.finish_running(entry_id);
+             }
+         }
+-        if let Some(pending) = self.pending_compaction.take() {
+-            scrollback.push_block(RenderBlock::session_event(
+-                SessionEvent::CompactionCompleted {
+-                    tokens_before: pending.tokens_before,
+-                    tokens_after: pending.last_used.unwrap_or(pending.estimate_after),
+-                    elapsed_ms: pending.elapsed_ms,
+-                },
+-            ));
+-        }
++        self.flush_pending_compaction(scrollback);
+         self.last_thinking_elapsed_ms = None;
+         self.last_stream_start_ms = None;
+         self.compaction_activity = None;
+diff --git a/crates/codegen/xai-grok-pager/src/app/acp_handler/session_notification.rs b/crates/codegen/xai-grok-pager/src/app/acp_handler/session_notification.rs
+index 7290c31..d1ae115 100644
+--- a/crates/codegen/xai-grok-pager/src/app/acp_handler/session_notification.rs
++++ b/crates/codegen/xai-grok-pager/src/app/acp_handler/session_notification.rs
+@@ -1164,6 +1164,7 @@ pub(super) fn apply_session_event(
+             tokens_before,
+             tokens_after,
+             elapsed_ms,
++            strategy,
+             ..
+         } => {
+             tracing::info!("Auto-compact completed: {tokens_after} tokens after");
+@@ -1175,10 +1176,11 @@ pub(super) fn apply_session_event(
+                         tokens_before: *tokens_before,
+                         tokens_after: *tokens_after,
+                         elapsed_ms: *elapsed_ms,
++                        strategy: *strategy,
+                     },
+                 ));
+             } else {
+-                session.defer_compaction(*tokens_before, *tokens_after, *elapsed_ms);
++                session.defer_compaction(*tokens_before, *tokens_after, *elapsed_ms, *strategy);
+             }
+             true
+         }
+diff --git a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/session_events.rs b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/session_events.rs
+index 308b76f..0aa877e 100644
+--- a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/session_events.rs
++++ b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/session_events.rs
+@@ -3,6 +3,28 @@
+ 
+     // ── apply_session_event ────────────────────────────────────────────
+ 
++    #[test]
++    fn compaction_strategy_notification_wire_is_backward_compatible() {
++        let old_json = r#"{"sessionUpdate":"auto_compact_completed","tokens_after":42,"elapsed_ms":null,"summary_preview":null}"#;
++        assert!(matches!(
++            serde_json::from_str::<XaiSessionUpdate>(old_json).unwrap(),
++            XaiSessionUpdate::AutoCompactCompleted { strategy: None, .. }
++        ));
++
++        let current = XaiSessionUpdate::AutoCompactCompleted {
++            tokens_before: Some(100),
++            tokens_after: 42,
++            elapsed_ms: Some(10),
++            summary_preview: None,
++            strategy: Some(
++                xai_grok_shell::extensions::notification::CompactionStrategy::ServerSide,
++            ),
++        };
++        let json = serde_json::to_string(&current).unwrap();
++        assert!(json.contains(r#""strategy":"server_side""#));
++        assert_eq!(serde_json::from_str::<XaiSessionUpdate>(&json).unwrap(), current);
++    }
++
+     #[test]
+     fn apply_compaction_started_sets_activity() {
+         let mut session = make_session(Some("s1"));
+@@ -605,6 +627,9 @@
+             tokens_after: 66_000,
+             elapsed_ms: Some(500),
+             summary_preview: None,
++            strategy: Some(
++                xai_grok_shell::extensions::notification::CompactionStrategy::ServerSide,
++            ),
+         };
+         assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+         assert_eq!(
+@@ -621,9 +646,15 @@
+             Some(SessionEvent::CompactionCompleted {
+                 tokens_before,
+                 tokens_after,
++                strategy,
+                 ..
+             }) => {
+                 assert_eq!(tokens_before, Some(858_000));
++                assert_eq!(
++                    strategy,
++                    Some(xai_grok_shell::extensions::notification::CompactionStrategy::ServerSide),
++                    "the actual server-side outcome must survive deferred rendering"
++                );
+                 assert_eq!(
+                     tokens_after, 43_000,
+                     "must flush the model-confirmed count, not the 66k estimate"
+@@ -633,6 +664,30 @@
+         }
+     }
+ 
++    #[test]
++    fn manual_compaction_flushes_structured_server_side_completion() {
++        let mut session = make_session(Some("s1"));
++        let mut scrollback = ScrollbackState::new();
++        session.defer_compaction(
++            Some(100_000),
++            20_000,
++            None,
++            Some(xai_grok_shell::extensions::notification::CompactionStrategy::ServerSide),
++        );
++
++        assert!(session.flush_pending_compaction(&mut scrollback));
++        assert!(!session.flush_pending_compaction(&mut scrollback));
++        assert!(matches!(
++            last_session_event(&scrollback),
++            Some(SessionEvent::CompactionCompleted {
++                strategy: Some(
++                    xai_grok_shell::extensions::notification::CompactionStrategy::ServerSide
++                ),
++                ..
++            })
++        ));
++    }
++
+     #[test]
+     fn apply_compaction_completed_falls_back_to_estimate_without_confirmation() {
+         let mut session = make_session(Some("s1"));
+@@ -642,6 +697,7 @@
+             tokens_after: 20_000,
+             elapsed_ms: Some(500),
+             summary_preview: None,
++            strategy: None,
+         };
+         assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+         session.finish_turn(&mut scrollback,
+@@ -667,6 +723,7 @@
+             tokens_after: 20_000,
+             elapsed_ms: Some(500),
+             summary_preview: None,
++            strategy: None,
+         };
+         assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+         match last_session_event(&scrollback) {
+@@ -692,6 +749,7 @@
+             tokens_after: 66_000,
+             elapsed_ms: Some(500),
+             summary_preview: None,
++            strategy: None,
+         };
+         assert!(apply_session_event(
+             &update,
+@@ -747,6 +805,7 @@
+             tokens_after: 25000,
+             elapsed_ms: Some(300),
+             summary_preview: None,
++            strategy: None,
+         };
+         let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+         assert!(changed);
+@@ -825,6 +884,7 @@
+             tokens_after: 25000,
+             elapsed_ms: Some(300),
+             summary_preview: None,
++            strategy: None,
+         };
+         let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+         // No child_view means nothing visible changed — must not trigger redraw.
+diff --git a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/subagents.rs b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/subagents.rs
+index 3742d39..7f57243 100644
+--- a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/subagents.rs
++++ b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/subagents.rs
+@@ -850,6 +850,7 @@
+                     tokens_after: 25_000,
+                     elapsed_ms: Some(300),
+                     summary_preview: None,
++                    strategy: None,
+                 },
+             ),
+             &mut app,
+diff --git a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/turn_completion.rs b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/turn_completion.rs
+index 05ab8a3..5d22208 100644
+--- a/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/turn_completion.rs
++++ b/crates/codegen/xai-grok-pager/src/app/acp_handler/tests/turn_completion.rs
+@@ -992,6 +992,7 @@
+                     tokens_before: Some(100),
+                     tokens_after: 10,
+                     elapsed_ms: Some(5),
++                    strategy: None,
+                 },
+             ));
+ 
+diff --git a/crates/codegen/xai-grok-pager/src/app/agent.rs b/crates/codegen/xai-grok-pager/src/app/agent.rs
+index a3ddc61..97de179 100644
+--- a/crates/codegen/xai-grok-pager/src/app/agent.rs
++++ b/crates/codegen/xai-grok-pager/src/app/agent.rs
+@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+ use std::path::PathBuf;
+ use std::time::{Duration, Instant, SystemTime};
+ use xai_acp_lib::AcpAgentTx;
+-use xai_grok_shell::extensions::notification::GoalClassifierVerdict;
++use xai_grok_shell::extensions::notification::{CompactionStrategy, GoalClassifierVerdict};
+ use xai_grok_shell::sampling::types::ReasoningEffort;
+ /// Unique local identifier for an agent.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+@@ -848,9 +848,13 @@ impl AgentSession {
+         tokens_before: Option<u64>,
+         estimate_after: u64,
+         elapsed_ms: Option<i64>,
++        strategy: Option<CompactionStrategy>,
+     ) {
+         self.tracker
+-            .defer_compaction(tokens_before, estimate_after, elapsed_ms);
++            .defer_compaction(tokens_before, estimate_after, elapsed_ms, strategy);
++    }
++    pub fn flush_pending_compaction(&mut self, scrollback: &mut ScrollbackState) -> bool {
++        self.tracker.flush_pending_compaction(scrollback)
+     }
+     pub fn note_context_used(&mut self, used: u64) {
+         self.tracker.note_context_used(used);
+diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs
+index b61e2ce..6c225ea 100644
+--- a/crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs
++++ b/crates/codegen/xai-grok-pager/src/app/dispatch/prompt.rs
+@@ -1639,11 +1639,20 @@ pub(super) fn handle_compact_complete(
+ 
+         match &result {
+             Ok(()) => {
+-                agent.scrollback.push_block(RenderBlock::session_event(
+-                    SessionEvent::CompactCompleted {
+-                        elapsed: elapsed.unwrap_or_default(),
+-                    },
+-                ));
++                // The shell's completion notification carries the actual
++                // strategy (server-side, portable, or portable fallback).
++                // Flush it for manual `/compact`; old shells that did not send
++                // the structured event retain the legacy command marker.
++                if !agent
++                    .session
++                    .flush_pending_compaction(&mut agent.scrollback)
++                {
++                    agent.scrollback.push_block(RenderBlock::session_event(
++                        SessionEvent::CompactCompleted {
++                            elapsed: elapsed.unwrap_or_default(),
++                        },
++                    ));
++                }
+             }
+             Err(err) => {
+                 tracing::error!(agent = ?agent_id, error = %err, "Compaction failed");
+diff --git a/crates/codegen/xai-grok-pager/src/headless.rs b/crates/codegen/xai-grok-pager/src/headless.rs
+index 2f3e46f..e05d4a0 100644
+--- a/crates/codegen/xai-grok-pager/src/headless.rs
++++ b/crates/codegen/xai-grok-pager/src/headless.rs
+@@ -1665,7 +1665,10 @@ fn handle_ext_notification(
+         AutoCompactStarted {
+             percentage: u8,
+         },
+-        AutoCompactCompleted {},
++        AutoCompactCompleted {
++            #[serde(default)]
++            strategy: Option<String>,
++        },
+         AutoCompactFailed {
+             error: String,
+         },
+@@ -1707,11 +1710,19 @@ fn handle_ext_notification(
+             }
+             OutputFormat::Json => {}
+         },
+-        XaiUpdate::AutoCompactCompleted {} => match format {
++        XaiUpdate::AutoCompactCompleted { strategy } => match format {
+             OutputFormat::StreamingJson => {
+-                println!("{}", serde_json::json!({"type": "auto_compact_completed"}));
++                let mut event = serde_json::json!({"type": "auto_compact_completed"});
++                if let Some(strategy) = strategy {
++                    event["strategy"] = strategy.into();
++                }
++                println!("{event}");
+             }
+-            OutputFormat::Plain => eprintln!("Conversation compacted."),
++            OutputFormat::Plain => match strategy.as_deref() {
++                Some("server_side") => eprintln!("Server-side compaction succeeded."),
++                Some("portable_fallback") => eprintln!("Portable fallback succeeded."),
++                _ => eprintln!("Conversation compacted."),
++            },
+             OutputFormat::Json => {}
+         },
+         XaiUpdate::AutoCompactFailed { error } => match format {
+diff --git a/crates/codegen/xai-grok-pager/src/scrollback/blocks/session_event.rs b/crates/codegen/xai-grok-pager/src/scrollback/blocks/session_event.rs
+index e9e3493..1db4381 100644
+--- a/crates/codegen/xai-grok-pager/src/scrollback/blocks/session_event.rs
++++ b/crates/codegen/xai-grok-pager/src/scrollback/blocks/session_event.rs
+@@ -9,6 +9,7 @@ use std::time::Duration;
+ 
+ use ratatui::style::Modifier;
+ use ratatui::text::{Line, Span};
++use xai_grok_shell::extensions::notification::CompactionStrategy;
+ 
+ use super::tool::HookRunEntry;
+ use crate::render::wrapping::word_wrap_lines;
+@@ -86,6 +87,8 @@ pub enum SessionEvent {
+         tokens_after: u64,
+         /// How long compaction took (milliseconds).
+         elapsed_ms: Option<i64>,
++        /// Which implementation actually completed (`None` from older shells).
++        strategy: Option<CompactionStrategy>,
+     },
+     /// Auto-compaction failed.
+     CompactionFailed {
+@@ -216,17 +219,20 @@ impl SessionEvent {
+                 tokens_before,
+                 tokens_after,
+                 elapsed_ms,
++                strategy,
+             } => {
+                 let after = format_tokens(*tokens_after);
+-                // Older shells don't send tokens_before — keep the legacy format.
++                let label = match strategy {
++                    Some(CompactionStrategy::ServerSide) => "Server-side compaction succeeded",
++                    Some(CompactionStrategy::PortableFallback) => "Portable fallback succeeded",
++                    _ => "Context compacted",
++                };
++                // Older shells don't send tokens_before — keep the legacy shape.
+                 let body = match tokens_before {
+                     Some(before) if *before > 0 => {
+-                        format!(
+-                            "Context compacted: {} → {after} tokens",
+-                            format_tokens(*before)
+-                        )
++                        format!("{label}: {} → {after} tokens", format_tokens(*before))
+                     }
+-                    _ => format!("Context compacted → {after} tokens"),
++                    _ => format!("{label} → {after} tokens"),
+                 };
+                 if let Some(ms) = elapsed_ms {
+                     let secs = *ms as f64 / 1000.0;
+@@ -956,6 +962,7 @@ mod tests {
+             tokens_before: Some(48_800),
+             tokens_after: 27_100,
+             elapsed_ms: Some(21_000),
++            strategy: None,
+         };
+         assert_eq!(
+             event.message(),
+@@ -969,10 +976,39 @@ mod tests {
+             tokens_before: None,
+             tokens_after: 27_100,
+             elapsed_ms: None,
++            strategy: None,
+         };
+         assert_eq!(event.message(), "Context compacted → 27.1k tokens");
+     }
+ 
++    #[test]
++    fn compaction_completed_identifies_server_side_success() {
++        let event = SessionEvent::CompactionCompleted {
++            tokens_before: Some(48_800),
++            tokens_after: 27_100,
++            elapsed_ms: Some(2_995),
++            strategy: Some(CompactionStrategy::ServerSide),
++        };
++        assert_eq!(
++            event.message(),
++            "Server-side compaction succeeded: 48.8k → 27.1k tokens (3.0s)"
++        );
++    }
++
++    #[test]
++    fn compaction_completed_identifies_portable_fallback() {
++        let event = SessionEvent::CompactionCompleted {
++            tokens_before: Some(48_800),
++            tokens_after: 27_100,
++            elapsed_ms: None,
++            strategy: Some(CompactionStrategy::PortableFallback),
++        };
++        assert_eq!(
++            event.message(),
++            "Portable fallback succeeded: 48.8k → 27.1k tokens"
++        );
++    }
++
+     #[test]
+     fn compaction_failed_empty_error_is_terse() {
+         let event = SessionEvent::CompactionFailed {
+diff --git a/crates/codegen/xai-grok-pager/src/scrollback/state/mod.rs b/crates/codegen/xai-grok-pager/src/scrollback/state/mod.rs
+index 4500add..f85e98d 100644
+--- a/crates/codegen/xai-grok-pager/src/scrollback/state/mod.rs
++++ b/crates/codegen/xai-grok-pager/src/scrollback/state/mod.rs
+@@ -2352,6 +2352,7 @@ mod tests {
+                 tokens_before: Some(100),
+                 tokens_after: 10,
+                 elapsed_ms: Some(5),
++                strategy: None,
+             },
+         ));
+ 
+diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
+index 995cc02..bca8495 100644
+--- a/crates/codegen/xai-grok-sampler/src/client.rs
++++ b/crates/codegen/xai-grok-sampler/src/client.rs
+@@ -25,8 +25,8 @@ use xai_grok_sampling_types::error::{try_parse_stream_error, user_facing_api_err
+ use xai_grok_sampling_types::{
+     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
+     ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper,
+-    ResponseModelMetadata, Result, SamplingError, build_messages_request, is_check_event, messages,
+-    rs,
++    ResponseModelMetadata, ResponsesCompactionItem, Result, SamplingError, build_messages_request,
++    is_check_event, messages, rs,
+ };
+ 
+ use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
+@@ -40,6 +40,8 @@ const DEFAULT_CLIENT_IDENTIFIER: &str = "grok-shell";
+ /// Product identifier baked into User-Agent strings.
+ const AGENT_PRODUCT: &str = "grok-shell";
+ const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
++const REMOTE_COMPACTION_V2_FEATURE: &str = "remote_compaction_v2";
++const CODEX_BETA_FEATURES_HEADER: &str = "x-codex-beta-features";
+ 
+ /// Per-request `x-grok-*` headers. Optional fields are skipped when empty/`None`.
+ struct GrokRequestHeaders<'a> {
+@@ -113,6 +115,147 @@ fn is_informational_response_event(event_name: &str, data: &str) -> bool {
+             .is_some_and(|kind| supported(&kind))
+ }
+ 
++#[derive(Debug, Default)]
++struct RemoteCompactionV2Collector {
++    output_item_done: Vec<ResponsesCompactionItem>,
++    terminal_output: Vec<ResponsesCompactionItem>,
++}
++
++type SharedRemoteCompactionV2Collector =
++    std::sync::Arc<std::sync::Mutex<RemoteCompactionV2Collector>>;
++
++fn is_compaction_wire_item(value: &serde_json::Value) -> bool {
++    matches!(
++        value.get("type").and_then(serde_json::Value::as_str),
++        Some("compaction" | "compaction_summary")
++    )
++}
++
++fn record_remote_compaction_item(
++    collector: &SharedRemoteCompactionV2Collector,
++    value: &serde_json::Value,
++    terminal: bool,
++) {
++    let Some(item) = ResponsesCompactionItem::from_wire_value(value) else {
++        return;
++    };
++    let mut collector = collector
++        .lock()
++        .unwrap_or_else(|poisoned| poisoned.into_inner());
++    if terminal {
++        collector.terminal_output.push(item);
++    } else {
++        collector.output_item_done.push(item);
++    }
++}
++
++/// Collect and remove output-only compaction items before handing an event to
++/// async-openai, whose pinned event model does not know the v2 item type.
++/// Returns `true` when the entire event is an item lifecycle notification that
++/// should be swallowed.
++fn collect_remote_compaction_v2_event(
++    value: &mut serde_json::Value,
++    collector: &SharedRemoteCompactionV2Collector,
++) -> bool {
++    if value.get("item").is_some_and(is_compaction_wire_item) {
++        if value.get("type").and_then(serde_json::Value::as_str)
++            == Some("response.output_item.done")
++            && let Some(item) = value.get("item")
++        {
++            record_remote_compaction_item(collector, item, false);
++        }
++        return true;
++    }
++
++    if let Some(output) = value
++        .pointer_mut("/response/output")
++        .and_then(serde_json::Value::as_array_mut)
++    {
++        output.retain(|item| {
++            if is_compaction_wire_item(item) {
++                record_remote_compaction_item(collector, item, true);
++                false
++            } else {
++                true
++            }
++        });
++    }
++    false
++}
++
++fn deserialize_remote_compaction_v2_event(
++    data: &str,
++    collector: &SharedRemoteCompactionV2Collector,
++) -> Result<Option<rs::ResponseStreamEvent>> {
++    let mut value =
++        serde_json::from_str::<serde_json::Value>(data).map_err(SamplingError::Serialization)?;
++    if collect_remote_compaction_v2_event(&mut value, collector) {
++        return Ok(None);
++    }
++    let sanitized = serde_json::to_string(&value).map_err(SamplingError::Serialization)?;
++    deserialize_response_event(&sanitized).map(Some)
++}
++
++fn inject_extra_response_input_entries(
++    request_body: &mut serde_json::Value,
++    mut entries: Vec<(usize, serde_json::Value)>,
++) -> Result<()> {
++    if entries.is_empty() {
++        return Ok(());
++    }
++    let input = request_body
++        .get_mut("input")
++        .and_then(serde_json::Value::as_array_mut)
++        .ok_or(SamplingError::InvalidConfiguration(
++            "Responses raw input entries require an input array",
++        ))?;
++    entries.sort_by_key(|(position, _)| *position);
++    for (position, value) in entries {
++        if position > input.len() {
++            return Err(SamplingError::InvalidConfiguration(
++                "Responses raw input entry position is out of bounds",
++            ));
++        }
++        input.insert(position, value);
++    }
++    Ok(())
++}
++
++fn append_remote_compaction_v2_trigger(request_body: &mut serde_json::Value) -> Result<()> {
++    let input = request_body
++        .get_mut("input")
++        .and_then(serde_json::Value::as_array_mut)
++        .ok_or(SamplingError::InvalidConfiguration(
++            "Responses remote compaction requires an input array",
++        ))?;
++    input.push(serde_json::json!({ "type": "compaction_trigger" }));
++    Ok(())
++}
++
++fn install_remote_compaction_v2_feature(request: &mut reqwest::Request) {
++    let mut features = request
++        .headers()
++        .get_all(CODEX_BETA_FEATURES_HEADER)
++        .iter()
++        .filter_map(|value| value.to_str().ok())
++        .flat_map(|value| value.split(','))
++        .map(str::trim)
++        .filter(|value| !value.is_empty())
++        .map(str::to_owned)
++        .collect::<Vec<_>>();
++    if !features
++        .iter()
++        .any(|feature| feature == REMOTE_COMPACTION_V2_FEATURE)
++    {
++        features.push(REMOTE_COMPACTION_V2_FEATURE.to_owned());
++    }
++    let merged = HeaderValue::from_str(&features.join(","))
++        .expect("known beta feature names and existing header values are valid");
++    request
++        .headers_mut()
++        .insert(HeaderName::from_static(CODEX_BETA_FEATURES_HEADER), merged);
++}
++
+ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
+     let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
+         Ok(event) => event,
+@@ -1441,6 +1584,7 @@ impl SamplingClient {
+         // session code (which may upload a payload artifact) and is not
+         // forwarded by the sampler. Drop it before we send.
+         request.trace.take();
++        let extra_input_entries = std::mem::take(&mut request.extra_input_entries);
+ 
+         tracing::debug!("create_response: {:?}", &request);
+         tracing::debug!("endpoint: {:?}", self.endpoint("responses"));
+@@ -1463,6 +1607,7 @@ impl SamplingClient {
+         // discriminator that the Responses API requires on input. Patch
+         // it in post-serialize. This is the last surviving piece of the
+         // old raw_output machinery.
++        inject_extra_response_input_entries(&mut request_body, extra_input_entries)?;
+         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
+         if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
+             apply_chatgpt_codex_request_shape(&mut request_body);
+@@ -1550,8 +1695,21 @@ impl SamplingClient {
+     )]
+     #[allow(clippy::type_complexity)]
+     pub async fn create_response_stream(
++        &self,
++        request: CreateResponseWrapper,
++    ) -> Result<(
++        BoxStream<'static, Result<rs::ResponseStreamEvent>>,
++        Option<ResponseModelMetadata>,
++        Option<crate::doom_loop::DoomLoopSignalCollector>,
++    )> {
++        self.create_response_stream_inner(request, None).await
++    }
++
++    #[allow(clippy::type_complexity)]
++    async fn create_response_stream_inner(
+         &self,
+         mut request: CreateResponseWrapper,
++        remote_compaction_v2: Option<SharedRemoteCompactionV2Collector>,
+     ) -> Result<(
+         BoxStream<'static, Result<rs::ResponseStreamEvent>>,
+         Option<ResponseModelMetadata>,
+@@ -1586,6 +1744,7 @@ impl SamplingClient {
+             user_id: request.x_grok_user_id.as_deref(),
+         };
+         let extra_tool_entries = std::mem::take(&mut request.extra_tool_entries);
++        let extra_input_entries = std::mem::take(&mut request.extra_input_entries);
+         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
+             tracing::error!("Failed to serialize responses request: {}", e);
+             SamplingError::Serialization(e)
+@@ -1603,10 +1762,14 @@ impl SamplingClient {
+                 request_body["tools"] = serde_json::Value::Array(extra_tool_entries);
+             }
+         }
++        inject_extra_response_input_entries(&mut request_body, extra_input_entries)?;
+         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
+         if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
+             apply_chatgpt_codex_request_shape(&mut request_body);
+         }
++        if remote_compaction_v2.is_some() {
++            append_remote_compaction_v2_trigger(&mut request_body)?;
++        }
+         // Fresh per attempt so signals never leak across retries; `None`
+         // (check disabled) sends no header and does no peek work per event.
+         let doom_loop = self
+@@ -1623,10 +1786,13 @@ impl SamplingClient {
+         crate::sampling_log::log_request_body("responses", "responses", &request_body);
+         let http_request = http_request.json(&request_body);
+ 
+-        let built_request = http_request.build().map_err(|e| {
++        let mut built_request = http_request.build().map_err(|e| {
+             tracing::error!("Failed to build HTTP request: {}", e);
+             SamplingError::Http(e)
+         })?;
++        if remote_compaction_v2.is_some() {
++            install_remote_compaction_v2_feature(&mut built_request);
++        }
+ 
+         tracing::debug!(
+             url = %built_request.url(),
+@@ -1699,6 +1865,7 @@ impl SamplingClient {
+         let event_stream = byte_stream.eventsource();
+ 
+         let doom_loop_for_stream = doom_loop.clone();
++        let remote_compaction_v2_for_stream = remote_compaction_v2.clone();
+ 
+         // The scan item is an `Option`: `Some(None)` skips an absorbed
+         // doom-loop event without terminating the stream (`filter_map`
+@@ -1737,7 +1904,17 @@ impl SamplingClient {
+                         } else if let Some(stream_error) = try_parse_stream_error(data) {
+                             Some(Some(Err(stream_error)))
+                         } else {
+-                            Some(Some(deserialize_response_event(data)))
++                            let decoded = match &remote_compaction_v2_for_stream {
++                                Some(collector) => {
++                                    deserialize_remote_compaction_v2_event(data, collector)
++                                }
++                                None => deserialize_response_event(data).map(Some),
++                            };
++                            match decoded {
++                                Ok(Some(event)) => Some(Some(Ok(event))),
++                                Ok(None) => Some(None),
++                                Err(error) => Some(Some(Err(error))),
++                            }
+                         }
+                     }
+                     Err(e) => {
+@@ -2157,9 +2334,11 @@ impl SamplingClient {
+         let x_grok_turn_idx = request.x_grok_turn_idx.clone();
+         let x_grok_agent_id = request.x_grok_agent_id.clone();
+ 
+-        // Collect xAI-specific tools that can't be expressed via rs::Tool
+-        // (e.g., x_search). These are injected as raw JSON after serialization.
++        // Collect xAI-specific tools and input items that can't be expressed
++        // via async-openai's typed Responses enums. They are injected as raw
++        // JSON after serialization.
+         let extra_tools = xai_grok_sampling_types::extra_tool_entries(&request.hosted_tools);
++        let extra_input_entries = xai_grok_sampling_types::responses_extra_input_entries(&request);
+ 
+         let responses_request: rs::CreateResponse = (&request).into();
+ 
+@@ -2170,6 +2349,7 @@ impl SamplingClient {
+         wrapper.x_grok_turn_idx = x_grok_turn_idx;
+         wrapper.x_grok_agent_id = x_grok_agent_id;
+         wrapper.extra_tool_entries = extra_tools;
++        wrapper.extra_input_entries = extra_input_entries;
+ 
+         if let Some(trace) = trace {
+             wrapper.trace = Some(trace);
+@@ -2178,6 +2358,115 @@ impl SamplingClient {
+         self.create_response_stream(wrapper).await
+     }
+ 
++    /// Run Responses remote compaction v2 through the active provider.
++    ///
++    /// This is deliberately a separate operation from ordinary response
++    /// generation: it appends the untyped `compaction_trigger`, advertises the
++    /// Codex beta feature, requires a completed stream, and accepts exactly one
++    /// canonical encrypted compaction output item.
++    pub async fn conversation_compact_responses_v2(
++        &self,
++        mut request: ConversationRequest,
++        idle_timeout: std::time::Duration,
++    ) -> Result<ResponsesCompactionItem> {
++        self.apply_conversation_defaults(&mut request)?;
++        let origin = request.reasoning_origin.clone();
++
++        let trace = request.trace.take();
++        let extra_tools = xai_grok_sampling_types::extra_tool_entries(&request.hosted_tools);
++        let extra_input_entries = xai_grok_sampling_types::responses_extra_input_entries(&request);
++        let responses_request: rs::CreateResponse = (&request).into();
++        let mut wrapper = CreateResponseWrapper::new(responses_request);
++        wrapper.x_grok_conv_id = request.x_grok_conv_id.clone();
++        wrapper.x_grok_req_id = request.x_grok_req_id.clone();
++        wrapper.x_grok_session_id = request.x_grok_session_id.clone();
++        wrapper.x_grok_turn_idx = request.x_grok_turn_idx.clone();
++        wrapper.x_grok_agent_id = request.x_grok_agent_id.clone();
++        wrapper.extra_tool_entries = extra_tools;
++        wrapper.extra_input_entries = extra_input_entries;
++        if let Some(trace) = trace {
++            wrapper.trace = Some(trace);
++        }
++
++        let collector =
++            std::sync::Arc::new(std::sync::Mutex::new(RemoteCompactionV2Collector::default()));
++        let (mut stream, _, _) = self
++            .create_response_stream_inner(wrapper, Some(collector.clone()))
++            .await?;
++        let mut completed = false;
++        loop {
++            let event = match tokio::time::timeout(idle_timeout, stream.next()).await {
++                Ok(Some(event)) => event?,
++                Ok(None) => break,
++                Err(_) => {
++                    return Err(SamplingError::IdleTimeout {
++                        elapsed_secs: idle_timeout.as_secs(),
++                    });
++                }
++            };
++            match event {
++                rs::ResponseStreamEvent::ResponseCompleted(_) => {
++                    completed = true;
++                    break;
++                }
++                rs::ResponseStreamEvent::ResponseIncomplete(_) => {
++                    return Err(SamplingError::StreamError {
++                        error_type: "response.incomplete".to_owned(),
++                        message: "remote compaction v2 response was incomplete".to_owned(),
++                    });
++                }
++                rs::ResponseStreamEvent::ResponseFailed(event) => {
++                    let message = event
++                        .response
++                        .error
++                        .map(|error| format!("{}: {}", error.code, error.message))
++                        .unwrap_or_else(|| {
++                            "remote compaction v2 response failed without an error".to_owned()
++                        });
++                    return Err(SamplingError::StreamError {
++                        error_type: "response.failed".to_owned(),
++                        message,
++                    });
++                }
++                rs::ResponseStreamEvent::ResponseError(event) => {
++                    return Err(SamplingError::StreamError {
++                        error_type: event.code.unwrap_or_else(|| "response.error".to_owned()),
++                        message: event.message,
++                    });
++                }
++                _ => {}
++            }
++        }
++        if !completed {
++            return Err(SamplingError::StreamError {
++                error_type: "remote_compaction_v2".to_owned(),
++                message: "stream closed before response.completed".to_owned(),
++            });
++        }
++
++        let items = {
++            let collector = collector
++                .lock()
++                .unwrap_or_else(|poisoned| poisoned.into_inner());
++            if collector.output_item_done.is_empty() {
++                collector.terminal_output.clone()
++            } else {
++                // The item lifecycle stream is authoritative. Terminal output
++                // may omit the item or serialize optional fields differently.
++                collector.output_item_done.clone()
++            }
++        };
++        if items.len() != 1 {
++            return Err(SamplingError::serialization_message(format!(
++                "remote compaction v2 expected exactly one compaction output item, got {}",
++                items.len()
++            )));
++        }
++        let mut item = items.into_iter().next().expect("length checked above");
++        item.origin = origin;
++        Ok(item)
++    }
++
+     /// Send a conversation request using the Responses API (non-streaming).
+     ///
+     /// Converts the `ConversationRequest` to Responses API format internally.
+@@ -2193,6 +2482,7 @@ impl SamplingClient {
+         let x_grok_session_id = request.x_grok_session_id.clone();
+         let x_grok_turn_idx = request.x_grok_turn_idx.clone();
+         let x_grok_agent_id = request.x_grok_agent_id.clone();
++        let extra_input_entries = xai_grok_sampling_types::responses_extra_input_entries(&request);
+ 
+         let responses_request: rs::CreateResponse = (&request).into();
+ 
+@@ -2202,6 +2492,7 @@ impl SamplingClient {
+         wrapper.x_grok_session_id = x_grok_session_id;
+         wrapper.x_grok_turn_idx = x_grok_turn_idx;
+         wrapper.x_grok_agent_id = x_grok_agent_id;
++        wrapper.extra_input_entries = extra_input_entries;
+ 
+         if let Some(trace) = trace {
+             wrapper.trace = Some(trace);
+@@ -3372,4 +3663,126 @@ mod tests {
+         };
+         assert_eq!(blocks.len(), 1);
+     }
++
++    #[tokio::test]
++    async fn remote_compaction_v2_sends_trigger_merges_feature_and_collects_checkpoint() {
++        use axum::Router;
++        use axum::response::sse::{Event, KeepAlive, Sse};
++        use axum::routing::post;
++        use futures_util::stream;
++        use tokio::net::TcpListener;
++
++        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
++        let captured_for_handler = captured.clone();
++        let app = Router::new().route(
++            "/v1/responses",
++            post(
++                move |headers: axum::http::HeaderMap, body: axum::Json<serde_json::Value>| {
++                    let captured = captured_for_handler.clone();
++                    async move {
++                        let features = headers
++                            .get(CODEX_BETA_FEATURES_HEADER)
++                            .and_then(|value| value.to_str().ok())
++                            .unwrap_or_default()
++                            .to_owned();
++                        *captured.lock().unwrap() = Some((body.0, features));
++                        let checkpoint = serde_json::json!({
++                            "type": "compaction_summary",
++                            "id": "cmp_test",
++                            "encrypted_content": "sealed-history"
++                        });
++                        let events = vec![
++                            Event::default().data(
++                                serde_json::json!({
++                                    "type": "response.output_item.done",
++                                    "sequence_number": 0,
++                                    "output_index": 0,
++                                    "item": checkpoint.clone()
++                                })
++                                .to_string(),
++                            ),
++                            Event::default().data(
++                                serde_json::json!({
++                                    "type": "response.completed",
++                                    "sequence_number": 1,
++                                    "response": {
++                                        "id": "resp_compact",
++                                        "object": "response",
++                                        "created_at": 1234567890,
++                                        "model": "gpt-test",
++                                        "status": "completed",
++                                        "output": [checkpoint]
++                                    }
++                                })
++                                .to_string(),
++                            ),
++                        ];
++                        Sse::new(stream::iter(
++                            events.into_iter().map(Ok::<_, std::convert::Infallible>),
++                        ))
++                        .keep_alive(KeepAlive::default())
++                    }
++                },
++            ),
++        );
++        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let addr = listener.local_addr().unwrap();
++        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
++
++        let mut config = minimal_config();
++        config.base_url = format!("http://{addr}/v1");
++        config.api_backend = ApiBackend::Responses;
++        config.model = "gpt-test".to_owned();
++        config.extra_headers.insert(
++            CODEX_BETA_FEATURES_HEADER.to_owned(),
++            "other_feature".to_owned(),
++        );
++        let origin = xai_grok_sampling_types::ReasoningOrigin {
++            route: crate::config::reasoning_route(&config.base_url),
++            api_backend: ApiBackend::Responses,
++            model: "gpt-test".to_owned(),
++        };
++        let client = SamplingClient::new(config).unwrap();
++        let item = client
++            .conversation_compact_responses_v2(
++                ConversationRequest {
++                    items: vec![
++                        xai_grok_sampling_types::ConversationItem::system("system"),
++                        xai_grok_sampling_types::ConversationItem::user("retained user"),
++                        xai_grok_sampling_types::ConversationItem::ResponsesCompaction(
++                            ResponsesCompactionItem {
++                                id: Some("cmp_previous".to_owned()),
++                                encrypted_content: "sealed-previous".to_owned(),
++                                internal_chat_message_metadata_passthrough: None,
++                                origin: Some(origin),
++                            },
++                        ),
++                        xai_grok_sampling_types::ConversationItem::user("live tail"),
++                    ],
++                    model: Some("gpt-test".to_owned()),
++                    ..Default::default()
++                },
++                std::time::Duration::from_secs(5),
++            )
++            .await
++            .expect("remote compaction succeeds");
++
++        assert_eq!(item.id.as_deref(), Some("cmp_test"));
++        assert_eq!(item.encrypted_content, "sealed-history");
++        assert_eq!(
++            item.origin.as_ref().map(|origin| origin.model.as_str()),
++            Some("gpt-test")
++        );
++        let captured = captured.lock().unwrap();
++        let (body, features) = captured.as_ref().expect("request captured");
++        let input = body["input"].as_array().unwrap();
++        assert_eq!(input[2]["type"], "compaction");
++        assert_eq!(input[2]["encrypted_content"], "sealed-previous");
++        assert_eq!(input[3]["role"], "user");
++        assert_eq!(
++            input.last().unwrap(),
++            &serde_json::json!({"type": "compaction_trigger"})
++        );
++        assert_eq!(features, "other_feature,remote_compaction_v2");
++    }
+ }
+diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
+index 168ffa3..89b1832 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
+@@ -56,6 +56,87 @@ pub enum ConversationItem {
+     /// wrapping `rs::WebSearchToolCall` etc.) so no field is dropped on the
+     /// way through.
+     Reasoning(rs::ReasoningItem),
++    /// Opaque checkpoint returned by Responses remote compaction v2.
++    ///
++    /// The encrypted payload is meaningful only to the exact route, API, and
++    /// model that created it. It is persisted as a first-class conversation
++    /// item and re-emitted as a raw Responses input item on compatible turns.
++    ResponsesCompaction(ResponsesCompactionItem),
++}
++
++/// Opaque Responses remote-compaction checkpoint.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct ResponsesCompactionItem {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub id: Option<String>,
++    pub encrypted_content: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub internal_chat_message_metadata_passthrough: Option<serde_json::Value>,
++    /// Exact non-secret route/API/model provenance for encrypted replay.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub origin: Option<crate::ReasoningOrigin>,
++}
++
++impl ResponsesCompactionItem {
++    /// Parse either deployed output spelling and normalize it to the durable
++    /// `compaction` shape. The encrypted payload is validated without being
++    /// modified; passthrough metadata is narrowed to the supported `turn_id`.
++    pub fn from_wire_value(value: &serde_json::Value) -> Option<Self> {
++        let object = value.as_object()?;
++        if !matches!(
++            object.get("type").and_then(serde_json::Value::as_str),
++            Some("compaction" | "compaction_summary")
++        ) {
++            return None;
++        }
++        let encrypted_content = object.get("encrypted_content")?.as_str()?.to_owned();
++        if encrypted_content.trim().is_empty() {
++            return None;
++        }
++        let id = match object.get("id") {
++            None | Some(serde_json::Value::Null) => None,
++            Some(value) => Some(value.as_str()?.to_owned()),
++        };
++        let internal_chat_message_metadata_passthrough =
++            match object.get("internal_chat_message_metadata_passthrough") {
++                None | Some(serde_json::Value::Null) => None,
++                Some(value) => {
++                    let metadata = value.as_object()?;
++                    let canonical = match metadata.get("turn_id") {
++                        None | Some(serde_json::Value::Null) => serde_json::json!({}),
++                        Some(turn_id) => serde_json::json!({"turn_id": turn_id.as_str()?}),
++                    };
++                    Some(canonical)
++                }
++            };
++        Some(Self {
++            id,
++            encrypted_content,
++            internal_chat_message_metadata_passthrough,
++            origin: None,
++        })
++    }
++
++    /// Canonical raw Responses input shape. Process-local provenance is never
++    /// sent to the provider.
++    pub fn to_wire_value(&self) -> serde_json::Value {
++        let mut object = serde_json::Map::new();
++        object.insert("type".to_owned(), serde_json::json!("compaction"));
++        if let Some(id) = &self.id {
++            object.insert("id".to_owned(), serde_json::json!(id));
++        }
++        object.insert(
++            "encrypted_content".to_owned(),
++            serde_json::json!(self.encrypted_content),
++        );
++        if let Some(metadata) = &self.internal_chat_message_metadata_passthrough {
++            object.insert(
++                "internal_chat_message_metadata_passthrough".to_owned(),
++                metadata.clone(),
++            );
++        }
++        serde_json::Value::Object(object)
++    }
+ }
+ 
+ /// System message content
+@@ -1264,8 +1345,8 @@ impl ConversationItem {
+             Self::Assistant(_) => Role::Assistant,
+             Self::ToolResult(_) => Role::Tool,
+             Self::BackendToolCall(_) => Role::Assistant,
+-            // Reasoning is semantically part of the assistant's turn.
+-            Self::Reasoning(_) => Role::Assistant,
++            // Reasoning and opaque compaction are assistant-side state.
++            Self::Reasoning(_) | Self::ResponsesCompaction(_) => Role::Assistant,
+         }
+     }
+ 
+@@ -1295,6 +1376,7 @@ impl ConversationItem {
+             Self::ToolResult(t) => t.content.as_ref().to_owned(),
+             Self::BackendToolCall(b) => b.text_summary(),
+             Self::Reasoning(r) => reasoning_item_text(r),
++            Self::ResponsesCompaction(_) => String::new(),
+         }
+     }
+ }
+@@ -1955,6 +2037,9 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
+             "conversation_to_chat_messages folds Reasoning siblings; \
+                  conversation_item_to_chat_message is never called with one"
+         ),
++        ConversationItem::ResponsesCompaction(_) => unreachable!(
++            "foreign Responses compaction checkpoints are removed before Chat Completions conversion"
++        ),
+     }
+ }
+ 
+@@ -1981,7 +2066,7 @@ fn conversation_to_chat_messages_for_origin(
+     items: Vec<ConversationItem>,
+     destination: Option<&crate::ReasoningOrigin>,
+ ) -> Vec<ChatRequestMessage> {
+-    let items = sanitize_reasoning_for_origin(&items, destination);
++    let items = sanitize_native_items_for_origin(&items, destination);
+     let mut out: Vec<ChatRequestMessage> = Vec::with_capacity(items.len());
+     let mut pending_reasoning: Vec<String> = Vec::new();
+ 
+@@ -2342,11 +2427,11 @@ impl From<&ConversationRequest> for rs::CreateResponse {
+ /// which is what lets the server-side prefix KV-cache hit on repeat turns.
+ ///
+ /// Foreign-route reasoning is scrubbed first (see
+-/// [`sanitize_reasoning_for_origin`]) so mid-session model/provider switches
++/// [`sanitize_native_items_for_origin`]) so mid-session model/provider switches
+ /// do not replay `encrypted_content`, signatures, or `rs_*` ids that only the
+ /// originating route can consume.
+ fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
+-    let sanitized = sanitize_reasoning_for_origin(&req.items, req.reasoning_origin.as_ref());
++    let sanitized = sanitize_native_items_for_origin(&req.items, req.reasoning_origin.as_ref());
+     let items: Vec<rs::InputItem> = sanitized
+         .iter()
+         .flat_map(conversation_item_to_input_items)
+@@ -2354,6 +2439,27 @@ fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
+     rs::InputParam::Items(items)
+ }
+ 
++/// Return opaque Responses items omitted by async-openai's typed `InputItem`
++/// enum, paired with their positions in the final serialized input array.
++///
++/// The same route/API/model gate used for native reasoning is applied before
++/// positions are calculated, so a foreign encrypted checkpoint is never sent.
++pub fn responses_extra_input_entries(req: &ConversationRequest) -> Vec<(usize, serde_json::Value)> {
++    let sanitized = sanitize_native_items_for_origin(&req.items, req.reasoning_origin.as_ref());
++    let mut position = 0usize;
++    let mut entries = Vec::new();
++    for item in &sanitized {
++        match item {
++            ConversationItem::ResponsesCompaction(compaction) => {
++                entries.push((position, compaction.to_wire_value()));
++                position += 1;
++            }
++            other => position += conversation_item_to_input_items(other).len(),
++        }
++    }
++    entries
++}
++
+ /// Look ahead from a reasoning sibling to the assistant turn it belongs to.
+ /// Reasoning / backend-tool-call siblings sit immediately before their
+ /// assistant; a user/system/tool-result boundary makes it orphaned.
+@@ -2367,17 +2473,19 @@ fn source_assistant_for_reasoning_at(
+             ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => continue,
+             ConversationItem::System(_)
+             | ConversationItem::User(_)
+-            | ConversationItem::ToolResult(_) => return None,
++            | ConversationItem::ToolResult(_)
++            | ConversationItem::ResponsesCompaction(_) => return None,
+         }
+     }
+     None
+ }
+ 
+-/// Native reasoning may be replayed only when the persisted source and actual
+-/// destination agree on route, API backend, and wire model. Real sampler
+-/// requests always stamp the destination, so missing source provenance fails
+-/// closed. The `(None, None)` case remains only for legacy pure conversions.
+-fn reasoning_item_compatible(
++/// Provider-native opaque state may be replayed only when the persisted source
++/// and actual destination agree on route, API backend, and wire model. Real
++/// sampler requests always stamp the destination, so missing source provenance
++/// fails closed. The `(None, None)` case remains only for legacy pure
++/// conversions.
++fn native_item_compatible(
+     source: Option<&crate::ReasoningOrigin>,
+     destination: Option<&crate::ReasoningOrigin>,
+ ) -> bool {
+@@ -2391,7 +2499,8 @@ fn reasoning_item_compatible(
+     }
+ }
+ 
+-/// Drop or scrub reasoning that did not originate from the exact destination.
++/// Drop or scrub provider-native state that did not originate from the exact
++/// destination.
+ ///
+ /// This matches pi's `provider + api + model` gate. Here `route` is the
+ /// normalized inference base URL; together with `ApiBackend` and the wire model
+@@ -2402,11 +2511,12 @@ fn reasoning_item_compatible(
+ /// 2. Responses `rs_…` ids under `store: false` produce 404 lookups;
+ /// 3. Anthropic thinking signatures are valid only for their origin.
+ ///
+-/// Visible summary/content is folded into the following assistant text (pi
+-/// converts foreign thinking to plain text). Opaque-only items are dropped.
+-/// This is wire-time only: history remains unchanged, so switching back to the
+-/// exact original origin restores native replay.
+-fn sanitize_reasoning_for_origin(
++/// Visible reasoning summary/content is folded into the following assistant
++/// text (pi converts foreign thinking to plain text). Opaque-only reasoning and
++/// remote-compaction checkpoints are dropped. This is wire-time only: history
++/// remains unchanged, so switching back to the exact original origin restores
++/// native replay.
++fn sanitize_native_items_for_origin(
+     items: &[ConversationItem],
+     destination: Option<&crate::ReasoningOrigin>,
+ ) -> Vec<ConversationItem> {
+@@ -2432,7 +2542,7 @@ fn sanitize_reasoning_for_origin(
+             ConversationItem::Reasoning(r) => {
+                 let source = source_assistant_for_reasoning_at(items, idx)
+                     .and_then(|assistant| assistant.reasoning_origin.as_ref());
+-                if reasoning_item_compatible(source, destination) {
++                if native_item_compatible(source, destination) {
+                     out.push(item.clone());
+                     continue;
+                 }
+@@ -2448,6 +2558,11 @@ fn sanitize_reasoning_for_origin(
+                 flush_foreign_text(&mut pending_foreign_text, &mut a);
+                 out.push(ConversationItem::Assistant(a));
+             }
++            ConversationItem::ResponsesCompaction(compaction) => {
++                if native_item_compatible(compaction.origin.as_ref(), destination) {
++                    out.push(item.clone());
++                }
++            }
+             ConversationItem::BackendToolCall(_) => {
+                 // Stay between reasoning and assistant; do not flush yet.
+                 out.push(item.clone());
+@@ -2615,6 +2730,9 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
+                 }
+             }]
+         }
++        // async-openai 0.33 has no typed compaction input item. The caller
++        // injects this at the position reported by `responses_extra_input_entries`.
++        ConversationItem::ResponsesCompaction(_) => Vec::new(),
+     }
+ }
+ 
+@@ -3002,8 +3120,9 @@ pub fn transform_conversation_cwd(
+                     t.content = Arc::<str>::from(t.content.replace(source_cwd, target_cwd));
+                 }
+             }
+-            // Backend tool calls don't contain workspace paths — no-op.
+-            ConversationItem::BackendToolCall(_) => {}
++            // Backend tool calls and encrypted compaction checkpoints don't
++            // contain portable workspace paths — no-op.
++            ConversationItem::BackendToolCall(_) | ConversationItem::ResponsesCompaction(_) => {}
+             // Reasoning items rarely reference CWD paths, but they can —
+             // patch both summary parts and content blocks defensively.
+             ConversationItem::Reasoning(r) => {
+@@ -3340,7 +3459,8 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+         OutputConfig, SystemParam, TextBlock, ToolChoiceParam, ToolParam, ToolResultContent,
+     };
+ 
+-    let sanitized_items = sanitize_reasoning_for_origin(&req.items, req.reasoning_origin.as_ref());
++    let sanitized_items =
++        sanitize_native_items_for_origin(&req.items, req.reasoning_origin.as_ref());
+     let mut system_blocks: Vec<TextBlock> = Vec::new();
+     let mut messages: Vec<Message> = Vec::new();
+     let mut pending_assistant: Vec<ContentBlock> = Vec::new();
+@@ -3556,6 +3676,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+                     });
+                 }
+             }
++            // Responses checkpoints are route-native and are removed by the
++            // provenance sanitizer before a Messages request reaches here.
++            ConversationItem::ResponsesCompaction(_) => {}
+         }
+     }
+ 
+@@ -10683,4 +10806,97 @@ mod tests {
+             "both reasoning siblings must be present"
+         );
+     }
++
++    #[test]
++    fn responses_compaction_item_normalizes_alias_and_omits_origin_on_wire() {
++        let value = serde_json::json!({
++            "type": "compaction_summary",
++            "id": "cmp_1",
++            "encrypted_content": " sealed ",
++            "internal_chat_message_metadata_passthrough": {
++                "turn_id": "turn_1",
++                "ignored": "not replayed"
++            }
++        });
++        let mut item =
++            ResponsesCompactionItem::from_wire_value(&value).expect("valid compaction alias");
++        item.origin = Some(crate::ReasoningOrigin {
++            route: "https://example.test/v1".to_owned(),
++            api_backend: crate::ApiBackend::Responses,
++            model: "gpt-test".to_owned(),
++        });
++
++        assert_eq!(
++            item.to_wire_value(),
++            serde_json::json!({
++                "type": "compaction",
++                "id": "cmp_1",
++                "encrypted_content": " sealed ",
++                "internal_chat_message_metadata_passthrough": {"turn_id": "turn_1"}
++            })
++        );
++        let durable = serde_json::to_value(ConversationItem::ResponsesCompaction(item.clone()))
++            .expect("serialize durable checkpoint");
++        assert_eq!(durable["type"], "responses_compaction");
++        let restored: ConversationItem =
++            serde_json::from_value(durable).expect("deserialize durable checkpoint");
++        assert!(matches!(
++            restored,
++            ConversationItem::ResponsesCompaction(restored) if restored == item
++        ));
++        assert!(
++            ResponsesCompactionItem::from_wire_value(&serde_json::json!({
++                "type": "compaction",
++                "encrypted_content": "",
++            }))
++            .is_none()
++        );
++        assert!(
++            ResponsesCompactionItem::from_wire_value(&serde_json::json!({
++                "type": "compaction",
++                "encrypted_content": "sealed",
++                "internal_chat_message_metadata_passthrough": {"turn_id": 7},
++            }))
++            .is_none()
++        );
++    }
++
++    #[test]
++    fn responses_compaction_replays_only_to_exact_origin_at_original_position() {
++        let origin = crate::ReasoningOrigin {
++            route: "https://example.test/v1".to_owned(),
++            api_backend: crate::ApiBackend::Responses,
++            model: "gpt-test".to_owned(),
++        };
++        let checkpoint = ResponsesCompactionItem {
++            id: Some("cmp_1".to_owned()),
++            encrypted_content: "sealed".to_owned(),
++            internal_chat_message_metadata_passthrough: None,
++            origin: Some(origin.clone()),
++        };
++        let mut request = ConversationRequest {
++            items: vec![
++                ConversationItem::system("system"),
++                ConversationItem::user("before"),
++                ConversationItem::ResponsesCompaction(checkpoint),
++                ConversationItem::user("after"),
++            ],
++            reasoning_origin: Some(origin),
++            ..Default::default()
++        };
++
++        let typed: rs::CreateResponse = (&request).into();
++        let mut body = serde_json::to_value(typed).unwrap();
++        let entries = responses_extra_input_entries(&request);
++        assert_eq!(entries.len(), 1);
++        assert_eq!(entries[0].0, 2);
++        let input = body["input"].as_array_mut().unwrap();
++        let (position, value) = entries.into_iter().next().unwrap();
++        input.insert(position, value);
++        assert_eq!(input[2]["type"], "compaction");
++        assert_eq!(input[3]["role"], "user");
++
++        request.reasoning_origin.as_mut().unwrap().model = "other-model".to_owned();
++        assert!(responses_extra_input_entries(&request).is_empty());
++    }
+ }
+diff --git a/crates/codegen/xai-grok-sampling-types/src/types.rs b/crates/codegen/xai-grok-sampling-types/src/types.rs
+index 3c1866b..8b82a0d 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/types.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/types.rs
+@@ -1103,6 +1103,11 @@ pub struct CreateResponseWrapper {
+     /// `async_openai`'s `rs::Tool` enum (e.g., `x_search`). Injected
+     /// as raw JSON into the serialized request body's `tools` array.
+     pub extra_tool_entries: Vec<serde_json::Value>,
++
++    /// Raw Responses input items omitted by async-openai's typed model,
++    /// paired with their final input-array positions. Currently used for
++    /// opaque remote-compaction checkpoints.
++    pub extra_input_entries: Vec<(usize, serde_json::Value)>,
+ }
+ 
+ impl CreateResponseWrapper {
+@@ -1119,6 +1124,7 @@ impl CreateResponseWrapper {
+             x_grok_user_id: None,
+             trace: None,
+             extra_tool_entries: vec![],
++            extra_input_entries: vec![],
+         }
+     }
+ 
+diff --git a/crates/codegen/xai-grok-shell/src/extensions/notification.rs b/crates/codegen/xai-grok-shell/src/extensions/notification.rs
+index 618b591..7abcc3c 100644
+--- a/crates/codegen/xai-grok-shell/src/extensions/notification.rs
++++ b/crates/codegen/xai-grok-shell/src/extensions/notification.rs
+@@ -404,6 +404,34 @@ pub struct HookRunEntryDto {
+     pub output: Option<String>,
+ }
+ 
++/// The implementation that produced a successful compaction.
++///
++/// This is carried on [`SessionUpdate::AutoCompactCompleted`] so clients can
++/// distinguish a provider-native checkpoint from Grok Build's portable text
++/// summary. `PortableFallback` means a server-side attempt failed before the
++/// portable summarizer succeeded.
++#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
++#[serde(rename_all = "snake_case")]
++pub enum CompactionStrategy {
++    ServerSide,
++    Portable,
++    PortableFallback,
++    /// Preserve forward compatibility if a newer shell adds another strategy.
++    #[serde(other)]
++    Unknown,
++}
++
++impl CompactionStrategy {
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Self::ServerSide => "server_side",
++            Self::Portable => "portable",
++            Self::PortableFallback => "portable_fallback",
++            Self::Unknown => "unknown",
++        }
++    }
++}
++
+ #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+ #[serde(rename_all = "snake_case", tag = "sessionUpdate")]
+ pub enum SessionUpdate {
+@@ -437,6 +465,10 @@ pub enum SessionUpdate {
+         elapsed_ms: Option<i64>,
+         /// Summary preview (first ~100 chars of summary)
+         summary_preview: Option<String>,
++        /// Actual implementation that completed. `None` on payloads from
++        /// older shells.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        strategy: Option<CompactionStrategy>,
+     },
+     /// Auto-compact failed
+     AutoCompactFailed {
+@@ -1651,6 +1683,39 @@ mod tests {
+         ));
+     }
+ 
++    #[test]
++    fn auto_compact_strategy_is_backward_and_forward_compatible() {
++        let old_json = r#"{"sessionUpdate":"auto_compact_completed","tokens_after":42,"elapsed_ms":null,"summary_preview":null}"#;
++        let old: SessionUpdate = serde_json::from_str(old_json).unwrap();
++        assert!(matches!(
++            old,
++            SessionUpdate::AutoCompactCompleted { strategy: None, .. }
++        ));
++
++        let current = SessionUpdate::AutoCompactCompleted {
++            tokens_before: Some(100),
++            tokens_after: 42,
++            elapsed_ms: Some(10),
++            summary_preview: None,
++            strategy: Some(CompactionStrategy::ServerSide),
++        };
++        let json = serde_json::to_string(&current).unwrap();
++        assert!(json.contains(r#""strategy":"server_side""#));
++        assert_eq!(
++            serde_json::from_str::<SessionUpdate>(&json).unwrap(),
++            current
++        );
++
++        let future_json = r#"{"sessionUpdate":"auto_compact_completed","tokens_after":42,"elapsed_ms":null,"summary_preview":null,"strategy":"future_native"}"#;
++        assert!(matches!(
++            serde_json::from_str::<SessionUpdate>(future_json).unwrap(),
++            SessionUpdate::AutoCompactCompleted {
++                strategy: Some(CompactionStrategy::Unknown),
++                ..
++            }
++        ));
++    }
++
+     #[test]
+     fn memory_flush_completed_with_path_roundtrips() {
+         let update = SessionUpdate::MemoryFlushCompleted {
+diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/laziness_classifier.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/laziness_classifier.rs
+index 3eb3ada..87be072 100644
+--- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/laziness_classifier.rs
++++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/laziness_classifier.rs
+@@ -399,6 +399,7 @@ pub(crate) fn flatten_transcript_for_classifier(
+                     }
+                 }
+             }
++            ConversationItem::ResponsesCompaction(_) => {}
+         }
+     }
+     out
+diff --git a/crates/codegen/xai-grok-shell/src/session/compaction.rs b/crates/codegen/xai-grok-shell/src/session/compaction.rs
+index 3fac8e5..25712e2 100644
+--- a/crates/codegen/xai-grok-shell/src/session/compaction.rs
++++ b/crates/codegen/xai-grok-shell/src/session/compaction.rs
+@@ -7,6 +7,7 @@
+ //! lives alongside the primary one in `acp_session.rs`.
+ use super::SessionActor;
+ use super::is_project_instructions;
++use crate::extensions::notification::CompactionStrategy;
+ use crate::remote::DEFAULT_CONTEXT_WINDOW;
+ use crate::session::compaction_config::{
+     AsyncCompactionCache, SUPPRESS_AUTH, SUPPRESS_NONE, SUPPRESS_STICKY, SUPPRESS_TURN,
+@@ -17,7 +18,8 @@ use crate::session::helpers::compaction_context::CompactionInputs;
+ use crate::session::helpers::compaction_context::to_system_reminder;
+ use crate::session::helpers::session_compact::{
+     CompactOutput, CompactionOutcome, build_compaction_chat_history,
+-    build_two_pass_compaction_prompt, generate_session_compact, is_context_length_error,
++    build_two_pass_compaction_prompt, generate_remote_session_compact, generate_session_compact,
++    is_context_length_error, should_try_remote_compaction_v2,
+ };
+ use crate::session::persistence::PersistenceMsg;
+ use crate::session::two_pass::{
+@@ -27,7 +29,8 @@ use crate::session::two_pass::{
+ use agent_client_protocol as acp;
+ use std::sync::Arc;
+ use xai_chat_state::compaction_utils::{
+-    CompactedHistoryInput, CompactionAttempt, build_compacted_history, is_degenerate_summary,
++    CompactedHistoryInput, CompactionAttempt, build_compacted_history,
++    build_compacted_history_with_item, is_degenerate_summary,
+     prepare_conversation_for_verbatim_summarization, sanitize_compacted_history,
+     validate_compacted_history,
+ };
+@@ -57,6 +60,7 @@ fn fingerprint_prefix(items: &[ConversationItem]) -> u64 {
+             ConversationItem::ToolResult(_) => 3,
+             ConversationItem::BackendToolCall(_) => 4,
+             ConversationItem::Reasoning(_) => 5,
++            ConversationItem::ResponsesCompaction(_) => 6,
+         };
+         tag.hash(&mut h);
+         it.text_content().hash(&mut h);
+@@ -611,7 +615,7 @@ impl SessionActor {
+             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+         self.maybe_pre_compaction_flush(total_tokens, context_window, "pre_compaction")
+             .await;
+-        if let Err(e) = self
++        let strategy = match self
+             .run_compact_inner(
+                 user_context,
+                 None,
+@@ -619,11 +623,14 @@ impl SessionActor {
+             )
+             .await
+         {
+-            let span = tracing::Span::current();
+-            span.record("success", false);
+-            span.record("error", e.to_string().as_str());
+-            return Err(e);
+-        }
++            Ok(strategy) => strategy,
++            Err(e) => {
++                let span = tracing::Span::current();
++                span.record("success", false);
++                span.record("error", e.to_string().as_str());
++                return Err(e);
++            }
++        };
+         use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
+         let tokens_after = self.chat_state_handle.get_total_tokens().await;
+         let span = tracing::Span::current();
+@@ -634,6 +641,7 @@ impl SessionActor {
+             tokens_after,
+             elapsed_ms: None,
+             summary_preview: None,
++            strategy: Some(strategy),
+         })
+         .await;
+         Ok(())
+@@ -883,6 +891,7 @@ impl SessionActor {
+             compaction_prefire_waited_ms = tracing::field::Empty,
+             compaction_prefire_stale = tracing::field::Empty,
+             compaction_prefix_released = tracing::field::Empty,
++            compaction_strategy = tracing::field::Empty,
+         )
+     )]
+     async fn run_compact_inner(
+@@ -890,7 +899,7 @@ impl SessionActor {
+         user_context: Option<String>,
+         auto_continue: Option<crate::extensions::notification::AutoContinueInfo>,
+         trigger: xai_grok_telemetry::events::CompactionTrigger,
+-    ) -> Result<(), acp::Error> {
++    ) -> Result<CompactionStrategy, acp::Error> {
+         let tokens_before = self.chat_state_handle.get_total_tokens().await;
+         tracing::Span::current().record("compaction_tokens_before", tokens_before as i64);
+         self.signals_handle().record_compaction(tokens_before);
+@@ -955,6 +964,10 @@ impl SessionActor {
+         };
+         const SUMMARY_BUDGET_RESERVE_TOKENS: u64 = 32_768;
+         let verbatim_input_enabled = self.compaction.verbatim_input;
++        // Remote v2 must see the full active Responses transcript, regardless
++        // of the portable summarizer's optional lossy-input setting.
++        let remote_compaction_messages =
++            prepare_conversation_for_verbatim_summarization(full_conversation.clone(), false);
+         let simplified_messages = if verbatim_input_enabled {
+             xai_chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
+                 full_conversation,
+@@ -1064,6 +1077,46 @@ impl SessionActor {
+             .borrow()
+             .compaction_policy()
+             .wall_clock_budget_secs;
++        let (mut remote_compaction, compaction_strategy) = if should_try_remote_compaction_v2(
++            &sampling_config,
++        ) {
++            if user_context.is_some() {
++                tracing::warn!(
++                    model = %sampling_config.model,
++                    "remote compaction v2 ignores custom /compact guidance"
++                );
++            }
++            match generate_remote_session_compact(
++                remote_compaction_messages,
++                compaction_tools.clone(),
++                compaction_hosted_tools.clone(),
++                sampling_client.clone(),
++                self.session_info.id.clone(),
++                &sampling_config,
++                self.inference_idle_timeout,
++            )
++            .await
++            {
++                Ok(checkpoint) => {
++                    tracing::info!(
++                        model = %sampling_config.model,
++                        "Responses remote compaction v2 succeeded"
++                    );
++                    (Some(checkpoint), CompactionStrategy::ServerSide)
++                }
++                Err(error) => {
++                    tracing::warn!(
++                        model = %sampling_config.model,
++                        error = %error,
++                        "Responses remote compaction v2 failed; falling back to portable compaction"
++                    );
++                    (None, CompactionStrategy::PortableFallback)
++                }
++            }
++        } else {
++            (None, CompactionStrategy::Portable)
++        };
++        tracing::Span::current().record("compaction_strategy", compaction_strategy.as_str());
+         let sampler = crate::session::helpers::full_replace_compaction::ShellCompactionSampler::new(
+             use_short_prompt,
+             user_context.clone(),
+@@ -1092,11 +1145,17 @@ impl SessionActor {
+         };
+         let mut request_turns = simplified_messages.clone();
+         let mut input_overflow_rejections: u32 = 0;
+-        let two_pass_output = self
+-            .try_two_pass_pass2_apply(user_context.as_deref(), summary_strips_reasoning)
+-            .await;
+-        let mut compact_summary: Option<String> =
+-            two_pass_output.as_ref().map(|o| o.content.clone());
++        let two_pass_output = if remote_compaction.is_none() {
++            self.try_two_pass_pass2_apply(user_context.as_deref(), summary_strips_reasoning)
++                .await
++        } else {
++            None
++        };
++        let mut compact_summary: Option<String> = if remote_compaction.is_some() {
++            Some(String::new())
++        } else {
++            two_pass_output.as_ref().map(|o| o.content.clone())
++        };
+         while compact_summary.is_none() {
+             match xai_grok_compaction::sample_full_replace_summary(
+                 &sampler,
+@@ -1225,7 +1284,7 @@ impl SessionActor {
+             }
+         }
+         let telemetry = observer.into_telemetry();
+-        if two_pass_output.is_none() {
++        if two_pass_output.is_none() && remote_compaction.is_none() {
+             let request_chat_history = build_compaction_chat_history(
+                 request_turns,
+                 user_context.as_deref(),
+@@ -1248,6 +1307,15 @@ impl SessionActor {
+             );
+         }
+         let compact_output = match compact_summary {
++            Some(_) if remote_compaction.is_some() => CompactOutput {
++                content: String::new(),
++                stop_reason: Some("remote_compaction_v2".to_owned()),
++                truncated: false,
++                ttft_ms: None,
++                stream_ms: None,
++                delta_count: 0,
++                itl_max_ms: None,
++            },
+             Some(_) => match two_pass_output {
+                 Some(tp) => tp,
+                 None => sampler
+@@ -1576,13 +1644,15 @@ impl SessionActor {
+         let agents_md_reminder = self.agent.borrow().agents_md_user_reminder();
+         let compaction_context = state_context.for_compaction();
+         let compaction_state_context: &CompactionStateContext = &compaction_context;
+-        self.persist_compaction_segment(&segment_messages, &generate_session_compact);
++        if remote_compaction.is_none() {
++            self.persist_compaction_segment(&segment_messages, &generate_session_compact);
++        }
+         let transcript_hint = self.transcript_hint();
+         let summary_count = self
+             .compaction
+             .count
+             .load(std::sync::atomic::Ordering::Relaxed);
+-        let raw_compacted = build_compacted_history(CompactedHistoryInput {
++        let compacted_input = CompactedHistoryInput {
+             system_message: system_message.clone(),
+             user_message_prefix: user_message_prefix.clone(),
+             agents_md_reminder: agents_md_reminder.clone(),
+@@ -1592,7 +1662,14 @@ impl SessionActor {
+             summary_before_recent: use_short_prompt,
+             transcript_hint: transcript_hint.clone(),
+             summary_count,
+-        });
++        };
++        let raw_compacted = match remote_compaction.as_ref() {
++            Some(checkpoint) => build_compacted_history_with_item(
++                compacted_input,
++                ConversationItem::ResponsesCompaction(checkpoint.clone()),
++            ),
++            None => build_compacted_history(compacted_input),
++        };
+         let sanitize_result = sanitize_compacted_history(raw_compacted);
+         let compacted_history = if sanitize_result.stripped_tool_call_ids.is_empty() {
+             sanitize_result.items
+@@ -1616,7 +1693,7 @@ impl SessionActor {
+                 "compaction: sanitized history still has invalid ToolResults -- \
+                  falling back to minimal compacted history (no recent_messages)"
+             );
+-            build_compacted_history(CompactedHistoryInput {
++            let compacted_input = CompactedHistoryInput {
+                 system_message,
+                 user_message_prefix,
+                 agents_md_reminder,
+@@ -1626,7 +1703,14 @@ impl SessionActor {
+                 summary_before_recent: use_short_prompt,
+                 transcript_hint,
+                 summary_count,
+-            })
++            };
++            match remote_compaction.take() {
++                Some(checkpoint) => build_compacted_history_with_item(
++                    compacted_input,
++                    ConversationItem::ResponsesCompaction(checkpoint),
++                ),
++                None => build_compacted_history(compacted_input),
++            }
+         };
+         let prompt_index_at_compaction = self.chat_state_handle.get_prompt_index().await;
+         self.chat_state_handle
+@@ -1782,7 +1866,7 @@ impl SessionActor {
+             }
+         }
+         compaction.complete(tokens_after);
+-        Ok(())
++        Ok(compaction_strategy)
+     }
+     /// Check if auto-compact should be triggered based on context window usage.
+     /// Returns Some(AutoCompactTriggerInfo) if threshold is reached, None otherwise.
+@@ -2041,7 +2125,7 @@ impl SessionActor {
+             .await;
+         let elapsed_ms = compact_start.elapsed().as_millis() as i64;
+         match result {
+-            Ok(()) => {
++            Ok(strategy) => {
+                 let tokens_after = self.chat_state_handle.get_total_tokens().await;
+                 let span = tracing::Span::current();
+                 span.record("post_tokens", tokens_after as i64);
+@@ -2051,6 +2135,7 @@ impl SessionActor {
+                     tokens_after,
+                     elapsed_ms: Some(elapsed_ms),
+                     summary_preview: None,
++                    strategy: Some(strategy),
+                 })
+                 .await;
+                 Ok(())
+diff --git a/crates/codegen/xai-grok-shell/src/session/goal_evaluator.rs b/crates/codegen/xai-grok-shell/src/session/goal_evaluator.rs
+index d69ea99..acb9050 100644
+--- a/crates/codegen/xai-grok-shell/src/session/goal_evaluator.rs
++++ b/crates/codegen/xai-grok-shell/src/session/goal_evaluator.rs
+@@ -123,7 +123,9 @@ pub(crate) fn bounded_goal_transcript(items: &[ConversationItem]) -> String {
+             ConversationItem::User(_) => "user",
+             ConversationItem::Assistant(_) => "assistant",
+             ConversationItem::ToolResult(_) => "tool",
+-            ConversationItem::BackendToolCall(_) | ConversationItem::Reasoning(_) => continue,
++            ConversationItem::BackendToolCall(_)
++            | ConversationItem::Reasoning(_)
++            | ConversationItem::ResponsesCompaction(_) => continue,
+         };
+         let text = item.text_content();
+         let trimmed = text.trim();
+diff --git a/crates/codegen/xai-grok-shell/src/session/helpers/session_compact.rs b/crates/codegen/xai-grok-shell/src/session/helpers/session_compact.rs
+index 547fbab..0125858 100644
+--- a/crates/codegen/xai-grok-shell/src/session/helpers/session_compact.rs
++++ b/crates/codegen/xai-grok-shell/src/session/helpers/session_compact.rs
+@@ -2,8 +2,9 @@
+ //! gets passed to the next turn of the model
+ use crate::sampling::{
+     ApiBackend, ChatCompletionRequest, ChatRequestMessage, Client as OaiCompatClient,
+-    ConversationItem, ConversationRequest, ConversationToolChoice, HostedTool, SamplingError,
+-    ToolChoice, ToolDefinition, ToolSpec, conversation_to_chat_messages,
++    ConversationItem, ConversationRequest, ConversationToolChoice, HostedTool,
++    ResponsesCompactionItem, SamplingError, ToolChoice, ToolDefinition, ToolSpec,
++    conversation_to_chat_messages,
+ };
+ use agent_client_protocol as acp;
+ use async_openai::types::responses::ResponseStreamEvent;
+@@ -325,6 +326,47 @@ where
+         Err(_) => StreamStep::IdleTimeout,
+     }
+ }
++/// Whether this model should optimistically try Responses remote compaction
++/// v2 before the portable summarizer. The protocol is Responses-only; model
++/// matching is deliberately capability-by-convention so configured GPT
++/// passthrough routes can try it and fall back cleanly when unsupported.
++pub(crate) fn should_try_remote_compaction_v2(config: &SamplingConfig) -> bool {
++    config.api_backend == ApiBackend::Responses && config.model.to_ascii_lowercase().contains("gpt")
++}
++
++/// Ask the active Responses provider for one opaque remote-compaction v2
++/// checkpoint. This sends the ordinary active request shape and tools, with a
++/// final `compaction_trigger`; callers own fallback to portable compaction.
++pub(crate) async fn generate_remote_session_compact(
++    chat_history: Vec<ConversationItem>,
++    tools: Vec<ToolSpec>,
++    hosted_tools: Vec<HostedTool>,
++    client: OaiCompatClient,
++    session_id: acp::SessionId,
++    sampling_config: &SamplingConfig,
++    idle_timeout: std::time::Duration,
++) -> Result<ResponsesCompactionItem, SamplingError> {
++    let has_tools = !tools.is_empty();
++    let session_id = session_id.to_string();
++    let request = ConversationRequest {
++        items: chat_history,
++        tool_choice: has_tools.then_some(ConversationToolChoice::Auto),
++        tools,
++        hosted_tools,
++        model: Some(sampling_config.model.to_owned()),
++        x_grok_conv_id: Some(session_id.clone()),
++        x_grok_req_id: Some(format!("xai-remote-compact-{}", uuid::Uuid::new_v4())),
++        x_grok_session_id: Some(session_id.clone()),
++        x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
++        reasoning_effort: sampling_config.reasoning_effort,
++        prompt_cache_key: Some(session_id),
++        ..Default::default()
++    };
++    client
++        .conversation_compact_responses_v2(request, idle_timeout)
++        .await
++}
++
+ /// Generates a summary of the conversation for compaction.
+ /// Accepts `Vec<ConversationItem>` so the Responses path can preserve
+ /// encrypted reasoning. ChatCompletions converts at point of use.
+diff --git a/crates/codegen/xai-grok-subagent-resolution/src/context.rs b/crates/codegen/xai-grok-subagent-resolution/src/context.rs
+index ec477d6..69c100b 100644
+--- a/crates/codegen/xai-grok-subagent-resolution/src/context.rs
++++ b/crates/codegen/xai-grok-subagent-resolution/src/context.rs
+@@ -329,10 +329,9 @@ fn render_item_to_background(out: &mut String, item: &ConversationItem) {
+         ConversationItem::BackendToolCall(b) => {
+             let _ = writeln!(out, "[Backend Tool]: {}", b.text_summary());
+         }
+-        // Reasoning siblings don't enter the fork-background rendering —
+-        // they're rendered (when needed) inline with the surrounding
+-        // assistant turn elsewhere.
+-        ConversationItem::Reasoning(_) => {}
++        // Native opaque items don't enter fork-background rendering; they
++        // have no portable text representation.
++        ConversationItem::Reasoning(_) | ConversationItem::ResponsesCompaction(_) => {}
+     }
+ }
+ 
+-- 
+2.47.3
+

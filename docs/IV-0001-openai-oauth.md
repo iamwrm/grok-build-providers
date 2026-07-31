@@ -17,8 +17,9 @@
   credential resolution, sampler Responses transport, the built-in Codex
   catalog, [IV-0002](IV-0002-max-thinking.md),
   [IV-0005](IV-0005-last-turn-stats.md),
-  [IV-0007](IV-0007-codex-parallel-tools.md), and
-  [IV-0008](IV-0008-mid-session-model-switch.md).
+  [IV-0007](IV-0007-codex-parallel-tools.md),
+  [IV-0008](IV-0008-mid-session-model-switch.md), and
+  [IV-0010](IV-0010-openai-server-compaction.md).
 - **Key assumption:** the documented OpenAI public OAuth client and ChatGPT
   backend contract remain available; live checks must be rerun when that
   external contract changes.

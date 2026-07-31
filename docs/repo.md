@@ -45,8 +45,8 @@ git clone https://github.com/earendil-works/pi checkouts/pi
 
    ```bash
    cd checkouts/grok-build
-   # Example: export one newly committed patch after current patch 0016.
-   git format-patch HEAD~1..HEAD --start-number 17 \
+   # Example: export one newly committed patch after current patch 0017.
+   git format-patch HEAD~1..HEAD --start-number 18 --numbered \
      -o ../../patches/grok-build/
    ```
 
@@ -127,6 +127,7 @@ complete replacement series before deleting old patch files.
 | [IV-0007](IV-0007-codex-parallel-tools.md) | `0015` | Codex parallel tool-call wire + result ordering |
 | [IV-0008](IV-0008-mid-session-model-switch.md) | `0016` | Safe native reasoning replay across model/provider switches |
 | [IV-0009](IV-0009-raylib-paste-hover.md) | — | Standalone raylib paste-chip hover and scrolling-preview POC |
+| [IV-0010](IV-0010-openai-server-compaction.md) | `0017` | Remote Responses compaction v2 for GPT models with portable fallback |
 
 ## Conventions
 
