@@ -8,27 +8,20 @@
 #      rust-toolchain.toml),
 #   4. uploads a per-target archive (binary + upstream Apache-2.0 LICENSE).
 #
-# On a `v*` tag push the archives (plus SHA256SUMS) are attached to a GitHub
-# release. `workflow_dispatch` builds artifacts without publishing.
+# A newly created repository tag builds all targets, then attaches the archives
+# (plus SHA256SUMS) to the matching GitHub release. Branch pushes, pull requests,
+# manual dispatches, deleted tags, and moved tags do not publish releases.
 
 name: release
 
 on:
-  workflow_dispatch:
-    inputs:
-      target:
-        description: Build all targets or only Windows (for CI validation)
-        type: choice
-        required: true
-        default: all
-        options:
-          - all
-          - windows
   push:
-    tags: ["v*"]
+    # `**` includes tag names containing `/`; the job-level `created` guard
+    # rejects deletion and forced-update events for existing tags.
+    tags: ["**"]
 
 env:
-  # Base commit the patch series applies onto (docs/IV-0001..IV-0008).
+  # Base commit the patch series applies onto (see the IV documents).
   # Keep synchronized with build.yml and the exported patch baseline.
   GROK_BUILD_BASE: 500129c714ad1b10e6095481f4a8387a2ec52649
   CARGO_INCREMENTAL: "0"
@@ -42,33 +35,27 @@ permissions:
   contents: write
 
 jobs:
-  prepare:
-    name: prepare matrix
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
-    steps:
-      - id: matrix
-        name: Select build targets
-        shell: bash
-        env:
-          SELECTED: ${{ inputs.target }}
-        run: |
-          if [[ "${SELECTED:-all}" == "windows" ]]; then
-            matrix='{"include":[{"runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
-          else
-            matrix='{"include":[{"runner":"macos-latest","target":"aarch64-apple-darwin"},{"runner":"macos-15-intel","target":"x86_64-apple-darwin"},{"runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
-          fi
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-
   build:
     name: build (${{ matrix.target }})
-    needs: prepare
+    # A tag push can also represent deletion or a forced move. Publish only
+    # for creation of a previously nonexistent tag.
+    if: github.event.created == true
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - name: Checkout patches repo
         uses: actions/checkout@v7
@@ -133,7 +120,7 @@ jobs:
 
   release:
     name: publish release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event.created == true && startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -148,8 +135,10 @@ jobs:
         working-directory: dist
         run: sha256sum * > SHA256SUMS
 
-      - name: Create GitHub release
+      - name: Create GitHub release and upload executable archives
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
           files: dist/*
+          fail_on_unmatched_files: true
           generate_release_notes: true

@@ -28,8 +28,8 @@ upstream commit `500129c714ad1b10e6095481f4a8387a2ec52649`
 - Linux arm64 and x86_64
 - Windows x86_64
 
-Run the workflow manually to download Actions artifacts; those expire under
-GitHub's artifact-retention policy. The workflow is configured so pushing a
-`v*` tag publishes the five archives and `SHA256SUMS` as durable GitHub release
-assets (the tag-publication path has not yet been exercised). Archives include
-the upstream Apache-2.0 `LICENSE`.
+Creating any repository tag triggers all five release builds. After every
+build succeeds, the workflow creates the matching GitHub release and uploads
+the per-target executable archives plus `SHA256SUMS`. Branch pushes, pull
+requests, manual dispatches, tag deletions, and forced moves of existing tags
+do not publish releases. Archives include the upstream Apache-2.0 `LICENSE`.

@@ -1,6 +1,6 @@
 # IV-0004: Public repository and cross-platform build/release CI
 
-**Status:** implemented; current base verified by three-OS build CI, prior base verified on all five release targets; refreshed release CI and `v*` tag publication remain pending
+**Status:** implemented; current 17-patch base verified by three-OS build CI, prior base verified on all five release targets; first tag-only GitHub release publication remains pending
 **Upstream:** `checkouts/grok-build` (patch target for Windows portability)
 **Deliverable:** `.github/workflows/build.yml`, `.github/workflows/release.yml`, and consolidated patches `0009–0010`
 **Upstream base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
@@ -14,11 +14,11 @@
 - **Durable implementation:** `.github/workflows/build.yml`,
   `.github/workflows/release.yml`, and portability patches `0009–0010`.
 - **Known consumers:** every initiative that contributes a Grok patch, branch
-  pushes and pull requests, manual artifact users, tag-driven GitHub releases,
-  and maintainers rebasing the pinned upstream base.
+  pushes and pull requests, tag-driven GitHub releases, and maintainers
+  rebasing the pinned upstream base.
 - **Key assumption:** the selected GitHub runner labels, protoc/NASM setup, and
-  target toolchains remain available; tag publication is configured but still
-  unexercised.
+  target toolchains remain available; newly-created-tag publication is
+  configured but still unexercised.
 - **Evidence route:** clean-room `git am` is the drift guard. Rerun the workflow
   and preserve run links when current cross-platform truth matters; see
   [Evidence and reproduction](#evidence-and-reproduction).
@@ -27,9 +27,10 @@
 
 Make `https://github.com/iamwrm/grok-build-providers` public, compile every
 ordinary change on macOS, Linux, and Windows, and build the fully patched
-`xai-grok-pager` release binaries. Manual release runs should retain
-downloadable Actions artifacts; `v*` tags should publish a GitHub release with
-checksums.
+`xai-grok-pager` release binaries. Creating any repository tag should build all
+five targets and publish a matching GitHub release with executable archives
+and checksums. No branch, pull-request, manual, deleted-tag, or moved-tag event
+should publish a release.
 
 ## Approach
 
@@ -50,8 +51,8 @@ publish them.
 5. Builds `xai-grok-pager-bin` with Cargo's release profile, locked
    dependencies, no incremental state, and no release debug info.
 6. Packages the binary with upstream's Apache-2.0 `LICENSE`.
-7. Uploads one artifact per target; on `v*` tags, downloads all artifacts,
-   writes `SHA256SUMS`, and publishes a GitHub release.
+7. Transfers one archive per target between jobs, writes `SHA256SUMS`, and
+   publishes the archives as assets on the GitHub release matching the new tag.
 
 Release targets:
 
@@ -63,9 +64,10 @@ Release targets:
 | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` |
 | `windows-latest` | `x86_64-pc-windows-msvc` |
 
-Manual dispatch supports `target=all` (default) or `target=windows` so native
-MSVC fixes can be tested without rebuilding the four already-green targets.
-Tag events always select all targets.
+The release workflow has only an all-tag push trigger (`tags: ["**"]`). A
+`github.event.created` guard rejects tag deletion and forced-move events, and
+the static matrix always builds all five targets. Ordinary branch/PR validation
+remains the responsibility of `build.yml`.
 
 ## Windows portability patches
 
@@ -94,25 +96,26 @@ panic backtraces.
 
 - Replacing the ordered patch stack with a fork, submodule, or mutable checkout.
 - Publishing package-manager installers or auto-updaters.
-- Claiming tagged-release publication is verified before the first `v*` run.
+- Claiming tagged-release publication is verified before the first new-tag run.
 - Hiding patch drift by applying with a non-failing or best-effort mechanism.
 
 ## Evidence and reproduction
 
 Current `500129c` base:
 
-- All 16 patches apply cleanly in a detached clean-room worktree and reproduce
-  tree `f54122409a429e1071f6bb2a19bfcf984346adb6`, exactly matching the
+- All 17 patches apply cleanly in a detached clean-room worktree and reproduce
+  tree `7ffd123dca8e25be6461cda7328f2b546406bb98`, exactly matching the
   rebased development branch.
 - `cargo check -p xai-grok-pager-bin --locked` passes. The exact build-workflow
   command, `cargo build -p xai-grok-pager-bin --locked`, also passes locally on
   Linux with incremental and development debug info disabled.
   `git diff --check` and `cargo fmt --all -- --check` are clean.
-- Sampling-types and sampler library suites pass 299/299 and 174/174; focused
-  `search_replace` coverage passes 116/116. Additional focused evidence is
-  recorded in IV-0002 and IV-0005–IV-0008.
-- The refreshed three-OS build workflow passed on Linux, macOS, and Windows:
-  https://github.com/iamwrm/grok-build-providers/actions/runs/30523485961
+- Sampling-types, sampler, and chat-state library suites pass 301/301, 175/175,
+  and 352/352; focused `search_replace` coverage passes 116/116. Additional
+  focused evidence is recorded in IV-0002 and IV-0005–IV-0008 plus IV-0010.
+- The refreshed three-OS build workflow passed the complete 17-patch stack on
+  Linux, macOS, and Windows:
+  https://github.com/iamwrm/grok-build-providers/actions/runs/30610162380
 - The five-target release workflow has not yet run on this base. Native Windows
   release success remains previous-base evidence.
 
@@ -128,10 +131,11 @@ Prior-base CI validation:
   - `xai-grok-pager-aarch64-unknown-linux-gnu`
   - `xai-grok-pager-x86_64-unknown-linux-gnu`
   - `xai-grok-pager-x86_64-pc-windows-msvc`
-- Manual-dispatch release job was skipped as designed; it runs only for
-  `refs/tags/v*` and consumes the same build artifacts. Therefore archive
-  production is verified, but creation of an actual tagged GitHub release and
-  `SHA256SUMS` attachment remains untested until the first `v*` tag.
+- At that historical checkpoint, the manual-dispatch publish job was skipped
+  as designed and only Actions artifacts were produced. The current workflow
+  no longer exposes manual dispatch: creation of any tag is the sole release
+  trigger. Actual GitHub release creation and `SHA256SUMS` attachment remain
+  untested until the first new-tag run.
 - Windows-only validation run for the pre-consolidation equivalents of active
   patches `0009–0010`:
   https://github.com/iamwrm/grok-build-providers/actions/runs/29678121444
