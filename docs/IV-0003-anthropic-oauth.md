@@ -198,20 +198,20 @@ grok-build already had a complete Anthropic Messages transport:
 ## Evidence and reproduction
 
 - On the current base, `cargo check -p xai-grok-pager-bin --locked` passes.
-  The native Windows pager-bin release build remains previous-base evidence
-  until the refreshed release workflow runs; native Windows development
-  compilation passes in the current build workflow.
+  Native Windows development compilation and the five-target release build
+  pass; the release checkpoint is
+  https://github.com/iamwrm/grok-build-providers/actions/runs/30613123813.
 - Unit tests: 3 OAuth-flow tests (paste parsing, authorize URL/PKCE/state,
   expiry window), 2 sampler request-shape tests (identity prepend + cache +
   sampling-param strip; identity-only + idempotency), header-injection test,
-  and catalog test all pass; the current sampler lib suite passes 174/174.
+  and catalog test all pass; the current sampler lib suite passes 175/175.
 - At the recorded previous-base checkpoint, focused Anthropic shell tests
   passed 5/5 with an isolated `GROK_HOME`. Keep
   credential-reading tests isolated because stored OpenAI or Anthropic auth can
   change catalog visibility independently of this series.
 - `git diff --check` clean.
 - Clean-room patches `0001–0008` apply to `500129c`.
-- After the rebase, the sampling-types suite passes 299/299 and focused pager
+- After the rebase, the sampling-types suite passes 301/301 and focused pager
   reasoning-effort tests pass 9/9; the catalog test retains per-model native
   `xhigh` gating.
 - **Live verification checkpoint:** `grok anthropic login` browser flow

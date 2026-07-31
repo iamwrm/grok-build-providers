@@ -149,17 +149,17 @@ pre-flight failures.
 - Shell parallel-dispatch tests passed 13/13 while retaining concurrent
   execution and the ordered final-result publication contract.
 
-### Integrated 16-patch rebase checkpoint
+### Integrated 17-patch rebase checkpoint
 
-- Patch `0015` remains part of the durable `0001–0016` series.
-- All 16 patches clean-room apply to base `500129c` and produce tree
-  `f54122409a429e1071f6bb2a19bfcf984346adb6`; the clean-room pager-bin Cargo
+- Patch `0015` remains part of the durable `0001–0017` series.
+- All 17 patches clean-room apply to base `500129c` and produce tree
+  `7ffd123dca8e25be6461cda7328f2b546406bb98`; the clean-room pager-bin Cargo
   check passes.
-- Current sampling-types and sampler library suites pass 299/299 and 174/174.
-  Shell parallel-dispatch tests remain a previous-base checkpoint; the new
-  build workflow compiles but does not run test suites. The native Windows
-  release build is also previous-base evidence until the refreshed release
-  workflow runs; native Windows development compilation passes.
+- Current sampling-types, sampler, and chat-state library suites pass 301/301,
+  175/175, and 352/352. Shell parallel-dispatch tests remain a previous-base
+  checkpoint; the build workflow compiles but does not run test suites. Native
+  Windows development compilation and all five release targets pass; release
+  run: https://github.com/iamwrm/grok-build-providers/actions/runs/30613123813.
 
 This is an integration checkpoint, not a promise that later revisions will
 retain the same tree hash or counts. The recorded suite does not contain a

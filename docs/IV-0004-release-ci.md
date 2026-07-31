@@ -1,6 +1,6 @@
 # IV-0004: Public repository and cross-platform build/release CI
 
-**Status:** implemented; current 17-patch base verified by three-OS build CI, prior base verified on all five release targets; first tag-only GitHub release publication remains pending
+**Status:** implemented and verified; current 17-patch base passes three-OS build CI and five-target tag-driven release publication
 **Upstream:** `checkouts/grok-build` (patch target for Windows portability)
 **Deliverable:** `.github/workflows/build.yml`, `.github/workflows/release.yml`, and consolidated patches `0009–0010`
 **Upstream base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
@@ -17,8 +17,8 @@
   pushes and pull requests, tag-driven GitHub releases, and maintainers
   rebasing the pinned upstream base.
 - **Key assumption:** the selected GitHub runner labels, protoc/NASM setup, and
-  target toolchains remain available; newly-created-tag publication is
-  configured but still unexercised.
+  target toolchains remain available; `v20260731` is the first verified
+  newly-created-tag publication checkpoint.
 - **Evidence route:** clean-room `git am` is the drift guard. Rerun the workflow
   and preserve run links when current cross-platform truth matters; see
   [Evidence and reproduction](#evidence-and-reproduction).
@@ -96,7 +96,6 @@ panic backtraces.
 
 - Replacing the ordered patch stack with a fork, submodule, or mutable checkout.
 - Publishing package-manager installers or auto-updaters.
-- Claiming tagged-release publication is verified before the first new-tag run.
 - Hiding patch drift by applying with a non-failing or best-effort mechanism.
 
 ## Evidence and reproduction
@@ -116,8 +115,12 @@ Current `500129c` base:
 - The refreshed three-OS build workflow passed the complete 17-patch stack on
   Linux, macOS, and Windows:
   https://github.com/iamwrm/grok-build-providers/actions/runs/30610162380
-- The five-target release workflow has not yet run on this base. Native Windows
-  release success remains previous-base evidence.
+- Tag `v20260731` exercised the complete release path on the current base. All
+  five target builds and the publication job passed:
+  https://github.com/iamwrm/grok-build-providers/actions/runs/30613123813
+- The resulting public release contains five per-target executable archives
+  plus a five-entry `SHA256SUMS` file:
+  https://github.com/iamwrm/grok-build-providers/releases/tag/v20260731
 
 Prior-base CI validation:
 
@@ -134,8 +137,8 @@ Prior-base CI validation:
 - At that historical checkpoint, the manual-dispatch publish job was skipped
   as designed and only Actions artifacts were produced. The current workflow
   no longer exposes manual dispatch: creation of any tag is the sole release
-  trigger. Actual GitHub release creation and `SHA256SUMS` attachment remain
-  untested until the first new-tag run.
+  trigger. The `v20260731` current-base checkpoint above retires the former
+  publication-evidence gap.
 - Windows-only validation run for the pre-consolidation equivalents of active
   patches `0009–0010`:
   https://github.com/iamwrm/grok-build-providers/actions/runs/29678121444
@@ -152,3 +155,8 @@ Prior-base CI validation:
   suppresses final-link PDB generation with `/DEBUG:NONE`; keep both unless
   linker behavior or pager symbol volume changes.
 - Upstream is Apache-2.0; each archive includes its `LICENSE`.
+- The `v20260731` run succeeded while GitHub warned that
+  `actions/upload-artifact@v4`, `actions/download-artifact@v4`, and
+  `softprops/action-gh-release@v2` still declare Node.js 20 and were forced onto
+  Node.js 24. Refresh those action revisions when Node.js-24-native releases
+  become available.

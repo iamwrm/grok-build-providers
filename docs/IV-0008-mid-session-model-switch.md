@@ -1,6 +1,6 @@
 # IV-0008: Safe mid-session model and provider switching
 
-**Status:** implemented in patch `0016` (numbered `0017` before the former sampling-panic fix was folded into patch `0011`); rebased and verified by refreshed three-OS build CI, five-target release CI pending
+**Status:** implemented in patch `0016` (numbered `0017` before the former sampling-panic fix was folded into patch `0011`); rebased and verified by refreshed three-OS build CI and five-target release CI
 
 **Upstream:** `checkouts/grok-build`  
 **Deliverable:** `patches/grok-build/0016-Gate-native-reasoning-replay-by-route-API-and-model.patch`  
@@ -125,14 +125,13 @@ Release tests cover:
 - provenance JSONL backward compatibility;
 - route normalization without credential persistence.
 
-The `0.2.114` clean-room series applies all 16 patches to `500129c` and
-reproduces tree `f54122409a429e1071f6bb2a19bfcf984346adb6`. Current
-sampling-types (299/299) and sampler (174/174) library suites pass, as does the
-clean-room pager-bin Cargo check. Chat-state (351/351) remains a previous-base
-test checkpoint; the new build workflow compiles but does not run test suites.
-The native Windows pager-bin release build is also previous-base evidence until
-the refreshed release workflow runs; native Windows development compilation
-passes in the current build workflow.
+The `0.2.114` clean-room series applies all 17 patches to `500129c` and
+reproduces tree `7ffd123dca8e25be6461cda7328f2b546406bb98`. Current
+sampling-types (301/301), sampler (175/175), and chat-state (352/352) library
+suites pass, as does the clean-room pager-bin Cargo check. The build workflow
+compiles but does not run test suites. Native Windows development compilation
+and all five release targets pass; release run:
+https://github.com/iamwrm/grok-build-providers/actions/runs/30613123813.
 
 ### Manual cross-provider reproduction
 

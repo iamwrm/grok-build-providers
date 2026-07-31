@@ -139,18 +139,18 @@ empty.
 - The previous-base full release suite remains a historical checkpoint: 2,672
   passed and 6 ignored. It is not asserted as the current upstream total.
 
-### Integrated 16-patch rebase checkpoint
+### Integrated 17-patch rebase checkpoint
 
-- Patch `0014` remains part of the durable `0001–0016` series.
-- All 16 patches clean-room apply to base `500129c` and produce tree
-  `f54122409a429e1071f6bb2a19bfcf984346adb6`.
+- Patch `0014` remains part of the durable `0001–0017` series.
+- All 17 patches clean-room apply to base `500129c` and produce tree
+  `7ffd123dca8e25be6461cda7328f2b546406bb98`.
 - Current focused `xai-grok-tools` `search_replace` coverage passes 116/116;
-  sampling-types and sampler library suites pass 299/299 and 174/174; the
-  clean-room pager-bin Cargo check passes.
+  sampling-types, sampler, and chat-state library suites pass 301/301, 175/175,
+  and 352/352; the clean-room pager-bin Cargo check passes.
 - Shell parallel-dispatch tests (13/13) remain a previous-base checkpoint; the
-  new build workflow compiles but does not run test suites. The native Windows
-  release build is also previous-base evidence until the refreshed release
-  workflow runs; native Windows development compilation passes.
+  build workflow compiles but does not run test suites. Native Windows
+  development compilation and all five release targets pass; release run:
+  https://github.com/iamwrm/grok-build-providers/actions/runs/30613123813.
 
 This integration checkpoint validates the current Linux build and clean-room
 series but does not replace refreshed cross-platform CI or the historical

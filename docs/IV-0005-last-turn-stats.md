@@ -3,7 +3,7 @@
 **Status:** implemented in consolidated patches `0011–0013` (the sampling-layer panic fix, formerly follow-up patch `0016`, is folded into `0011`); raw-wire grounding and release-profile verification complete; user-guide patch deferred
 **Upstreams:** `checkouts/pi` + `../piagent-config/packages/ren-public-package/0012-last-turn.ts` (reference), `checkouts/grok-build` (patch target)
 **Deliverable:** patches `0011–0013`, continuing the IV-0001–IV-0004 stack
-**Implementation branch:** clean-room series based on `500129c`; current 16-patch series tree `f54122409a429e1071f6bb2a19bfcf984346adb6`
+**Implementation branch:** clean-room series based on `500129c`; current 17-patch series tree `7ffd123dca8e25be6461cda7328f2b546406bb98`
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
 
 ## Lifecycle map
@@ -249,15 +249,16 @@ all other unknown events remain fail-closed.
   absorption for `response.metadata` and `keepalive`, while unrelated unknown
   events remain rejected.
 - Patch `0013`: pager session-event tests 41/41; turn-completion tests 19/19.
-- `0.2.114` rebase clean-room: all 16 patches apply to `500129c` with `git am`
-  and reproduce tree `f54122409a429e1071f6bb2a19bfcf984346adb6`, byte-identical to the
-  rebased development branch.
+- `0.2.114` clean-room: all 17 patches apply to `500129c` with `git am`
+  and reproduce tree `7ffd123dca8e25be6461cda7328f2b546406bb98`, byte-identical to the
+  patched development branch.
 - Previous-base focused verification: telemetry 154/154; chat-state 351/351;
   pager turn-completion 67/67, session-usage 11/11, and sampling-control 4/4;
   shell usage projection 2/2, response accounting 5/5, and subagent folding
   16/16; the native Windows pager-bin release build passed.
-- Current-base verification: sampling-types 299/299, sampler 174/174, and
-  focused `search_replace` coverage 116/116 pass. `cargo check -p
-  xai-grok-pager-bin --locked`, `git diff --check`, and
+- Current-base verification: sampling-types 301/301, sampler 175/175,
+  chat-state 352/352, and focused `search_replace` coverage 116/116 pass.
+  `cargo check -p xai-grok-pager-bin --locked`, `git diff --check`, and
   `cargo fmt --all -- --check` pass. Refreshed native Linux, macOS, and Windows
-  build CI passes; five-target release CI remains pending.
+  build CI and all five tag-driven release targets pass; release run:
+  https://github.com/iamwrm/grok-build-providers/actions/runs/30613123813.

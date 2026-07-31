@@ -33,3 +33,5 @@ build succeeds, the workflow creates the matching GitHub release and uploads
 the per-target executable archives plus `SHA256SUMS`. Branch pushes, pull
 requests, manual dispatches, tag deletions, and forced moves of existing tags
 do not publish releases. Archives include the upstream Apache-2.0 `LICENSE`.
+The first verified tag-driven publication is
+[`v20260731`](https://github.com/iamwrm/grok-build-providers/releases/tag/v20260731).
