@@ -11,6 +11,10 @@ See [docs/repo.md](docs/repo.md) for the repo layout and workflow
 Repository work is organized by lifecycle initiatives (`docs/IV-*`) and
 horizontal doctrine (`docs/DC-*`).
 
+## Patch maintenance
+
+The Grok `1.0.13` rebase reduces the grok-build stack from 17 patches to nine. Changes now provided by upstream were dropped, related provider and platform fixes were consolidated, and each remaining patch is feature-scoped.
+
 ## Continuous builds
 
 `.github/workflows/build.yml` applies the complete patch series and compiles
@@ -20,8 +24,8 @@ pull requests. It does not publish artifacts.
 ## Release binaries
 
 `.github/workflows/release.yml` applies the complete patch series to pinned
-upstream commit `500129c714ad1b10e6095481f4a8387a2ec52649`
-(Grok `0.2.114`) and builds
+upstream commit `bb7f39d5858cbf5e00de639367f59debbdcb0138`
+(Grok `1.0.13`) and builds
 `xai-grok-pager` for:
 
 - macOS arm64 and x86_64

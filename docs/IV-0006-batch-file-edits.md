@@ -1,18 +1,20 @@
 # IV-0006: Apply multiple exact edits to one file as one validated batch
 
-**Status:** implemented in durable patch `0014`; historical integration checkpoints recorded below
+**Status:** implemented in durable patch `0008`
 **Upstream:** `checkouts/grok-build`
-**Deliverable:** `patches/grok-build/0014-Apply-exact-file-edits-atomically-in-batches.patch`
-**Implementation base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
+**Deliverable:** `patches/grok-build/0008-Apply-exact-file-edits-atomically-in-batches.patch`
+**Implementation base:** `bb7f39d5858cbf5e00de639367f59debbdcb0138` (Grok `1.0.13`)
 **Patch-0014 checkpoint:** commit `89b85da`; 14-patch tree `90ac009b4f64b731558f6365e60824e2f0643091`
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
+
+> **Grok 1.0.13 rebase:** This feature moved from patch `0014` to `0008` when the rebased stack was renumbered. Historical checkpoints below intentionally retain their original identifiers.
 
 ## Lifecycle map
 
 - **Why this exists:** reduce tool round trips while preserving exact-match
   validation and one-file write behavior for cognitively related edits.
-- **Durable implementation:** patch `0014`; the schema and runtime validator
-  jointly define single-edit versus batch mode.
+- **Durable implementation:** patch `0008`; the schema and runtime validator jointly define single-edit versus batch mode.
+
 - **Known consumers:** Grok's standard and concise `search_replace` tools,
   shell previews, workspace permissions, ACP diff rendering, Markdown-heavy
   agent sessions, and [IV-0007](IV-0007-codex-parallel-tools.md).

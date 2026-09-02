@@ -1,18 +1,20 @@
 # IV-0004: Public repository and cross-platform build/release CI
 
-**Status:** implemented and verified; current 17-patch base passes three-OS build CI and five-target tag-driven release publication
+**Status:** implemented; clean-room cross-platform validation is enforced by CI
 **Upstream:** `checkouts/grok-build` (patch target for Windows portability)
-**Deliverable:** `.github/workflows/build.yml`, `.github/workflows/release.yml`, and consolidated patches `0009–0010`
-**Upstream base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
+**Deliverable:** `.github/workflows/build.yml`, `.github/workflows/release.yml`, and patch `0005`
+**Upstream base:** `bb7f39d5858cbf5e00de639367f59debbdcb0138` (Grok `1.0.13`)
 **Historical IV-0004 boundary:** commit `639cea1`, tree `2ebe20d81cfbeeadbae2e41ad8802bba66fd5886` (10 active patches at that checkpoint)
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
+
+> **Grok 1.0.13 rebase:** The former protoc and MSVC patches (`0009–0010`) are consolidated into current patch `0005`; references to the 17-patch checkpoint below are historical evidence.
 
 ## Lifecycle map
 
 - **Why this exists:** continuously compile the complete local patch stack on
   each desktop OS and produce reproducible, downloadable release binaries.
-- **Durable implementation:** `.github/workflows/build.yml`,
-  `.github/workflows/release.yml`, and portability patches `0009–0010`.
+- **Durable implementation:** the build/release workflows and consolidated Windows portability patch `0005`.
+
 - **Known consumers:** every initiative that contributes a Grok patch, branch
   pushes and pull requests, tag-driven GitHub releases, and maintainers
   rebasing the pinned upstream base.

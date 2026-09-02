@@ -1,0 +1,323 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Mon, 20 Jul 2026 19:13:11 +0800
+Subject: [PATCH 9/9] Improve Codex parallel tool-call handling
+
+Force parallel_tool_calls on Responses/Codex requests, preserve
+Responses function-call item ids as call_id|fc_id for history replay,
+and commit local tool results in assistant source order while tools
+still execute concurrently.
+---
+ crates/codegen/xai-grok-sampler/src/client.rs |  7 +++
+ .../xai-grok-sampler/src/stream/responses.rs  |  5 +-
+ .../src/conversation.rs                       | 30 ++++++++++-
+ .../src/conversation/chat_completions.rs      |  8 +--
+ .../src/conversation/messages.rs              |  6 ++-
+ .../src/conversation/responses.rs             | 15 ++++--
+ .../src/conversation/responses_tests.rs       | 51 ++++++++++++++++++-
+ .../session/acp_session_impl/tool_calls.rs    | 17 +++++--
+ 8 files changed, 122 insertions(+), 17 deletions(-)
+
+diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
+index 95f3d61c..76df6fec 100644
+--- a/crates/codegen/xai-grok-sampler/src/client.rs
++++ b/crates/codegen/xai-grok-sampler/src/client.rs
+@@ -540,6 +540,12 @@ fn apply_chatgpt_codex_request_shape(body: &mut serde_json::Value) {
+     }
+ 
+     obj.insert("store".to_string(), serde_json::Value::Bool(false));
++    // Explicit multi-function-call permission (pi sets this on every Codex
++    // request). Omission can cause some deployments to emit only one tool call.
++    obj.insert(
++        "parallel_tool_calls".to_string(),
++        serde_json::Value::Bool(true),
++    );
+     if let Some(reasoning) = obj.get_mut("reasoning").and_then(|v| v.as_object_mut()) {
+         reasoning.insert(
+             "summary".to_string(),
+@@ -3418,6 +3424,7 @@ mod tests {
+         apply_chatgpt_codex_request_shape(&mut body);
+         assert_eq!(body["instructions"], "You are a helpful assistant.");
+         assert_eq!(body["store"], false);
++        assert_eq!(body["parallel_tool_calls"], true);
+ 
+         let mut body = serde_json::json!({
+             "input": [
+diff --git a/crates/codegen/xai-grok-sampler/src/stream/responses.rs b/crates/codegen/xai-grok-sampler/src/stream/responses.rs
+index b8804cfa..83d51f9d 100644
+--- a/crates/codegen/xai-grok-sampler/src/stream/responses.rs
++++ b/crates/codegen/xai-grok-sampler/src/stream/responses.rs
+@@ -855,7 +855,10 @@ fn inject_streaming_tool_fallback(
+     let tool_calls: Vec<ToolCall> = streamed
+         .into_values()
+         .map(|call| ToolCall {
+-            id: Arc::from(call.call_id),
++            id: Arc::from(xai_grok_sampling_types::encode_responses_tool_call_id(
++                &call.call_id,
++                call.id.as_deref(),
++            )),
+             name: call.name,
+             arguments: Arc::from(call.arguments),
+         })
+diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation.rs b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
+index f374841e..bfd75383 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/conversation.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/conversation.rs
+@@ -466,7 +466,13 @@ impl ReasoningContent {
+ /// A tool call made by the assistant that the client must execute locally.
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct ToolCall {
+-    /// Unique identifier for this tool call
++    /// Unique identifier for this tool call.
++    ///
++    /// For OpenAI Responses/Codex turns this may be compound
++    /// `call_id|item_id` (e.g. `call_abc|fc_xyz`) so history can replay both
++    /// the pairing id and the Responses item id. Use
++    /// [`responses_tool_call_parts`] when emitting wire FunctionCall /
++    /// FunctionCallOutput items.
+     pub id: Arc<str>,
+     /// Name of the function to call
+     pub name: String,
+@@ -474,6 +480,28 @@ pub struct ToolCall {
+     pub arguments: Arc<str>,
+ }
+ 
++/// Build a Responses-compatible tool-call id, preserving the item id when
++/// present (pi-style `call_id|fc_id`).
++pub fn encode_responses_tool_call_id(call_id: &str, item_id: Option<&str>) -> String {
++    match item_id.map(str::trim).filter(|id| !id.is_empty()) {
++        Some(item_id) => format!("{call_id}|{item_id}"),
++        None => call_id.to_owned(),
++    }
++}
++
++/// Split a stored tool-call id into `(call_id, optional item_id)`.
++///
++/// Plain `call_…` ids (Chat Completions, legacy sessions) return
++/// `(id, None)`. Compound Responses ids return both parts.
++pub fn responses_tool_call_parts(id: &str) -> (&str, Option<&str>) {
++    match id.split_once('|') {
++        Some((call_id, item_id)) if !call_id.is_empty() && !item_id.is_empty() => {
++            (call_id, Some(item_id))
++        }
++        _ => (id, None),
++    }
++}
++
+ /// Tool/function definition for the model
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct ToolSpec {
+diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation/chat_completions.rs b/crates/codegen/xai-grok-sampling-types/src/conversation/chat_completions.rs
+index f815a831..d55eb480 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/conversation/chat_completions.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/conversation/chat_completions.rs
+@@ -117,8 +117,9 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
+                 .into_iter()
+                 .map(|tc| {
+                     let arguments = sanitize_tool_arguments(&tc.id, &tc.name, tc.arguments.clone());
++                    let (call_id, _) = responses_tool_call_parts(tc.id.as_ref());
+                     ToolCallRequest::function(tc.name, arguments.as_ref().to_owned())
+-                        .with_id(tc.id.as_ref().to_owned())
++                        .with_id(call_id.to_owned())
+                 })
+                 .collect();
+ 
+@@ -133,8 +134,9 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
+             }
+         }
+         ConversationItem::ToolResult(t) => {
++            let (call_id, _) = responses_tool_call_parts(&t.tool_call_id);
+             if t.images.is_empty() {
+-                ChatRequestMessage::tool(t.tool_call_id, t.content.as_ref().to_owned())
++                ChatRequestMessage::tool(call_id.to_owned(), t.content.as_ref().to_owned())
+             } else {
+                 let mut blocks = vec![ChatContentBlock::Text {
+                     text: t.content.as_ref().to_owned(),
+@@ -153,7 +155,7 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
+                     content: MessageContent::Blocks(blocks),
+                     name: None,
+                     tool_calls: Vec::new(),
+-                    tool_call_id: Some(t.tool_call_id),
++                    tool_call_id: Some(call_id.to_owned()),
+                     model_id: None,
+                     reasoning_content: None,
+                 }
+diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation/messages.rs b/crates/codegen/xai-grok-sampling-types/src/conversation/messages.rs
+index 0fa61070..1dd63553 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/conversation/messages.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/conversation/messages.rs
+@@ -191,8 +191,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+                 for tc in &a.tool_calls {
+                     let input =
+                         serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
++                    let (call_id, _) = responses_tool_call_parts(tc.id.as_ref());
+                     pending_assistant.push(ContentBlock::ToolUse {
+-                        id: sanitize_tool_call_id(&tc.id),
++                        id: sanitize_tool_call_id(call_id),
+                         name: tc.name.clone(),
+                         input,
+                         cache_control: None,
+@@ -234,8 +235,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+                     }
+                     ToolResultContent::Blocks(blocks)
+                 };
++                let (call_id, _) = responses_tool_call_parts(&t.tool_call_id);
+                 pending_tool_results.push(ContentBlock::ToolResult {
+-                    tool_use_id: sanitize_tool_call_id(&t.tool_call_id),
++                    tool_use_id: sanitize_tool_call_id(call_id),
+                     content,
+                     cache_control: None,
+                 });
+diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation/responses.rs b/crates/codegen/xai-grok-sampling-types/src/conversation/responses.rs
+index 35aac651..878f198c 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/conversation/responses.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/conversation/responses.rs
+@@ -36,7 +36,10 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
+             rs::OutputItem::FunctionCall(fc) => {
+                 // Tied to the assistant turn: a ToolResult must follow each one in conversation order, so they are not siblings
+                 tool_calls.push(ToolCall {
+-                    id: Arc::<str>::from(fc.call_id),
++                    id: Arc::<str>::from(encode_responses_tool_call_id(
++                        &fc.call_id,
++                        fc.id.as_deref(),
++                    )),
+                     name: fc.name,
+                     arguments: Arc::<str>::from(fc.arguments),
+                 });
+@@ -130,7 +133,7 @@ impl From<&ConversationRequest> for rs::CreateResponse {
+             max_tool_calls: None,
+             metadata: None,
+             model: req.model.clone(),
+-            parallel_tool_calls: None,
++            parallel_tool_calls: Some(true),
+             previous_response_id: None,
+             prompt: None,
+             prompt_cache_key: req
+@@ -227,12 +230,13 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
+ 
+             for tc in &a.tool_calls {
+                 let arguments = sanitize_tool_arguments(&tc.id, &tc.name, tc.arguments.clone());
++                let (call_id, item_id) = responses_tool_call_parts(tc.id.as_ref());
+                 items.push(rs::InputItem::Item(rs::Item::FunctionCall(
+                     rs::FunctionToolCall {
+-                        call_id: tc.id.as_ref().to_owned(),
++                        call_id: call_id.to_owned(),
+                         name: tc.name.clone(),
+                         arguments: arguments.as_ref().to_owned(),
+-                        id: None,
++                        id: item_id.map(str::to_owned),
+                         status: None,
+                     },
+                 )));
+@@ -259,9 +263,10 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
+                 }
+                 rs::FunctionCallOutput::Content(parts)
+             };
++            let (call_id, _) = responses_tool_call_parts(&t.tool_call_id);
+             vec![rs::InputItem::Item(rs::Item::FunctionCallOutput(
+                 rs::FunctionCallOutputItemParam {
+-                    call_id: t.tool_call_id.clone(),
++                    call_id: call_id.to_owned(),
+                     output,
+                     id: None,
+                     status: None,
+diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation/responses_tests.rs b/crates/codegen/xai-grok-sampling-types/src/conversation/responses_tests.rs
+index a787c85b..292b3166 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/conversation/responses_tests.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/conversation/responses_tests.rs
+@@ -270,7 +270,7 @@ fn test_responses_api_response_to_conversation_item() {
+             arguments: r#"{"path": "/bar.txt"}"#.to_string(),
+             call_id: "call_789".to_string(),
+             name: "read_file".to_string(),
+-            id: None,
++            id: Some("fc_item_789".to_string()),
+             status: None,
+         })],
+         parallel_tool_calls: None,
+@@ -301,10 +301,57 @@ fn test_responses_api_response_to_conversation_item() {
+         panic!("Expected Assistant item");
+     };
+     assert_eq!(a.tool_calls.len(), 1);
+-    assert_eq!(a.tool_calls[0].id.as_ref(), "call_789");
++    assert_eq!(a.tool_calls[0].id.as_ref(), "call_789|fc_item_789");
+     assert_eq!(a.tool_calls[0].name, "read_file");
+ }
+ 
++#[test]
++fn responses_tool_call_id_round_trips_item_id_and_output_uses_call_id() {
++    let assistant = ConversationItem::assistant_tool_calls(vec![ToolCall {
++        id: Arc::from("call_abc|fc_xyz"),
++        name: "read_file".into(),
++        arguments: Arc::from(r#"{"path":"a.rs"}"#),
++    }]);
++    let result = ConversationItem::tool_result("call_abc|fc_xyz", "ok");
++    let req =
++        ConversationRequest::from_items(vec![ConversationItem::user("hi"), assistant, result]);
++    let resp: rs::CreateResponse = (&req).into();
++
++    assert_eq!(resp.parallel_tool_calls, Some(true));
++    let rs::InputParam::Items(items) = resp.input else {
++        panic!("expected items input");
++    };
++    let fc = items.iter().find_map(|item| match item {
++        rs::InputItem::Item(rs::Item::FunctionCall(fc)) => Some(fc),
++        _ => None,
++    });
++    let fc = fc.expect("function call");
++    assert_eq!(fc.call_id, "call_abc");
++    assert_eq!(fc.id.as_deref(), Some("fc_xyz"));
++
++    let output = items.iter().find_map(|item| match item {
++        rs::InputItem::Item(rs::Item::FunctionCallOutput(output)) => Some(output),
++        _ => None,
++    });
++    let output = output.expect("function call output");
++    assert_eq!(output.call_id, "call_abc");
++    assert!(output.id.is_none());
++}
++
++#[test]
++fn encode_and_split_responses_tool_call_ids() {
++    assert_eq!(
++        encode_responses_tool_call_id("call_1", Some("fc_2")),
++        "call_1|fc_2"
++    );
++    assert_eq!(encode_responses_tool_call_id("call_1", None), "call_1");
++    assert_eq!(
++        responses_tool_call_parts("call_1|fc_2"),
++        ("call_1", Some("fc_2"))
++    );
++    assert_eq!(responses_tool_call_parts("call_1"), ("call_1", None));
++}
++
+ #[test]
+ fn test_response_reasoning_effort_stamped_on_assistant() {
+     use crate::rs;
+diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
+index 5e3fc578..a62bb3dc 100644
+--- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
++++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
+@@ -910,9 +910,20 @@ impl SessionActor {
+         )>();
+         let drainer = tokio::spawn(
+             async move {
+-                while let Some(item) = dispatch_stream.next().await {
+-                    if dispatch_tx.send(item).is_err() {
+-                        break;
++                // Futures still execute concurrently, but results are forwarded
++                // in assistant source order so history replay stays deterministic.
++                let mut next_source_idx = 0usize;
++                let mut pending = std::collections::BTreeMap::new();
++                while let Some((idx, result, duration_ms)) = dispatch_stream.next().await {
++                    pending.insert(idx, (result, duration_ms));
++                    while let Some((result, duration_ms)) = pending.remove(&next_source_idx) {
++                        if dispatch_tx
++                            .send((next_source_idx, result, duration_ms))
++                            .is_err()
++                        {
++                            return;
++                        }
++                        next_source_idx += 1;
+                     }
+                 }
+             }

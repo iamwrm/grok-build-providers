@@ -1,21 +1,22 @@
-From 95d87a2d803baa234de581a42dc06422f910b350 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 18:01:00 +0800
-Subject: [PATCH 14/16] Apply exact file edits atomically in batches
+Subject: [PATCH 8/9] Apply exact file edits atomically in batches
 
 Let search_replace accept an ordered edits array for multiple exact changes to one file. Validate every replacement against evolving in-memory content and write only once after the complete batch succeeds, so a late miss or ambiguity leaves the file untouched. Preserve the legacy single-edit wire shape, exact matching, CRLF handling, Unicode fallback, concise output, and one FileWritten notification.
 ---
  .../session/acp_session_impl/tool_calls.rs    |  56 +-
  .../grok_build/search_replace/mod.rs          | 778 +++++++++++++++---
  .../grok_build_concise/search_replace.rs      |  65 +-
+ .../src/implementations/opencode/edit/mod.rs  |  51 +-
  .../src/permission/types.rs                   |   5 +-
- 4 files changed, 775 insertions(+), 129 deletions(-)
+ 5 files changed, 818 insertions(+), 137 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
-index 5577069..2f5a5ba 100644
+index b11bd828..5e3fc578 100644
 --- a/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
 +++ b/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs
-@@ -1643,32 +1643,41 @@ impl SessionActor {
+@@ -2059,32 +2059,41 @@ impl SessionActor {
              ),
              ToolInput::SearchReplace(sr) => {
                  let display_path = self.tool_context.cwd.join(&sr.file_path).to_path_buf();
@@ -78,7 +79,7 @@ index 5577069..2f5a5ba 100644
                  )
              }
              ToolInput::Bash(bash_tool) => execute_tool_call_parts(
-@@ -2962,9 +2971,10 @@ mod plan_mode_edit_gate_tests {
+@@ -3251,9 +3260,10 @@ mod plan_mode_edit_gate_tests {
          use xai_grok_tools::implementations::grok_build::search_replace::SearchReplaceInput;
          ToolInput::SearchReplace(SearchReplaceInput {
              file_path: path.into(),
@@ -92,7 +93,7 @@ index 5577069..2f5a5ba 100644
      }
      fn write(path: &str) -> ToolInput {
 diff --git a/crates/codegen/xai-grok-tools/src/implementations/grok_build/search_replace/mod.rs b/crates/codegen/xai-grok-tools/src/implementations/grok_build/search_replace/mod.rs
-index 2139a07..b00995a 100644
+index 5ee11851..d8767313 100644
 --- a/crates/codegen/xai-grok-tools/src/implementations/grok_build/search_replace/mod.rs
 +++ b/crates/codegen/xai-grok-tools/src/implementations/grok_build/search_replace/mod.rs
 @@ -56,19 +56,35 @@ impl SearchReplaceVersion {
@@ -911,7 +912,7 @@ index 2139a07..b00995a 100644
              old_string: old_string.to_string(),
              new_string: new_string.to_string(),
              replace_all: false,
-@@ -1039,6 +1420,209 @@ mod tests {
+@@ -1023,6 +1404,209 @@ mod tests {
              other => panic!("Expected EditsApplied, got {:?}", other),
          }
      }
@@ -1121,7 +1122,7 @@ index 2139a07..b00995a 100644
      #[tokio::test]
      async fn new_file_creation() {
          let tmp = TempDir::new().unwrap();
-@@ -1261,9 +1845,10 @@ mod tests {
+@@ -1245,9 +1829,10 @@ mod tests {
          }));
          let input = SearchReplaceInput {
              file_path: "test.txt".to_string(),
@@ -1134,7 +1135,7 @@ index 2139a07..b00995a 100644
          };
          let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
              .await
-@@ -2616,9 +3201,10 @@ neutTest_set);
+@@ -2600,9 +3185,10 @@ neutTest_set);
          }));
          let input = SearchReplaceInput {
              file_path: "test.txt".to_string(),
@@ -1148,7 +1149,7 @@ index 2139a07..b00995a 100644
          let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
              .await
 diff --git a/crates/codegen/xai-grok-tools/src/implementations/grok_build_concise/search_replace.rs b/crates/codegen/xai-grok-tools/src/implementations/grok_build_concise/search_replace.rs
-index 396e394..0bd72b9 100644
+index 396e394d..0bd72b99 100644
 --- a/crates/codegen/xai-grok-tools/src/implementations/grok_build_concise/search_replace.rs
 +++ b/crates/codegen/xai-grok-tools/src/implementations/grok_build_concise/search_replace.rs
 @@ -3,11 +3,13 @@
@@ -1268,11 +1269,88 @@ index 396e394..0bd72b9 100644
          };
          let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
              .await
+diff --git a/crates/codegen/xai-grok-tools/src/implementations/opencode/edit/mod.rs b/crates/codegen/xai-grok-tools/src/implementations/opencode/edit/mod.rs
+index 33dc5c0c..949f128c 100644
+--- a/crates/codegen/xai-grok-tools/src/implementations/opencode/edit/mod.rs
++++ b/crates/codegen/xai-grok-tools/src/implementations/opencode/edit/mod.rs
+@@ -91,12 +91,23 @@ impl TryFrom<crate::types::tool_io::ToolInput> for EditInput {
+     type Error = String;
+     fn try_from(value: crate::types::tool_io::ToolInput) -> Result<Self, Self::Error> {
+         match value {
+-            crate::types::tool_io::ToolInput::SearchReplace(sr) => Ok(Self {
+-                file_path: sr.file_path,
+-                old_string: sr.old_string,
+-                new_string: sr.new_string,
+-                replace_all: sr.replace_all,
+-            }),
++            crate::types::tool_io::ToolInput::SearchReplace(sr) => {
++                match (sr.old_string, sr.new_string, sr.edits) {
++                    (Some(old_string), Some(new_string), None) => Ok(Self {
++                        file_path: sr.file_path,
++                        old_string,
++                        new_string,
++                        replace_all: sr.replace_all,
++                    }),
++                    (None, None, Some(_)) => {
++                        Err("OpenCode edit does not support batched SearchReplace input".into())
++                    }
++                    _ => Err(
++                        "SearchReplace input must contain exactly one old_string/new_string edit"
++                            .into(),
++                    ),
++                }
++            }
+             crate::types::tool_io::ToolInput::Dynamic(v) => {
+                 serde_json::from_value(v).map_err(|e| format!("EditInput: {e}"))
+             }
+@@ -110,9 +121,10 @@ impl From<EditInput> for crate::types::tool_io::ToolInput {
+     fn from(value: EditInput) -> Self {
+         crate::implementations::grok_build::search_replace::SearchReplaceInput {
+             file_path: value.file_path,
+-            old_string: value.old_string,
+-            new_string: value.new_string,
++            old_string: Some(value.old_string),
++            new_string: Some(value.new_string),
+             replace_all: value.replace_all,
++            edits: None,
+         }
+         .into()
+     }
+@@ -544,6 +556,29 @@ mod tests {
+         assert_eq!(back.new_string, "new");
+     }
+ 
++    #[test]
++    fn batched_search_replace_does_not_convert_to_opencode_edit() {
++        use crate::implementations::grok_build::search_replace::{
++            SearchReplaceEdit, SearchReplaceInput,
++        };
++        use crate::types::tool_io::ToolInput;
++
++        let tool_input = ToolInput::SearchReplace(SearchReplaceInput {
++            file_path: "/tmp/denied.txt".to_string(),
++            old_string: None,
++            new_string: None,
++            replace_all: false,
++            edits: Some(vec![SearchReplaceEdit {
++                old_string: "old".to_string(),
++                new_string: "new".to_string(),
++                replace_all: false,
++            }]),
++        });
++
++        let err = EditInput::try_from(tool_input).expect_err("batch input must stay namespaced");
++        assert!(err.contains("does not support batched"), "{err}");
++    }
++
+     #[test]
+     fn replace_all_defaults_false_and_schema_is_boolean() {
+         let missing: EditInput =
 diff --git a/crates/codegen/xai-grok-workspace/src/permission/types.rs b/crates/codegen/xai-grok-workspace/src/permission/types.rs
-index cfda896..1401395 100644
+index 60058379..6c55adde 100644
 --- a/crates/codegen/xai-grok-workspace/src/permission/types.rs
 +++ b/crates/codegen/xai-grok-workspace/src/permission/types.rs
-@@ -602,9 +602,10 @@ mod tests {
+@@ -693,9 +693,10 @@ mod tests {
          use xai_grok_tools::types::ToolInput;
          let input = ToolInput::SearchReplace(SearchReplaceInput {
              file_path: "lib.rs".into(),
@@ -1285,6 +1363,3 @@ index cfda896..1401395 100644
          });
          let access = AccessKind::from(&input);
          assert!(
--- 
-2.47.3
-

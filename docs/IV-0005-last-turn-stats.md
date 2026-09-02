@@ -1,18 +1,20 @@
 # IV-0005: Last-prompt stats at turn end (cache read/write, TPS, cost)
 
-**Status:** implemented in consolidated patches `0011–0013` (the sampling-layer panic fix, formerly follow-up patch `0016`, is folded into `0011`); raw-wire grounding and release-profile verification complete; user-guide patch deferred
+**Status:** implemented in patches `0006–0007`
 **Upstreams:** `checkouts/pi` + `../piagent-config/packages/ren-public-package/0012-last-turn.ts` (reference), `checkouts/grok-build` (patch target)
-**Deliverable:** patches `0011–0013`, continuing the IV-0001–IV-0004 stack
-**Implementation branch:** clean-room series based on `500129c`; current 17-patch series tree `7ffd123dca8e25be6461cda7328f2b546406bb98`
+**Deliverable:** patches `0006–0007` in `patches/grok-build/`
+**Implementation base:** `bb7f39d5858cbf5e00de639367f59debbdcb0138` (Grok `1.0.13`); current stack has nine patches
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
+
+> **Grok 1.0.13 rebase:** Raw sampling diagnostics and turn metrics were consolidated as `0006–0007`. The former cache-write accounting overlay was dropped because current upstream supplies that accounting; older numbering below is a historical checkpoint.
 
 ## Lifecycle map
 
 - **Why this exists:** make each completed prompt cycle observable in the TUI
   and expose raw request/response evidence when provider accounting or wire
   compatibility needs diagnosis.
-- **Durable implementation:** patches `0011–0013`; patch `0011` also owns the
-  folded sampling-layer panic fix.
+- **Durable implementation:** patch `0006` for raw sampling diagnostics and patch `0007` for completed-turn usage display.
+
 - **Known consumers:** sampler diagnostics, shell usage aggregation, ACP
   completion metadata, pager turn markers, headless projections, and provider
   work in [IV-0001](IV-0001-openai-oauth.md) and

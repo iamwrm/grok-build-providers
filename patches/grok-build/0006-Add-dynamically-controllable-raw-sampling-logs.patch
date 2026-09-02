@@ -1,7 +1,7 @@
-From 9f0b37fab9c7a2d56a8248dc5b3ce698ae437b33 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:01 +0800
-Subject: [PATCH 11/16] Add dynamically controllable raw sampling logs
+Subject: [PATCH 6/9] Add dynamically controllable raw sampling logs
 
 Record fully shaped raw provider request bodies alongside response SSE chunks. Use one process-wide gate initialized by GROK_LOG_SAMPLING/--log-sampling, keep the tracing layer dynamically interested, and expose hidden /debug sampling on|off|status ACP controls with a full-payload privacy warning.
 
@@ -12,19 +12,19 @@ The JSON fmt formatter walks every ancestor when writing the spans array and pan
  .../src/app/dispatch/task_result.rs           |  27 ++
  .../src/app/dispatch/tests/router.rs          |  18 ++
  .../xai-grok-pager/src/app/effects/mod.rs     |  30 ++
- .../xai-grok-pager/src/app/event_loop.rs      |   5 +
- .../src/slash/commands/debug.rs               |  68 +++-
+ crates/codegen/xai-grok-pager/src/app/mod.rs  |   4 +
+ .../src/slash/commands/debug.rs               | 140 ++++----
  crates/codegen/xai-grok-sampler/src/client.rs |  10 +
  .../xai-grok-sampler/src/sampling_log.rs      |  90 +++++-
  .../xai-grok-shell/src/extensions/debug.rs    |  68 ++++
  .../xai-grok-telemetry/src/sampling_log.rs    | 298 +++++++++++++++++-
- 11 files changed, 634 insertions(+), 20 deletions(-)
+ 11 files changed, 649 insertions(+), 76 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager/src/app/actions.rs b/crates/codegen/xai-grok-pager/src/app/actions.rs
-index b888d3f..21a36b4 100644
+index 5c432afd..2246250b 100644
 --- a/crates/codegen/xai-grok-pager/src/app/actions.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/actions.rs
-@@ -33,6 +33,23 @@ pub enum SwitchModelError {
+@@ -31,6 +31,23 @@ pub enum SwitchModelError {
  ///
  /// Produced by [`super::input`] from key/mouse events.
  /// Consumed by [`super::dispatch::dispatch`] to mutate state and return effects.
@@ -48,9 +48,9 @@ index b888d3f..21a36b4 100644
  #[derive(Debug)]
  #[allow(clippy::large_enum_variant)]
  pub enum Action {
-@@ -316,6 +333,9 @@ pub enum Action {
-     /// Toggle the scroll flight recorder at runtime (`/debug log`;
-     /// `GROK_SCROLL_LOG=1` enables it from startup).
+@@ -307,6 +324,9 @@ pub enum Action {
+     ToggleFpsHud,
+     /// Toggle the scroll flight recorder at runtime (`/debug log`; `GROK_SCROLL_LOG=1` enables it from startup).
      ToggleScrollLog,
 +    /// Enable, disable, or inspect full raw sampling logs in both the pager and
 +    /// its in-process agent worker (`/debug sampling on|off|status`).
@@ -58,7 +58,7 @@ index b888d3f..21a36b4 100644
      /// Print the `/debug` toggles and their on/off state to the transcript.
      ShowDebugStatus,
      /// Copy selected block's content to clipboard.
-@@ -1545,6 +1565,11 @@ pub enum Effect {
+@@ -1489,6 +1509,11 @@ pub enum Effect {
          agent_id: AgentId,
          session_id: acp::SessionId,
      },
@@ -70,9 +70,9 @@ index b888d3f..21a36b4 100644
      /// Kill a background task.
      KillBgTask {
          session_id: acp::SessionId,
-@@ -2387,6 +2412,12 @@ pub enum TaskResult {
+@@ -2436,6 +2461,12 @@ pub enum TaskResult {
          agent_id: AgentId,
-         result: Result<(), String>,
+         result: Result<(), crate::app::effects::CompactError>,
      },
 +    /// Runtime raw sampling-log switch completed in the agent worker.
 +    SamplingLogSet {
@@ -80,14 +80,14 @@ index b888d3f..21a36b4 100644
 +        requested: SamplingLogAction,
 +        result: Result<bool, String>,
 +    },
-     /// Background task kill result. `outcome` is `None` when the agent
-     /// returned an error envelope or an unparseable payload (treated as
-     /// "clear pending state, keep the row").
+     /// Background task kill result.
+     /// `outcome` is `None` when the agent returned an error envelope or an unparseable payload (treated as "clear pending state, keep the row").
+     BgTaskKilled {
 diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs
-index 65e7c6d..5a548f1 100644
+index a44167a1..591559cd 100644
 --- a/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/dispatch/router.rs
-@@ -547,13 +547,20 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
+@@ -634,13 +634,20 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
              }
              vec![]
          }
@@ -100,7 +100,7 @@ index 65e7c6d..5a548f1 100644
          Action::ShowDebugStatus => {
              let on = |b: bool| if b { "on" } else { "off" };
              let msg = format!(
--                "debug toggles: scroll {} \u{00b7} fps {} \u{00b7} log {} \u{2014} toggle with /debug <scroll|fps|log>",
+-                "debug toggles: scroll {} \u{00b7} fps {} \u{00b7} log {}. Toggle with /debug <scroll|fps|log>",
 +                "debug toggles: scroll {} \u{00b7} fps {} \u{00b7} log {} \u{00b7} sampling {} \u{2014} use /debug <scroll|fps|log|sampling on|off|status>",
                  on(app.scroll_debug_hud.enabled()),
                  on(app.fps_hud.enabled()),
@@ -110,10 +110,10 @@ index 65e7c6d..5a548f1 100644
              if let Some(agent) = get_active_agent_mut(app) {
                  agent
 diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
-index 239c96d..32235c8 100644
+index 644359dd..e5218d16 100644
 --- a/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
-@@ -529,6 +529,33 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
+@@ -756,6 +756,33 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
          TaskResult::CompactComplete { agent_id, result } => {
              handle_compact_complete(app, agent_id, result)
          }
@@ -148,10 +148,10 @@ index 239c96d..32235c8 100644
              agent_id,
              model_id,
 diff --git a/crates/codegen/xai-grok-pager/src/app/dispatch/tests/router.rs b/crates/codegen/xai-grok-pager/src/app/dispatch/tests/router.rs
-index b7388c0..421a033 100644
+index 096873e1..10419b53 100644
 --- a/crates/codegen/xai-grok-pager/src/app/dispatch/tests/router.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/dispatch/tests/router.rs
-@@ -2582,11 +2582,29 @@ fn show_debug_status_emits_toggle_states_to_transcript() {
+@@ -2808,11 +2808,29 @@ fn show_debug_status_emits_toggle_states_to_transcript() {
          .unwrap_or_else(|| panic!("status line missing, got {texts:?}"));
      assert!(status.contains("fps on"), "got: {status}");
      assert!(status.contains("log off"), "got: {status}");
@@ -182,10 +182,10 @@ index b7388c0..421a033 100644
  #[test]
  fn toggle_scroll_log_flips_recorder_and_reports_path() {
 diff --git a/crates/codegen/xai-grok-pager/src/app/effects/mod.rs b/crates/codegen/xai-grok-pager/src/app/effects/mod.rs
-index 70bb99b..158686d 100644
+index 02d5995c..2845a3cb 100644
 --- a/crates/codegen/xai-grok-pager/src/app/effects/mod.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/effects/mod.rs
-@@ -1529,6 +1529,36 @@ pub(crate) fn execute(
+@@ -1683,6 +1683,36 @@ pub(crate) fn execute(
                      }
                  });
          }
@@ -222,45 +222,62 @@ index 70bb99b..158686d 100644
          Effect::FetchPromptHistory { agent_id, cwd, session_id } => {
              let tx = acp_tx.clone();
              tasks
-diff --git a/crates/codegen/xai-grok-pager/src/app/event_loop.rs b/crates/codegen/xai-grok-pager/src/app/event_loop.rs
-index 0f44df3..03af1cf 100644
---- a/crates/codegen/xai-grok-pager/src/app/event_loop.rs
-+++ b/crates/codegen/xai-grok-pager/src/app/event_loop.rs
-@@ -740,6 +740,11 @@ pub(crate) async fn run(
+diff --git a/crates/codegen/xai-grok-pager/src/app/mod.rs b/crates/codegen/xai-grok-pager/src/app/mod.rs
+index d636cd90..f1dcd774 100644
+--- a/crates/codegen/xai-grok-pager/src/app/mod.rs
++++ b/crates/codegen/xai-grok-pager/src/app/mod.rs
+@@ -926,6 +926,10 @@ pub async fn run(
+     );
      if args.log_sampling {
-         // SAFETY: called before any threads are spawned by init_tracing.
          unsafe { std::env::set_var("GROK_LOG_SAMPLING", "1") };
-+        // The in-process agent may have touched the shared gate while the pager
-+        // was connecting, before this CLI flag is applied. Explicitly set the
-+        // same runtime gate so `--log-sampling` remains a reliable startup
-+        // enable path even after the gate becomes mutable.
++        // The embedded agent can initialize the process-wide gate before the
++        // pager reaches this point; set it explicitly instead of relying only
++        // on the environment's first-read semantics.
 +        xai_grok_telemetry::sampling_log::set_enabled(true);
      }
      let tracing_handle = crate::tracing::init_tracing();
- 
+     let pending_startup = xai_grok_telemetry::startup::PendingStartup::new();
 diff --git a/crates/codegen/xai-grok-pager/src/slash/commands/debug.rs b/crates/codegen/xai-grok-pager/src/slash/commands/debug.rs
-index 22eed88..9d9dc5f 100644
+index f79d0477..d2de7e3d 100644
 --- a/crates/codegen/xai-grok-pager/src/slash/commands/debug.rs
 +++ b/crates/codegen/xai-grok-pager/src/slash/commands/debug.rs
-@@ -1,4 +1,4 @@
--//! `/debug` — debug-overlay toggles (scroll HUD, FPS HUD, scroll log).
-+//! `/debug` — hidden runtime diagnostics and logging controls.
+@@ -1,46 +1,48 @@
+-//! `/debug`: debug-overlay toggles (scroll HUD, FPS HUD, scroll log).
++//! `/debug`: hidden runtime diagnostics and logging controls.
  //!
- //! Registration/visibility split: the command is registered on EVERY binary
- //! and fully functional in release — like the hidden diagnostics it fronts
-@@ -17,8 +17,10 @@
- //! - `/debug log` — the scroll flight recorder
- //!   ([`crate::input::scroll_log`]), runtime-constructed to a fresh
- //!   timestamped path.
-+//! - `/debug sampling on|off|status` — full raw provider request/response
-+//!   recording in `~/.grok/logs/sampling.jsonl`.
- 
+-//! The command is registered on every binary and fully functional in release, like the hidden diagnostics it fronts (`/scroll-debug`, `/gboom`).
+-//! It is listed (dropdown, completion, recognized-token highlight via `visible()`) only on debug binaries (`cfg(debug_assertions)`).
+-//! Release users never see it in a menu, but support can still ask them to type it.
++//! The command stays registered in release builds so support can ask users to
++//! type it, but completion surfaces list it only in debug builds.
+ //!
+-//! Subcommands (args-based; a popup menu can come later):
+-//! - `/debug` bare: print the toggles and their state to the transcript.
+-//! - `/debug scroll`: the scroll-diagnostics HUD, the same [`Action::ToggleScrollDebugHud`] as `/scroll-debug`.
+-//!   `/scroll-debug` stays registered as the hidden long-form alias.
+-//! - `/debug fps`: the release-safe FPS HUD ([`crate::views::fps_hud`]).
+-//! - `/debug log`: the scroll flight recorder (`input::scroll_log` in xai-grok-pager-render), constructed at runtime to a fresh timestamped path.
+-
 -use crate::app::actions::Action;
++//! - `/debug`: show current toggle states.
++//! - `/debug scroll`: toggle the scroll diagnostics HUD.
++//! - `/debug fps`: toggle the FPS HUD.
++//! - `/debug log`: toggle the scroll flight recorder.
++//! - `/debug sampling on|off|status`: control full provider payload logging.
++
 +use crate::app::actions::{Action, SamplingLogAction};
- use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+ use crate::slash::command::{
+     AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand, slash_meta,
+ };
  
- /// Whether `/debug` is listed on completion surfaces. `visible()` returns
-@@ -33,6 +35,15 @@ const SUBCOMMANDS: &[(&str, &str)] = &[
+-/// Whether `/debug` is listed in the dropdown and completions.
+-/// `visible()` returns this constant, so release builds hide the command through `cfg!(debug_assertions)` itself rather than a runtime check.
+-/// Tests always compile with `debug_assertions`, so no assertion can cover the release half; the constant carries it by construction.
++/// Whether `/debug` is listed in dropdowns and completions.
+ pub const LISTED_IN_COMPLETIONS: bool = cfg!(debug_assertions);
+ 
+-/// Subcommand name/description pairs, one source for both `run` and `suggest_args`.
+ const SUBCOMMANDS: &[(&str, &str)] = &[
      ("scroll", "Toggle the scroll-diagnostics HUD"),
      ("fps", "Toggle the FPS overlay"),
      ("log", "Toggle the scroll flight recorder (JSONL)"),
@@ -275,31 +292,48 @@ index 22eed88..9d9dc5f 100644
 +    ),
  ];
  
- /// Debug-overlay toggles; listed only on debug binaries.
-@@ -44,11 +55,11 @@ impl SlashCommand for DebugCommand {
+-/// Debug-overlay toggles; listed only on debug binaries.
+ pub struct DebugCommand;
+ 
+ impl SlashCommand for DebugCommand {
+     slash_meta! {
+         name: "debug",
+-        description: "Toggle debug overlays",
+-        usage: "/debug [scroll|fps|log]",
++        description: "Control debug diagnostics",
++        usage: "/debug [scroll|fps|log|sampling on|off|status]",
+         takes_args: true,
+-        arg_placeholder: "scroll | fps | log",
++        arg_placeholder: "scroll | fps | log | sampling on|off|status",
      }
  
-     fn description(&self) -> &str {
--        "Toggle debug overlays"
-+        "Control debug diagnostics"
+-    /// Listed on debug binaries only; release keeps it registered but unlisted.
+     fn visible(&self, _ctx: &AppCtx) -> bool {
+         LISTED_IN_COMPLETIONS
      }
+@@ -49,11 +51,11 @@ impl SlashCommand for DebugCommand {
+         Some(
+             SUBCOMMANDS
+                 .iter()
+-                .map(|&(name, desc)| ArgItem {
+-                    display: name.to_string(),
+-                    match_text: name.to_string(),
+-                    insert_text: name.to_string(),
+-                    description: desc.to_string(),
++                .map(|&(name, description)| ArgItem {
++                    display: name.to_owned(),
++                    match_text: name.to_owned(),
++                    insert_text: name.to_owned(),
++                    description: description.to_owned(),
+                 })
+                 .collect(),
+         )
+@@ -61,13 +63,17 @@ impl SlashCommand for DebugCommand {
  
-     fn usage(&self) -> &str {
--        "/debug [scroll|fps|log]"
-+        "/debug [scroll|fps|log|sampling on|off|status]"
-     }
- 
-     fn takes_args(&self) -> bool {
-@@ -56,7 +67,7 @@ impl SlashCommand for DebugCommand {
-     }
- 
-     fn arg_placeholder(&self) -> Option<&str> {
--        Some("scroll | fps | log")
-+        Some("scroll | fps | log | sampling on|off|status")
-     }
- 
-     /// Debug binaries only; release keeps it registered but unlisted.
-@@ -85,8 +96,13 @@ impl SlashCommand for DebugCommand {
+     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+         match args.trim() {
+-            // Bare: the cheapest useful menu, a status line in scrollback
+             "" => CommandResult::Action(Action::ShowDebugStatus),
              "scroll" => CommandResult::Action(Action::ToggleScrollDebugHud),
              "fps" => CommandResult::Action(Action::ToggleFpsHud),
              "log" => CommandResult::Action(Action::ToggleScrollLog),
@@ -314,14 +348,75 @@ index 22eed88..9d9dc5f 100644
              )),
          }
      }
-@@ -171,6 +187,34 @@ mod tests {
-         ));
+@@ -95,22 +101,15 @@ mod tests {
+         }
      }
  
-+    #[test]
+-    /// Tests compile with `debug_assertions`, so this asserts the debug-binary half live: `/debug` must be visible here.
+-    /// The release half is untestable from a debug build.
+-    /// `visible()` returns `LISTED_IN_COMPLETIONS`, which a release compile evaluates to `false`; the `assert_eq!` pins `visible()` to it.
+     #[test]
+     fn debug_listed_on_debug_binaries_only() {
+         let models = ModelState::default();
+-        let listed = DebugCommand.visible(&app_ctx(&models));
+         assert_eq!(
+-            listed,
+-            cfg!(debug_assertions),
+-            "visible() must track the binary profile"
++            DebugCommand.visible(&app_ctx(&models)),
++            LISTED_IN_COMPLETIONS
+         );
+-        assert_eq!(listed, LISTED_IN_COMPLETIONS);
+     }
+ 
+-    /// `/debug scroll` and `/scroll-debug` must stay routed to the same action: the HUD has one toggle, two spellings.
+     #[test]
+     fn debug_scroll_routes_to_same_action_as_scroll_debug() {
+         let models = ModelState::default();
+@@ -126,21 +125,13 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn debug_bare_emits_status() {
+-        let models = ModelState::default();
+-        let mut ctx = make_ctx(&models);
+-        for args in ["", "   "] {
+-            assert!(matches!(
+-                DebugCommand.run(&mut ctx, args),
+-                CommandResult::Action(Action::ShowDebugStatus)
+-            ));
+-        }
+-    }
+-
+-    #[test]
+-    fn debug_fps_and_log_route_to_their_toggles() {
++    fn debug_routes_status_and_local_toggles() {
+         let models = ModelState::default();
+         let mut ctx = make_ctx(&models);
++        assert!(matches!(
++            DebugCommand.run(&mut ctx, ""),
++            CommandResult::Action(Action::ShowDebugStatus)
++        ));
+         assert!(matches!(
+             DebugCommand.run(&mut ctx, " fps "),
+             CommandResult::Action(Action::ToggleFpsHud)
+@@ -152,28 +143,51 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn debug_junk_subcommand_errors_helpfully() {
 +    fn debug_sampling_routes_each_runtime_action() {
-+        let models = ModelState::default();
-+        let mut ctx = make_ctx(&models);
+         let models = ModelState::default();
+         let mut ctx = make_ctx(&models);
+-        match DebugCommand.run(&mut ctx, "wat") {
+-            CommandResult::Error(msg) => {
+-                assert!(msg.contains("wat"), "must echo the bad option: {msg}");
+-                assert!(
+-                    msg.contains("scroll") && msg.contains("fps") && msg.contains("log"),
+-                    "must list the valid options: {msg}"
+-                );
+-            }
+-            other => panic!("expected Error, got {other:?}"),
 +        for (args, expected) in [
 +            ("sampling on", SamplingLogAction::On),
 +            (" sampling off ", SamplingLogAction::Off),
@@ -335,51 +430,54 @@ index 22eed88..9d9dc5f 100644
 +    }
 +
 +    #[test]
-+    fn debug_sampling_requires_an_explicit_action() {
++    fn debug_errors_include_the_valid_sampling_syntax() {
 +        let models = ModelState::default();
 +        let mut ctx = make_ctx(&models);
-+        match DebugCommand.run(&mut ctx, "sampling") {
-+            CommandResult::Error(message) => {
-+                assert!(message.contains("sampling on|off|status"), "got: {message}");
-+            }
-+            other => panic!("expected Error, got {other:?}"),
-+        }
-+    }
-+
++        for args in ["sampling", "wat"] {
++            let CommandResult::Error(message) = DebugCommand.run(&mut ctx, args) else {
++                panic!("expected error for {args}");
++            };
++            assert!(message.contains(args));
++            assert!(message.contains("sampling on|off|status"));
+         }
+     }
+ 
      #[test]
-     fn debug_junk_subcommand_errors_helpfully() {
+-    fn debug_suggest_args_lists_subcommands() {
++    fn debug_suggest_args_lists_all_subcommands() {
          let models = ModelState::default();
-@@ -194,6 +238,16 @@ mod tests {
+         let items = DebugCommand
              .suggest_args(&app_ctx(&models), "")
              .expect("suggestions");
-         let names: Vec<&str> = items.iter().map(|i| i.insert_text.as_str()).collect();
+-        let names: Vec<&str> = items.iter().map(|i| i.insert_text.as_str()).collect();
 -        assert_eq!(names, vec!["scroll", "fps", "log"]);
++        let names: Vec<&str> = items.iter().map(|item| item.insert_text.as_str()).collect();
 +        assert_eq!(
 +            names,
-+            vec![
++            [
 +                "scroll",
 +                "fps",
 +                "log",
 +                "sampling on",
 +                "sampling off",
-+                "sampling status"
++                "sampling status",
 +            ]
 +        );
      }
  }
 diff --git a/crates/codegen/xai-grok-sampler/src/client.rs b/crates/codegen/xai-grok-sampler/src/client.rs
-index ab65bc2..5737563 100644
+index 43e579d2..95f3d61c 100644
 --- a/crates/codegen/xai-grok-sampler/src/client.rs
 +++ b/crates/codegen/xai-grok-sampler/src/client.rs
-@@ -1155,6 +1155,7 @@ impl SamplingClient {
+@@ -1177,6 +1177,7 @@ impl SamplingClient {
              deployment_id: payload.x_grok_deployment_id.as_deref(),
              user_id: payload.x_grok_user_id.as_deref(),
          };
 +        crate::sampling_log::log_request_body("chat_completions", "chat/completions", &payload);
-         let http_request = grok_headers
-             .apply(self.post(self.endpoint("chat/completions")))
-             .json(&payload);
-@@ -1213,6 +1214,11 @@ impl SamplingClient {
+         let SentRequest {
+             builder,
+             sent_bearer,
+@@ -1236,6 +1237,11 @@ impl SamplingClient {
              deployment_id: payload.x_grok_deployment_id.as_deref(),
              user_id: payload.x_grok_user_id.as_deref(),
          };
@@ -388,47 +486,47 @@ index ab65bc2..5737563 100644
 +            "chat/completions",
 +            &streaming_request,
 +        );
-         let http_request = grok_headers
-             .apply(self.post(self.endpoint("chat/completions")))
-             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
-@@ -1429,6 +1435,7 @@ impl SamplingClient {
+         let SentRequest {
+             builder,
+             sent_bearer,
+@@ -1450,6 +1456,7 @@ impl SamplingClient {
          if self.defaults.auth_scheme == AuthScheme::ChatgptOauth {
              apply_chatgpt_codex_request_shape(&mut request_body);
          }
 +        crate::sampling_log::log_request_body("responses", "responses", &request_body);
-         let http_request = grok_headers
-             .apply(self.post(self.endpoint("responses")))
-             .json(&request_body);
-@@ -1581,6 +1588,7 @@ impl SamplingClient {
-             // Presence opts in; the server ignores the value.
-             http_request = http_request.header(DOOM_LOOP_CHECK_HEADER, "true");
+         let SentRequest {
+             builder,
+             sent_bearer,
+@@ -1600,6 +1607,7 @@ impl SamplingClient {
+                     DEFAULT_EXACT_REPETITION_MIN_TOKENS.to_string(),
+                 );
          }
 +        crate::sampling_log::log_request_body("responses", "responses", &request_body);
          let http_request = http_request.json(&request_body);
  
          let built_request = http_request.build().map_err(|e| {
-@@ -1775,6 +1783,7 @@ impl SamplingClient {
+@@ -1791,6 +1799,7 @@ impl SamplingClient {
              deployment_id: request.x_grok_deployment_id.as_deref(),
              user_id: request.x_grok_user_id.as_deref(),
          };
 +        crate::sampling_log::log_request_body("messages", "messages", &request.inner);
-         let http_request = grok_headers
-             .apply(self.post(self.endpoint("messages")))
-             .json(&request.inner);
-@@ -1882,6 +1891,7 @@ impl SamplingClient {
+         let SentRequest {
+             builder,
+             sent_bearer,
+@@ -1900,6 +1909,7 @@ impl SamplingClient {
              deployment_id: request.x_grok_deployment_id.as_deref(),
              user_id: request.x_grok_user_id.as_deref(),
          };
 +        crate::sampling_log::log_request_body("messages", "messages", &request.inner);
-         let http_request = grok_headers
-             .apply(self.post(self.endpoint("messages")))
-             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
+         let SentRequest {
+             builder,
+             sent_bearer,
 diff --git a/crates/codegen/xai-grok-sampler/src/sampling_log.rs b/crates/codegen/xai-grok-sampler/src/sampling_log.rs
-index 69e2eea..9a2bad1 100644
+index d7dcfa10..36d2a4ed 100644
 --- a/crates/codegen/xai-grok-sampler/src/sampling_log.rs
 +++ b/crates/codegen/xai-grok-sampler/src/sampling_log.rs
 @@ -1,10 +1,69 @@
- //! Sampling log — emits `tracing` events with `target: "sampling_log"`.
+ //! Emits `tracing` events with `target: "sampling_log"`.
  //! A dedicated layer in `xai-grok-telemetry` routes these to
 -//! `~/.grok/logs/sampling.jsonl`. Enable with `--log-sampling`.
 +//! `~/.grok/logs/sampling.jsonl`. Enable before startup with `--log-sampling`
@@ -498,7 +596,7 @@ index 69e2eea..9a2bad1 100644
  
  #[derive(Debug, Clone)]
  pub struct AuthInfo {
-@@ -35,3 +94,32 @@ pub fn request_span(
+@@ -34,3 +93,32 @@ pub fn request_span(
          reasoning_tokens = tracing::field::Empty,
      )
  }
@@ -532,18 +630,18 @@ index 69e2eea..9a2bad1 100644
 +    }
 +}
 diff --git a/crates/codegen/xai-grok-shell/src/extensions/debug.rs b/crates/codegen/xai-grok-shell/src/extensions/debug.rs
-index 2b9bfcf..2abb23a 100644
+index 2e2e074b..1945c46f 100644
 --- a/crates/codegen/xai-grok-shell/src/extensions/debug.rs
 +++ b/crates/codegen/xai-grok-shell/src/extensions/debug.rs
-@@ -8,6 +8,7 @@
- //! - `arm_auto_compact`: arm the next turn to unconditionally trigger
- //!   auto-compaction, regardless of context window usage.
+@@ -6,6 +6,7 @@
+ //! - `trigger_feedback`: fire a synthetic `FeedbackRequestNotification`.
+ //! - `arm_auto_compact`: make the next turn trigger auto-compaction unconditionally, regardless of context window usage.
  //! - `agent`: agent-process diagnostics (registry counts).
 +//! - `sampling`: enable, disable, or inspect full raw sampling logs at runtime.
  
  use agent_client_protocol as acp;
  
-@@ -24,6 +25,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+@@ -22,6 +23,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
          }
          "x.ai/debug/arm_auto_compact" => handle_arm_auto_compact(agent, args),
          "x.ai/debug/agent" => handle_agent(agent).await,
@@ -551,7 +649,7 @@ index 2b9bfcf..2abb23a 100644
          _ => Err(acp::Error::method_not_found()),
      }
  }
-@@ -35,6 +37,72 @@ async fn handle_agent(agent: &MvpAgent) -> ExtResult {
+@@ -33,6 +35,72 @@ async fn handle_agent(agent: &MvpAgent) -> ExtResult {
          .map_err(|e| acp::Error::internal_error().data(e.to_string()))
  }
  
@@ -625,7 +723,7 @@ index 2b9bfcf..2abb23a 100644
      use crate::session::feedback::{FeedbackMode, FeedbackTier};
  
 diff --git a/crates/codegen/xai-grok-telemetry/src/sampling_log.rs b/crates/codegen/xai-grok-telemetry/src/sampling_log.rs
-index e846169..c9d7853 100644
+index e846169f..c9d78533 100644
 --- a/crates/codegen/xai-grok-telemetry/src/sampling_log.rs
 +++ b/crates/codegen/xai-grok-telemetry/src/sampling_log.rs
 @@ -1,32 +1,145 @@
@@ -962,6 +1060,3 @@ index e846169..c9d7853 100644
 +        set_enabled(original);
 +    }
  }
--- 
-2.47.3
-

@@ -1,18 +1,19 @@
 # IV-0001: Add OpenAI (ChatGPT plan) OAuth provider to grok-build
 
-**Status:** implemented and exported
+**Status:** implemented in the current nine-patch stack
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
-**Deliverable:** patches `0001–0004` in `patches/grok-build/`
-**Implementation base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
+**Deliverable:** patches `0001`, `0003`, and `0004` in `patches/grok-build/`
+**Implementation base:** `bb7f39d5858cbf5e00de639367f59debbdcb0138` (Grok `1.0.13`)
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
+
+> **Grok 1.0.13 rebase:** OAuth and Codex transport are now one feature patch (`0001`); the shared authenticated catalogs and provider/model:effort parser live in `0003` and `0004`. Numbered patch discussions below are historical checkpoints from the former 17-patch layout.
 
 ## Lifecycle map
 
 - **Why this exists:** make ChatGPT-plan Codex models usable from Grok without
   requiring API-key billing or per-user model configuration.
-- **Durable implementation:** patches `0001–0004` plus
-  `configs/openai-codex.toml`; the disposable checkouts are reference and
-  patch-development locations, not lifecycle roots.
+- **Durable implementation:** patches `0001`, `0003`, and `0004` plus `configs/openai-codex.toml`.
+
 - **Known consumers:** Grok CLI login commands, pager model selection, shell
   credential resolution, sampler Responses transport, the built-in Codex
   catalog, [IV-0002](IV-0002-max-thinking.md),
@@ -299,7 +300,7 @@ confirm every loop completed on attempt 1 and no `inference_retry` appears in
 ### Maintenance state
 
 - Patches `0001–0004` are the current IV-0001 slice on base
-  `500129c714ad1b10e6095481f4a8387a2ec52649`.
+  `bb7f39d5858cbf5e00de639367f59debbdcb0138`.
 - Patch `0002` owns the complete Codex transport, including exact
   `response.metadata` and `keepalive` compatibility. Both informational event
   names are accepted from either the SSE `event` field or JSON `type`; all

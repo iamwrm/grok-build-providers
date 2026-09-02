@@ -1,19 +1,21 @@
 # IV-0008: Safe mid-session model and provider switching
 
-**Status:** implemented in patch `0016` (numbered `0017` before the former sampling-panic fix was folded into patch `0011`); rebased and verified by refreshed three-OS build CI and five-target release CI
+**Status:** retired from the local stack after the Grok `1.0.13` rebase
 
 **Upstream:** `checkouts/grok-build`  
-**Deliverable:** `patches/grok-build/0016-Gate-native-reasoning-replay-by-route-API-and-model.patch`  
-**Implementation base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
+**Deliverable:** none — current upstream replay and sanitization behavior is authoritative
+**Implementation base:** `bb7f39d5858cbf5e00de639367f59debbdcb0138` (Grok `1.0.13`)
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
+
+> **Grok 1.0.13 rebase:** Former patch `0016` was removed after comparison with current upstream. The problem statement and evidence below remain useful historical context, but they no longer describe a locally owned patch.
 
 ## Lifecycle map
 
 - **Why this exists:** prevent provider-native opaque reasoning state from
   crossing signing, encryption, API, model, or route boundaries during a
   mid-session switch.
-- **Durable implementation:** patch `0016`; `ReasoningOrigin` provenance and
-  wire-time sanitization are the behavior that must survive rebases.
+- **Durable implementation:** upstream Grok `1.0.13`; this repository no longer carries the former replay-gating patch.
+
 - **Known consumers:** Responses, Anthropic Messages, and Chat Completions
   conversion; session JSONL compatibility; every model-switch path; provider
   initiatives [IV-0001](IV-0001-openai-oauth.md) and
