@@ -1,20 +1,20 @@
-From b5701f3aac47b1638f34d743b15b2b78ebe9e408 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: grok-build-providers-verify <verify@invalid>
 Date: Mon, 20 Jul 2026 16:56:00 +0800
-Subject: [PATCH 03/16] Support provider/model:effort references
+Subject: [PATCH 4/9] Support provider/model:effort references
 
 Parse provider-qualified model references and optional reasoning effort in both -m and /model. Split only the last colon after first trying the exact model id, preserving model ids that contain colons and all existing syntax.
 ---
  crates/codegen/xai-grok-pager-bin/src/main.rs | 15 ++++-
- crates/codegen/xai-grok-pager/src/app/cli.rs  | 55 +++++++++++++++++
- .../src/slash/commands/model.rs               | 59 +++++++++++++++++++
- 3 files changed, 126 insertions(+), 3 deletions(-)
+ crates/codegen/xai-grok-pager/src/app/cli.rs  | 55 ++++++++++++++++
+ .../src/slash/commands/model.rs               | 63 ++++++++++++++++++-
+ 3 files changed, 127 insertions(+), 6 deletions(-)
 
 diff --git a/crates/codegen/xai-grok-pager-bin/src/main.rs b/crates/codegen/xai-grok-pager-bin/src/main.rs
-index 34427f3..a7fdddc 100644
+index 6ce11712..6d843eb1 100644
 --- a/crates/codegen/xai-grok-pager-bin/src/main.rs
 +++ b/crates/codegen/xai-grok-pager-bin/src/main.rs
-@@ -1089,10 +1089,15 @@ async fn run_agent_command(
+@@ -1230,10 +1230,15 @@ async fn run_agent_command(
          .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
      let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
          .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
@@ -31,27 +31,27 @@ index 34427f3..a7fdddc 100644
          .and_then(xai_grok_shell::sampling::types::parse_canonical_effort_token);
      let launch_yolo = xai_grok_shell::util::config::effective_yolo_for_launch(
          agent_args.yolo,
-@@ -2161,6 +2166,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
-         {
-             args.output_format = xai_grok_pager::headless::OutputFormat::Json;
+@@ -2375,6 +2380,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
          }
+         let memory_enabled_override = args.memory_enabled_override();
+         let memory_flush = args.memory_flush;
 +        // `-m model:effort` (pi-style single-token reference); explicit
 +        // `--effort` wins over the suffix.
 +        let (headless_model, headless_model_effort) =
 +            xai_grok_pager::app::cli::split_model_effort_reference(args.model.as_deref());
          return xai_grok_pager::headless::run_single_turn(
-             prompt,
+             headless_prompt,
              args.verbatim,
-@@ -2173,7 +2182,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
-                 trust: args.trust,
+@@ -2388,7 +2397,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                  output_format: args.output_format,
+                 include_partial_messages: args.include_partial_messages,
                  json_schema,
 -                model: args.model,
 +                model: headless_model,
                  rules: args.rules,
                  system_prompt_override: args.system_prompt_override.clone(),
                  continue_last_session: args.continue_last_session,
-@@ -2189,7 +2198,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
+@@ -2404,7 +2413,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                  deny_rules: args.deny_rules.clone(),
                  max_turns: args.max_turns,
                  permission_mode_flag: args.permission_mode_flag.clone(),
@@ -61,11 +61,11 @@ index 34427f3..a7fdddc 100644
                  background_wait_timeout: std::time::Duration::from_secs(
                      args.background_wait_timeout_secs,
 diff --git a/crates/codegen/xai-grok-pager/src/app/cli.rs b/crates/codegen/xai-grok-pager/src/app/cli.rs
-index be68b70..0576542 100644
+index f0a49458..f9ae635c 100644
 --- a/crates/codegen/xai-grok-pager/src/app/cli.rs
 +++ b/crates/codegen/xai-grok-pager/src/app/cli.rs
-@@ -143,6 +143,27 @@ See ~/.grok/README.md for more information.
-     /// var is set.
+@@ -151,6 +151,27 @@ See ~/.grok/README.md for more information.
+     /// Disabled when `[dashboard].enabled = false` in `~/.grok/config.toml` or when the `GROK_AGENT_DASHBOARD=0` env var is set.
      Dashboard,
  }
 +/// Split a pi-style single-token model reference `<model>[:<effort>]`,
@@ -92,7 +92,7 @@ index be68b70..0576542 100644
  /// Arguments for the `openai` subcommand.
  #[derive(Debug, clap::Args, Clone)]
  pub struct OpenaiArgs {
-@@ -1395,6 +1416,40 @@ mod tests {
+@@ -1508,6 +1529,40 @@ mod tests {
              PagerArgs::try_parse_from(["grok", "--trust-folder"]).expect("--trust-folder parses");
          assert!(alias.trust);
      }
@@ -134,17 +134,19 @@ index be68b70..0576542 100644
      fn reasoning_effort_and_effort_alias_parse_same_field() {
          let long = PagerArgs::try_parse_from(["grok", "--reasoning-effort", "high"])
 diff --git a/crates/codegen/xai-grok-pager/src/slash/commands/model.rs b/crates/codegen/xai-grok-pager/src/slash/commands/model.rs
-index f8ff8c5..dfde3bd 100644
+index 1263320b..92978e04 100644
 --- a/crates/codegen/xai-grok-pager/src/slash/commands/model.rs
 +++ b/crates/codegen/xai-grok-pager/src/slash/commands/model.rs
-@@ -78,6 +78,30 @@ impl SlashCommand for ModelCommand {
+@@ -52,9 +52,31 @@ impl SlashCommand for ModelCommand {
              return CommandResult::Action(Action::SetDefaultModel(id));
          }
  
+-        // A trailing effort token on a reasoning model makes a session-scoped switch (not persisted as default)
+-        // Resolve via the shared gate so a rejected level (e.g. `none` on grok-4.5) reports the effort error with the model's offered ids.
+-        // Without it the fall-through reports "Unknown model: … none"
 +        // pi-style single-token reference: `<model>:<effort>`, e.g.
-+        // `/model openai-codex/gpt-5.5:xhigh`. Split on the last colon so
-+        // model ids containing colons still resolve via the exact match
-+        // above; the suffix must be an effort the model offers.
++        // `/model openai-codex/gpt-5.5:xhigh`. Exact ids were tried above,
++        // so model ids containing colons remain unambiguous.
 +        if let Some((prefix, token)) = trimmed.rsplit_once(':')
 +            && !prefix.trim_end().is_empty()
 +            && !token.is_empty()
@@ -165,10 +167,12 @@ index f8ff8c5..dfde3bd 100644
 +            };
 +        }
 +
-         // Trailing effort token + reasoning model → session-scoped switch
-         // (not persisted as default). Resolve via the shared gate so a rejected
-         // level (e.g. `none` on grok-4.5) surfaces the effort error with the
-@@ -386,6 +410,41 @@ mod tests {
++        // A trailing whitespace-separated effort token also makes a
++        // session-scoped switch (not persisted as the default).
+         if let Some((prefix, token)) = split_trailing_token(trimmed)
+             && let Some(id) = resolve_model(ctx.models, prefix)
+             && ctx
+@@ -373,6 +395,41 @@ mod tests {
          }
      }
  
@@ -209,7 +213,4 @@ index f8ff8c5..dfde3bd 100644
 +
      #[test]
      fn run_rejects_unoffered_effort_with_effort_error_not_unknown_model() {
-         // Regression: previously `resolve_effort_token_for` returned None and
--- 
-2.47.3
-
+         // Regression: previously `resolve_effort_token_for` returned None and the handler fell through to `Unknown model: Reasoning X none`

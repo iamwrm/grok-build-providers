@@ -1,20 +1,22 @@
 # IV-0010: Prefer Responses server-side compaction for GPT models
 
-**Status:** implemented in durable patch `0017`; live GPT compaction and checkpoint replay plus explicit UI outcome reporting verified, live failure fallback not intentionally induced  
+**Status:** retired from the local stack after the Grok `1.0.13` rebase
 **Upstream:** `checkouts/grok-build`  
 **Reference:** `IgorWarzocha/howaboua-pi-stuff` remote compaction v2 implementation  
-**Deliverable:** `patches/grok-build/0017-Prefer-Responses-remote-compaction-for-GPT-models.patch`  
-**Implementation base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)  
+**Deliverable:** none — current upstream compaction and checkpoint behavior is authoritative
+**Implementation base:** `bb7f39d5858cbf5e00de639367f59debbdcb0138` (Grok `1.0.13`)  
 **Patch-0017 checkpoint:** source commit `e555274`; clean-room 17-patch head `b4b1d76`; tree `7ffd123dca8e25be6461cda7328f2b546406bb98`; patch SHA-256 `85f0a346879fe26258c4e14cac00c84a5149ce04af25adf6df615aa551dd0ba9`  
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
+
+> **Grok 1.0.13 rebase:** Former patch `0017` was removed because the current upstream compaction/replay stack supersedes the local overlay. The investigation and live checkpoints below are preserved as historical evidence.
 
 ## Lifecycle map
 
 - **Why this exists:** prefer the provider's opaque Responses compaction for
   GPT models while retaining Grok Build's portable text summarizer as a
   failure fallback.
-- **Durable implementation:** patch `0017`; the disposable reference clones
-  and implementation checkout are not lifecycle roots.
+- **Durable implementation:** upstream Grok `1.0.13`; this repository no longer carries the former remote-compaction patch.
+
 - **Known consumers:** generic Responses sampling, ChatGPT Codex from
   [IV-0001](IV-0001-openai-oauth.md), exact-origin native-state replay from
   [IV-0008](IV-0008-mid-session-model-switch.md), session persistence, manual

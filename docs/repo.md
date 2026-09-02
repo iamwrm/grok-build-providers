@@ -1,6 +1,7 @@
 # Repo layout & workflow
 
-This repo tracks work against upstream projects **without** forks or submodules.
+This repository carries reviewable patch series on top of upstream projects
+without forks or submodules.
 
 ## Upstreams
 
@@ -9,21 +10,18 @@ This repo tracks work against upstream projects **without** forks or submodules.
 
 ## Layout
 
-```
-checkouts/          # plain git clones of upstreams (gitignored, disposable)
-patches/            # durable patch files, grouped by upstream
-configs/            # advanced provider-config examples
-projects/            # standalone proofs of concept owned by initiatives
-.github/workflows/  # clean-room build/release automation
-docs/               # IV lifecycle maps, DC doctrine, and workflow guidance
+```text
+checkouts/          # disposable local clones of upstreams (gitignored)
+patches/            # durable, ordered patch series grouped by upstream
+configs/            # advanced provider configuration examples
+projects/           # standalone initiative-owned proofs of concept
+.github/workflows/  # clean-room build and release automation
+docs/               # lifecycle maps, decisions, and maintenance guidance
 ```
 
-## Why not forks or submodules?
-
-- Forks add a remote-management burden and drift from upstream.
-- Submodules pin SHAs, are easy to break, and are painful for everyone.
-- Plain clones in `checkouts/` are disposable; the durable objects are the
-  patch files in `patches/`, which are small, reviewable, and rebased easily.
+The durable source of truth is the patch files plus the pinned upstream commit.
+For grok-build, the current base is
+`bb7f39d5858cbf5e00de639367f59debbdcb0138` (Grok `1.0.13`).
 
 ## Setup
 
@@ -33,113 +31,98 @@ git clone https://github.com/xai-org/grok-build checkouts/grok-build
 git clone https://github.com/earendil-works/pi checkouts/pi
 ```
 
-`checkouts/` is in `.gitignore` — delete and re-clone freely.
+`checkouts/` is ignored and may be deleted or recreated at any time.
 
-## Working on a change
-
-1. Hack inside `checkouts/<project>/` on a branch or dirty tree.
-2. Export the change as the next numbered patch in the existing stack. The
-   grok-build series is based on pinned commit
-   `500129c714ad1b10e6095481f4a8387a2ec52649`, not whatever `origin/main`
-   happens to contain:
-
-   ```bash
-   cd checkouts/grok-build
-   # Example: export one newly committed patch after current patch 0017.
-   git format-patch HEAD~1..HEAD --start-number 18 --numbered \
-     -o ../../patches/grok-build/
-   ```
-
-   For an uncommitted change, use `git diff` but still give the output the
-   next stack number; do not create another `0001`.
-
-3. Commit the patch in this repo.
-
-## Applying patches to a fresh checkout
-
-Use the same pinned base as CI, then apply the complete ordered series:
+## Applying the grok-build series
 
 ```bash
 cd checkouts/grok-build
 git fetch origin
-
-git switch --detach 500129c714ad1b10e6095481f4a8387a2ec52649
+git switch --detach bb7f39d5858cbf5e00de639367f59debbdcb0138
 git am ../../patches/grok-build/*.patch
 ```
 
-Both `.github/workflows/build.yml` and `.github/workflows/release.yml` perform
-this exact clean-room operation before compiling. Their matching
-`GROK_BUILD_BASE` values are the operational source of truth for the base SHA;
-keep both workflows, this document, and initiative headers synchronized.
+Both build and release CI perform that same clean-room operation. Keep the
+base SHA synchronized in this document, `README.md`, `build.yml`, and
+`release.yml`.
+
+## Working on a change
+
+1. Make and test the change in `checkouts/<project>/`.
+2. Commit it as a feature-scoped change on top of the complete current stack.
+3. Fold follow-up fixes into their owning patch rather than appending repair
+   patches.
+4. Re-export the ordered series with `git format-patch` and clean-room apply it
+   before replacing the durable files.
+
+The current grok-build stack ends at patch `0009`; a genuinely independent new
+change starts at `0010`:
+
+```bash
+cd checkouts/grok-build
+git format-patch HEAD~1..HEAD --start-number 10 --numbered \
+  -o ../../patches/grok-build/
+```
 
 ## Rebasing onto newer upstream
 
-Moving the series to `origin/main` is an intentional rebase, not the normal
-apply procedure. Use a temporary branch/worktree, apply or rebase each commit
-in order, resolve and test conflicts, then re-export **all affected patches**
-with their existing numbers. Finally, clean-room `git am` the complete series
-onto the new base and update `GROK_BUILD_BASE` in both workflows, initiative
-docs, and validation hashes together. Do not reset a working checkout to
-`origin/main` and assume the pinned series will still apply unchanged.
+Treat a base move as a reduction exercise, not a blind replay:
 
-## Agentic workspace documents
+1. Compare each local behavior with current upstream and drop patches whose
+   behavior is now native.
+2. Rebuild the remaining changes as coherent feature commits; combine OAuth
+   with its transport, shared catalogs with catalogs, and fixups with their
+   owning feature.
+3. Renumber and export the complete replacement series.
+4. Clean-room `git am` it onto the new base, run focused tests, and compile the
+   pager on Linux, macOS, and Windows.
+5. Update the base SHA, initiative front matter, and CI pins together.
 
-Read [DC-0001](DC-0001-agentic-workspace.md) for the repository-wide IV/DC
-workflow and interpretation doctrine.
+## Current grok-build patch stack
 
-Every initiative gets a root document in `docs/`, following the pattern of
-[`docs/IV-0001-openai-oauth.md`](IV-0001-openai-oauth.md):
+| Patch | Purpose |
+|---:|---|
+| `0001` | OpenAI ChatGPT OAuth, credential handling, CLI, and Codex Responses transport |
+| `0002` | Anthropic OAuth, credential handling, CLI, and Claude Messages transport |
+| `0003` | Credential-gated OpenAI and Anthropic model catalogs |
+| `0004` | `provider/model:effort` parsing and selection |
+| `0005` | Windows portability for protoc hints and MSVC release linking |
+| `0006` | Dynamically controllable raw sampling diagnostics |
+| `0007` | Completed-turn prompt-cycle usage display |
+| `0008` | Atomic batches of exact file edits |
+| `0009` | Codex parallel tool-call identity and deterministic result ordering |
 
-- **Naming:** `docs/IV-NNNN-short-slug.md` — a sequential initiative number
-  (`IV-0001`, `IV-0002`, …) plus a short descriptive slug.
-- **Lifecycle role:** explain why related artifacts exist and record relevant
-  requirements, external knowledge, facts, assumptions, decisions, non-goals,
-  implementation locations, known consumers, evidence, and reproduction.
-- **Progressive disclosure:** split only when a semantically local part no
-  longer fits one coherent working context. Keep an annotated child link in
-  the root IV, and link every child back to its root.
-- **Maintenance:** keep the IV, implementation, consumers, and reproduction
-  path synchronized. Mark stale evidence as a checkpoint and rerun it when
-  current truth matters.
-- **Retirement:** begin at the root IV, follow linked and searched consumers,
-  preserve behavior still justified elsewhere, verify, then remove or mark
-  retired artifacts and links.
-
-Horizontal guidance uses `docs/DC-NNNN-short-slug.md`. DCs inform judgment
-across initiatives; they are not a deterministic policy or dependency engine.
-Links in both dimensions are attention routes and lifecycle clues, so annotate
-why a reader should follow them.
-
-When patches are rewritten or combined, update the owning initiative docs to
-the resulting layout, remove superseded descriptions, and clean-room apply the
-complete replacement series before deleting old patch files.
+The rebase from Grok `0.2.114` to `1.0.13` reduced the stack from 17 patches to
+nine. Local patches for maximum reasoning effort, cache-write accounting,
+native-reasoning replay gating, and Responses remote compaction were removed
+because the current upstream implementation supersedes those overlays.
 
 ## Current initiative map
 
-| Initiative | Patches | Purpose |
+| Initiative | Current patches | Purpose |
 |---|---:|---|
-| [IV-0001](IV-0001-openai-oauth.md) | `0001–0004` | OpenAI ChatGPT-plan OAuth and Codex transport |
-| [IV-0002](IV-0002-max-thinking.md) | `0005` | Distinct `max` reasoning level |
-| [IV-0003](IV-0003-anthropic-oauth.md) | `0006–0008` | Anthropic OAuth, Claude catalog, native `xhigh` |
-| [IV-0004](IV-0004-release-ci.md) | `0009–0010` | Cross-platform build/release CI and Windows portability |
-| [IV-0005](IV-0005-last-turn-stats.md) | `0011–0013` | Raw sampling diagnostics (incl. sampling-layer panic fix), turn-end metrics |
-| [IV-0006](IV-0006-batch-file-edits.md) | `0014` | Atomic multi-edit search/replace for one file |
-| [IV-0007](IV-0007-codex-parallel-tools.md) | `0015` | Codex parallel tool-call wire + result ordering |
-| [IV-0008](IV-0008-mid-session-model-switch.md) | `0016` | Safe native reasoning replay across model/provider switches |
-| [IV-0009](IV-0009-raylib-paste-hover.md) | — | Standalone raylib paste-chip hover and scrolling-preview POC |
-| [IV-0010](IV-0010-openai-server-compaction.md) | `0017` | Remote Responses compaction v2 for GPT models with portable fallback |
+| [IV-0001](IV-0001-openai-oauth.md) | `0001`, `0003–0004` | OpenAI ChatGPT-plan OAuth and Codex transport |
+| [IV-0002](IV-0002-max-thinking.md) | upstream | Distinct `max` reasoning effort |
+| [IV-0003](IV-0003-anthropic-oauth.md) | `0002–0004` | Anthropic OAuth, Claude transport, catalog, and effort support |
+| [IV-0004](IV-0004-release-ci.md) | `0005` + workflows | Cross-platform build/release CI and Windows portability |
+| [IV-0005](IV-0005-last-turn-stats.md) | `0006–0007` | Raw sampling diagnostics and completed-turn metrics |
+| [IV-0006](IV-0006-batch-file-edits.md) | `0008` | Atomic multi-edit search/replace for one file |
+| [IV-0007](IV-0007-codex-parallel-tools.md) | `0009` | Codex parallel tool-call wire identity and result ordering |
+| [IV-0008](IV-0008-mid-session-model-switch.md) | upstream | Native-reasoning replay safety across route changes |
+| [IV-0009](IV-0009-raylib-paste-hover.md) | — | Standalone raylib paste-chip hover proof of concept |
+| [IV-0010](IV-0010-openai-server-compaction.md) | upstream | Responses compaction and checkpoint replay behavior |
 
-## Conventions
+Detailed IV sections below their rebase notices preserve historical design and
+validation checkpoints. Their current front matter and this map are the
+operational ownership references.
 
-- One directory per upstream under `patches/` (`patches/grok-build/`, `patches/pi/`).
-- One root doc per initiative under `docs/` (`IV-NNNN-slug.md`), as described above.
-- Horizontal doctrine uses `docs/DC-NNNN-slug.md`; read applicable DCs before changes.
-- Number patches (`0001-...`, `0002-...`) so apply order is explicit.
-- If a patch stops applying cleanly, fix it and commit the updated patch —
-  the patch files are the source of truth, not the checkouts.
-- A bug fix for code **introduced by an existing patch** is folded into that
-  patch, not appended as a new number: clean-room apply the series, reorder
-  and `fixup` with `git rebase -i` (merging the commit messages), re-export
-  the **full** series with `git format-patch`, and verify the resulting tree
-  hash (`git rev-parse HEAD^{tree}`) is unchanged. New numbers are reserved
-  for changes with independent scope or a new initiative.
+## Document conventions
+
+Read [DC-0001](DC-0001-agentic-workspace.md) before changing or retiring an
+initiative. Root initiative documents use `docs/IV-NNNN-short-slug.md` and
+record intent, assumptions, implementation ownership, consumers, evidence,
+and retirement state. Horizontal guidance uses `docs/DC-NNNN-short-slug.md`.
+
+When patches are combined or removed, update the owning IV front matter and
+this map, preserve useful historical evidence as an explicitly labeled
+checkpoint, and verify the full replacement series before deleting old files.

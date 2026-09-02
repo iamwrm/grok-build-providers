@@ -1,18 +1,20 @@
 # IV-0003: Add Anthropic (Claude Pro/Max plan) OAuth provider to grok-build
 
-**Status:** implemented, exported, and live-verified at the recorded checkpoint
+**Status:** implemented in the current nine-patch stack
 **Upstreams:** `checkouts/pi` (reference implementation), `checkouts/grok-build` (patch target)
-**Deliverable:** patches `0006–0008`, continuing the IV-0001/IV-0002 stack
-**Implementation base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
+**Deliverable:** patches `0002–0004` in `patches/grok-build/`
+**Implementation base:** `bb7f39d5858cbf5e00de639367f59debbdcb0138` (Grok `1.0.13`)
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
+
+> **Grok 1.0.13 rebase:** OAuth and Claude Messages transport are now one feature patch (`0002`); the shared authenticated catalogs and provider/model:effort parser live in `0003` and `0004`. Older patch numbers below are historical checkpoints.
 
 ## Lifecycle map
 
 - **Why this exists:** let Claude Pro/Max subscribers use supported adaptive
   Claude models through Grok while preserving the consumer-OAuth request
   contract and classifier escape hatch.
-- **Durable implementation:** patches `0006–0008` plus
-  `configs/anthropic-oauth.toml`.
+- **Durable implementation:** patches `0002–0004` plus `configs/anthropic-oauth.toml`.
+
 - **Known consumers:** Anthropic login CLI, shell credential refresh, sampler
   Messages shaping, pager catalog/effort menus,
   [IV-0002](IV-0002-max-thinking.md),

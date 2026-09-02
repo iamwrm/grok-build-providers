@@ -23,7 +23,7 @@ on:
 env:
   # Base commit the patch series applies onto (see the IV documents).
   # Keep synchronized with build.yml and the exported patch baseline.
-  GROK_BUILD_BASE: 500129c714ad1b10e6095481f4a8387a2ec52649
+  GROK_BUILD_BASE: bb7f39d5858cbf5e00de639367f59debbdcb0138
   CARGO_INCREMENTAL: "0"
   # No debug info in release artifacts: the workspace is large enough that
   # MSVC's PDB hits its public-symbol limit at link time (fatal LNK4319 on

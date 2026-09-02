@@ -1,20 +1,21 @@
 # IV-0002: Add `max` thinking level (above `xhigh`) to grok-build
 
-**Status:** implemented and exported
+**Status:** upstreamed; no local patch
 **Upstreams:** `checkouts/pi` (reference semantics), `checkouts/grok-build` (patch target)
-**Deliverable:** patch `0005` in `patches/grok-build/`
-**Implementation base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
+**Deliverable:** none — Grok `1.0.13` supplies the retained `max` effort behavior
+**Implementation base:** `bb7f39d5858cbf5e00de639367f59debbdcb0138` (Grok `1.0.13`)
 **Depends on:** [IV-0001](IV-0001-openai-oauth.md) — OpenAI Codex OAuth provider, patches `0001–0004`
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
+
+> **Grok 1.0.13 rebase:** Former local patch `0005` was removed because current upstream owns the capability. The implementation discussion below is retained as a historical design and validation checkpoint.
 
 ## Lifecycle map
 
 - **Why this exists:** preserve `max` as a real capability above `xhigh` where
   providers support it, without breaking the historical alias behavior on
   other models.
-- **Durable implementation:** patch `0005`; upstream now owns the canonical
-  `Max` enum and wire mapping, while the patch owns model gating, fallback
-  behavior, subagent handling, and user docs.
+- **Durable implementation:** upstream Grok `1.0.13`; this repository no longer carries a patch for the behavior.
+
 - **Known consumers:** CLI and pager effort parsing, model menus, Responses and
   Messages conversion, subagent overrides, [IV-0001](IV-0001-openai-oauth.md),
   and [IV-0003](IV-0003-anthropic-oauth.md).
@@ -34,7 +35,7 @@
 
 ## Anthropic interaction
 
-Upstream Grok `0.2.114` already provides the canonical `Max` level and native
+Upstream Grok `1.0.13` already provides the canonical `Max` level and native
 OpenAI Responses mapping. Patch `0005` now supplies the catalog and UX policy.
 The Anthropic-specific per-model menu gating lives in IV-0003 patch `0008`.
 

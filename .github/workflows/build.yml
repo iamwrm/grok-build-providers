@@ -13,7 +13,7 @@ on:
 
 env:
   # Keep synchronized with release.yml and the exported patch baseline.
-  GROK_BUILD_BASE: 500129c714ad1b10e6095481f4a8387a2ec52649
+  GROK_BUILD_BASE: bb7f39d5858cbf5e00de639367f59debbdcb0138
   CARGO_INCREMENTAL: "0"
   # CI does not retain these development binaries, so omit debug information
   # to reduce linker memory, build time, and runner disk use.

@@ -1,0 +1,396 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grok-build-providers-verify <verify@invalid>
+Date: Tue, 1 Sep 2026 09:52:40 +0000
+Subject: [PATCH 3/9] Add authenticated OpenAI and Anthropic model catalogs
+
+---
+ .../xai-grok-pager/src/acp/model_state.rs     |  63 +++-
+ .../xai-grok-shell/src/agent/config.rs        |   5 +
+ .../src/agent/config/provider_catalogs.rs     | 274 ++++++++++++++++++
+ 3 files changed, 340 insertions(+), 2 deletions(-)
+ create mode 100644 crates/codegen/xai-grok-shell/src/agent/config/provider_catalogs.rs
+
+diff --git a/crates/codegen/xai-grok-pager/src/acp/model_state.rs b/crates/codegen/xai-grok-pager/src/acp/model_state.rs
+index eecba761..6ce8e70b 100644
+--- a/crates/codegen/xai-grok-pager/src/acp/model_state.rs
++++ b/crates/codegen/xai-grok-pager/src/acp/model_state.rs
+@@ -189,10 +189,23 @@ impl ModelState {
+             return Some(option.value);
+         }
+         let parsed = token.parse::<ReasoningEffort>().ok()?;
++        if options.iter().any(|option| option.value == parsed) {
++            return Some(parsed);
++        }
++
++        // Provider menus can expose only one side of the two highest levels:
++        // OpenAI models without native `max` accept `xhigh`, while some
++        // Anthropic models expose `max` but no distinct `xhigh`. Keep the
++        // user's intent at the strongest supported neighboring level.
++        let compatible = match parsed {
++            ReasoningEffort::Max => ReasoningEffort::Xhigh,
++            ReasoningEffort::Xhigh => ReasoningEffort::Max,
++            _ => return None,
++        };
+         options
+             .iter()
+-            .find(|opt| opt.value == parsed)
+-            .map(|o| o.value)
++            .any(|option| option.value == compatible)
++            .then_some(compatible)
+     }
+ 
+     /// Gate on the model's support flag first, then resolve the token (menu id or canonical level).
+@@ -536,4 +549,50 @@ mod tests {
+                 .current_model_accepts_images()
+         );
+     }
++
++    #[test]
++    fn max_and_xhigh_fall_back_to_the_strongest_offered_neighbor() {
++        let xhigh_id = acp::ModelId::new(Arc::from("openai-codex/gpt-test"));
++        let max_id = acp::ModelId::new(Arc::from("anthropic/claude-test"));
++        let mut state = ModelState::default();
++        state.available.insert(
++            xhigh_id.clone(),
++            acp::ModelInfo::new(xhigh_id.clone(), "OpenAI".to_string()).meta(Some(
++                serde_json::json!({
++                    "supportsReasoningEffort": true,
++                    "reasoningEfforts": [
++                        {"id": "high", "value": "high", "label": "High"},
++                        {"id": "xhigh", "value": "xhigh", "label": "Extra high"}
++                    ]
++                })
++                .as_object()
++                .expect("object")
++                .clone(),
++            )),
++        );
++        state.available.insert(
++            max_id.clone(),
++            acp::ModelInfo::new(max_id.clone(), "Anthropic".to_string()).meta(Some(
++                serde_json::json!({
++                    "supportsReasoningEffort": true,
++                    "reasoningEfforts": [
++                        {"id": "high", "value": "high", "label": "High"},
++                        {"id": "max", "value": "max", "label": "Max"}
++                    ]
++                })
++                .as_object()
++                .expect("object")
++                .clone(),
++            )),
++        );
++
++        assert_eq!(
++            state.resolve_effort_token_for(&xhigh_id, "max"),
++            Some(ReasoningEffort::Xhigh)
++        );
++        assert_eq!(
++            state.resolve_effort_token_for(&max_id, "xhigh"),
++            Some(ReasoningEffort::Max)
++        );
++    }
+ }
+diff --git a/crates/codegen/xai-grok-shell/src/agent/config.rs b/crates/codegen/xai-grok-shell/src/agent/config.rs
+index 70e0fa9d..0c84dd16 100644
+--- a/crates/codegen/xai-grok-shell/src/agent/config.rs
++++ b/crates/codegen/xai-grok-shell/src/agent/config.rs
+@@ -22,6 +22,7 @@ use xai_grok_sampling_types::{
+ use xai_grok_tools::types::compat::{
+     COMPAT_CELLS, CompatConfig, CompatConfigToml, CompatRemoteKey, CompatSurface, CompatVendor,
+ };
++mod provider_catalogs;
+ /// Determines behavior like relay sync enablement.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+ pub enum AgentMode {
+@@ -3418,6 +3419,10 @@ pub(crate) fn resolve_model_list(
+         }
+         resolved = prefetched;
+     }
++    // Provider catalogs are credential-gated and inserted before user overrides.
++    // Existing remote/default entries win on key collisions; `[model.*]` may still
++    // customize every inserted entry below.
++    provider_catalogs::extend_authenticated(&mut resolved);
+     for (key, model_override) in &cfg.config_models {
+         let had_base = resolved.contains_key(key);
+         let base = resolved.shift_remove(key);
+diff --git a/crates/codegen/xai-grok-shell/src/agent/config/provider_catalogs.rs b/crates/codegen/xai-grok-shell/src/agent/config/provider_catalogs.rs
+new file mode 100644
+index 00000000..27901cbb
+--- /dev/null
++++ b/crates/codegen/xai-grok-shell/src/agent/config/provider_catalogs.rs
+@@ -0,0 +1,274 @@
++//! Built-in catalogs for consumer-plan OAuth providers.
++//!
++//! Entries are visible only after the matching provider login succeeds. They
++//! are inserted before `[model.*]` overrides, so users retain normal control
++//! over every field while remote entries keep priority on key collisions.
++
++use super::{ApiBackend, AuthScheme, ModelEntry, ModelInfo};
++use indexmap::IndexMap;
++use std::num::NonZeroU64;
++use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
++
++const OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
++const ANTHROPIC_MESSAGES_BASE_URL: &str = "https://api.anthropic.com/v1";
++
++pub(super) fn extend_authenticated(models: &mut IndexMap<String, ModelEntry>) {
++    if crate::auth::openai_codex::read_credential().is_some() {
++        insert_missing(models, openai_entries());
++    }
++    if crate::auth::anthropic::read_credential().is_some() {
++        insert_missing(models, anthropic_entries());
++    }
++}
++
++fn insert_missing(
++    models: &mut IndexMap<String, ModelEntry>,
++    entries: impl IntoIterator<Item = (String, ModelEntry)>,
++) {
++    for (key, entry) in entries {
++        models.entry(key).or_insert(entry);
++    }
++}
++
++fn entry(
++    provider: &str,
++    slug: &str,
++    name: &str,
++    description: &str,
++    base_url: &str,
++    backend: ApiBackend,
++    auth_scheme: AuthScheme,
++    context_window: u64,
++    max_completion_tokens: Option<u32>,
++    default_effort: ReasoningEffort,
++    efforts: impl IntoIterator<Item = ReasoningEffort>,
++) -> (String, ModelEntry) {
++    let key = format!("{provider}/{slug}");
++    let mut info = ModelInfo::fallback(slug);
++    info.id = Some(key.clone());
++    info.base_url = base_url.to_owned();
++    info.name = Some(name.to_owned());
++    info.description = Some(description.to_owned());
++    info.api_backend = backend;
++    info.auth_scheme = auth_scheme;
++    info.context_window = NonZeroU64::new(context_window).expect("catalog context is non-zero");
++    info.max_completion_tokens = max_completion_tokens;
++    info.supports_reasoning_effort = true;
++    info.reasoning_effort = Some(default_effort);
++    info.reasoning_efforts = efforts
++        .into_iter()
++        .map(|value| ReasoningEffortOption {
++            id: value.to_string(),
++            value,
++            label: effort_label(value).to_owned(),
++            description: None,
++            default: value == default_effort,
++        })
++        .collect();
++
++    (
++        key,
++        ModelEntry {
++            info,
++            api_key: None,
++            env_key: None,
++            auth_provider: None,
++            api_base_url: None,
++        },
++    )
++}
++
++fn effort_label(effort: ReasoningEffort) -> &'static str {
++    match effort {
++        ReasoningEffort::Low => "Low",
++        ReasoningEffort::Medium => "Medium",
++        ReasoningEffort::High => "High",
++        ReasoningEffort::Xhigh => "Extra high",
++        ReasoningEffort::Max => "Max",
++        ReasoningEffort::None => "None",
++        ReasoningEffort::Minimal => "Minimal",
++    }
++}
++
++fn openai_entries() -> impl Iterator<Item = (String, ModelEntry)> {
++    const STANDARD_CONTEXT: u64 = 272_000;
++    const GPT_56_CONTEXT: u64 = 372_000;
++    const SPARK_CONTEXT: u64 = 128_000;
++    const MODELS: [(&str, &str, u64); 7] = [
++        (
++            "gpt-5.3-codex-spark",
++            "GPT-5.3 Codex Spark (ChatGPT)",
++            SPARK_CONTEXT,
++        ),
++        ("gpt-5.4", "GPT-5.4 (ChatGPT)", STANDARD_CONTEXT),
++        ("gpt-5.4-mini", "GPT-5.4 mini (ChatGPT)", STANDARD_CONTEXT),
++        ("gpt-5.5", "GPT-5.5 (ChatGPT)", STANDARD_CONTEXT),
++        ("gpt-5.6-luna", "GPT-5.6 Luna (ChatGPT)", GPT_56_CONTEXT),
++        ("gpt-5.6-sol", "GPT-5.6 Sol (ChatGPT)", GPT_56_CONTEXT),
++        ("gpt-5.6-terra", "GPT-5.6 Terra (ChatGPT)", GPT_56_CONTEXT),
++    ];
++
++    MODELS.into_iter().map(|(slug, name, context_window)| {
++        let mut efforts = vec![
++            ReasoningEffort::Low,
++            ReasoningEffort::Medium,
++            ReasoningEffort::High,
++            ReasoningEffort::Xhigh,
++        ];
++        if slug.starts_with("gpt-5.6") {
++            efforts.push(ReasoningEffort::Max);
++        }
++        entry(
++            "openai-codex",
++            slug,
++            name,
++            "OpenAI Codex via ChatGPT plan",
++            OPENAI_CODEX_BASE_URL,
++            ApiBackend::Responses,
++            AuthScheme::ChatgptOauth,
++            context_window,
++            None,
++            ReasoningEffort::Medium,
++            efforts,
++        )
++    })
++}
++
++fn anthropic_entries() -> impl Iterator<Item = (String, ModelEntry)> {
++    const CONTEXT: u64 = 1_000_000;
++    const MODELS: [(&str, &str, u32, bool); 6] = [
++        (
++            "claude-opus-4-8",
++            "Claude Opus 4.8 (Anthropic)",
++            128_000,
++            true,
++        ),
++        (
++            "claude-opus-4-7",
++            "Claude Opus 4.7 (Anthropic)",
++            128_000,
++            true,
++        ),
++        (
++            "claude-opus-4-6",
++            "Claude Opus 4.6 (Anthropic)",
++            128_000,
++            false,
++        ),
++        (
++            "claude-sonnet-5",
++            "Claude Sonnet 5 (Anthropic)",
++            128_000,
++            true,
++        ),
++        (
++            "claude-sonnet-4-6",
++            "Claude Sonnet 4.6 (Anthropic)",
++            64_000,
++            false,
++        ),
++        (
++            "claude-fable-5",
++            "Claude Fable 5 (Anthropic)",
++            128_000,
++            true,
++        ),
++    ];
++
++    MODELS
++        .into_iter()
++        .map(|(slug, name, max_completion_tokens, has_native_xhigh)| {
++            let mut efforts = vec![
++                ReasoningEffort::Low,
++                ReasoningEffort::Medium,
++                ReasoningEffort::High,
++            ];
++            if has_native_xhigh {
++                efforts.push(ReasoningEffort::Xhigh);
++            }
++            efforts.push(ReasoningEffort::Max);
++            entry(
++                "anthropic",
++                slug,
++                name,
++                "Anthropic Claude via Claude Pro/Max plan",
++                ANTHROPIC_MESSAGES_BASE_URL,
++                ApiBackend::Messages,
++                AuthScheme::AnthropicOauth,
++                CONTEXT,
++                Some(max_completion_tokens),
++                ReasoningEffort::High,
++                efforts,
++            )
++        })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn openai_catalog_routes_to_chatgpt_responses() {
++        let entries: Vec<_> = openai_entries().collect();
++        assert_eq!(entries.len(), 7);
++        for (key, entry) in entries {
++            let slug = key.strip_prefix("openai-codex/").expect("provider prefix");
++            assert_eq!(entry.info.id.as_deref(), Some(key.as_str()));
++            assert_eq!(entry.info.model, slug);
++            assert_eq!(entry.info.base_url, OPENAI_CODEX_BASE_URL);
++            assert_eq!(entry.info.api_backend, ApiBackend::Responses);
++            assert_eq!(entry.info.auth_scheme, AuthScheme::ChatgptOauth);
++            assert_eq!(
++                entry
++                    .info
++                    .reasoning_efforts
++                    .iter()
++                    .any(|option| option.value == ReasoningEffort::Max),
++                slug.starts_with("gpt-5.6")
++            );
++        }
++    }
++
++    #[test]
++    fn anthropic_catalog_routes_to_oauth_messages() {
++        let entries: Vec<_> = anthropic_entries().collect();
++        assert_eq!(entries.len(), 6);
++        for (key, entry) in entries {
++            let slug = key.strip_prefix("anthropic/").expect("provider prefix");
++            assert_eq!(entry.info.id.as_deref(), Some(key.as_str()));
++            assert_eq!(entry.info.model, slug);
++            assert_eq!(entry.info.base_url, ANTHROPIC_MESSAGES_BASE_URL);
++            assert_eq!(entry.info.api_backend, ApiBackend::Messages);
++            assert_eq!(entry.info.auth_scheme, AuthScheme::AnthropicOauth);
++            assert!(
++                entry
++                    .info
++                    .reasoning_efforts
++                    .iter()
++                    .any(|option| option.value == ReasoningEffort::Max)
++            );
++            let native_xhigh = matches!(
++                slug,
++                "claude-opus-4-8" | "claude-opus-4-7" | "claude-sonnet-5" | "claude-fable-5"
++            );
++            assert_eq!(
++                entry
++                    .info
++                    .reasoning_efforts
++                    .iter()
++                    .any(|option| option.value == ReasoningEffort::Xhigh),
++                native_xhigh
++            );
++        }
++    }
++
++    #[test]
++    fn insertion_never_replaces_an_existing_entry() {
++        let mut models = IndexMap::new();
++        let (key, mut existing) = openai_entries().next().expect("entry");
++        existing.info.name = Some("remote wins".to_owned());
++        models.insert(key.clone(), existing);
++        insert_missing(&mut models, openai_entries());
++        assert_eq!(models[&key].info.name.as_deref(), Some("remote wins"));
++    }
++}

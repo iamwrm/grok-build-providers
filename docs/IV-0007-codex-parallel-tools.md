@@ -1,19 +1,21 @@
 # IV-0007: Improve Responses tool-call identity and concurrent result ordering
 
-**Status:** implemented in durable patch `0015`; historical integration checkpoints recorded below
+**Status:** implemented in durable patch `0009`
 **Upstream:** `checkouts/grok-build`
-**Deliverable:** `patches/grok-build/0015-Improve-Codex-parallel-tool-call-handling.patch`
-**Implementation base:** `500129c714ad1b10e6095481f4a8387a2ec52649` (Grok `0.2.114`)
+**Deliverable:** `patches/grok-build/0009-Improve-Codex-parallel-tool-call-handling.patch`
+**Implementation base:** `bb7f39d5858cbf5e00de639367f59debbdcb0138` (Grok `1.0.13`)
 **Patch-0015 checkpoint:** commit `84c9b7f`; 15-patch tree `4fcba74364770269399a76cb310d3a3305b0cc94`
 **Doctrine:** [DC-0001](DC-0001-agentic-workspace.md) — read before changing or retiring this initiative
+
+> **Grok 1.0.13 rebase:** This feature moved from patch `0015` to `0009` when the rebased stack was renumbered. Historical checkpoints below intentionally retain their original identifiers.
 
 ## Lifecycle map
 
 - **Why this exists:** permit multiple Responses tool calls, preserve native
   call identity across replay, and keep concurrent execution while making
   approved-call publication deterministic.
-- **Durable implementation:** patch `0015` across sampler request shaping,
-  Responses stream/history conversion, and the shared shell tool loop.
+- **Durable implementation:** patch `0009` across sampler request shaping, Responses stream/history conversion, and the shared shell tool loop.
+
 - **Known consumers:** ChatGPT Codex and generic Responses routes, cross-backend
   history projection, all providers using shared local-tool dispatch, and
   [IV-0006](IV-0006-batch-file-edits.md).
